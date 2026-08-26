@@ -654,7 +654,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 	defer func() { err = done(err) }()
 
 	assignment := actor.GetStatus().GetWorkerAssignment()
-	ateletConn, err := w.dialer.DialForWorker(assignment.GetWorkerNamespace(), assignment.GetWorkerPod())
+	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		return tele, err
 	}

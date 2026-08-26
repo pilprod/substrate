@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
 	grpcCodes "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
@@ -72,7 +73,7 @@ type ActorWorkflow struct {
 	store                actorWorkflowStore
 	workerCache          *workercache.Cache
 	scheduler            scheduling.Scheduler
-	dialer               *AteletDialer
+	dialer               workerExecutionDialer
 	actorTemplateLister  listersv1alpha1.ActorTemplateLister
 	workerPoolLister     listersv1alpha1.WorkerPoolLister
 	sandboxConfigLister  listersv1alpha1.SandboxConfigLister
@@ -84,12 +85,20 @@ type ActorWorkflow struct {
 	workflowDeadline time.Duration
 }
 
+// workerExecutionDialer resolves execution endpoints from the Substrate state
+// carried by a workflow. The target remains opaque to the workflow; the dialer
+// validates and interprets the provider-specific identity fields it requires.
+type workerExecutionDialer interface {
+	DialForWorker(assignment *ateapipb.WorkerAssignment) (*grpc.ClientConn, error)
+	DialForLocalSnapshot(local *ateapipb.LocalSnapshotInfo) (*grpc.ClientConn, error)
+}
+
 // NewActorWorkflow creates a new ActorWorkflow. workflowDeadline bounds how
 // long a single Resume/Suspend can run end-to-end; instruments may be nil.
 func NewActorWorkflow(
 	store actorWorkflowStore,
 	workerCache *workercache.Cache,
-	dialer *AteletDialer,
+	dialer workerExecutionDialer,
 	actorTemplateLister listersv1alpha1.ActorTemplateLister,
 	workerPoolLister listersv1alpha1.WorkerPoolLister,
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,

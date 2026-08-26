@@ -166,7 +166,7 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 		return "", status.Errorf(codes.FailedPrecondition, "CallAteletPause prerequisite not met for Actor: %s. No worker assignment", actorRef)
 	}
 
-	ateletConn, err := w.dialer.DialForWorker(assignment.GetWorkerNamespace(), assignment.GetWorkerPod())
+	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		if errors.Is(err, ErrWorkerPodNotFound) {
 			slog.ErrorContext(ctx, "Worker pod gone before checkpoint, crashing actor", "namespace", assignment.GetWorkerNamespace(), "pod", assignment.GetWorkerPod(), "in_progress_local_snapshot_name", actor.GetStatus().GetInProgressLocalSnapshotName())

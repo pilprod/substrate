@@ -140,7 +140,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 	workerPodNs := assignment.GetWorkerNamespace()
 	workerPodName := assignment.GetWorkerPod()
 
-	conn, err := w.dialer.DialForWorker(workerPodNs, workerPodName)
+	conn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		if errors.Is(err, ErrWorkerPodNotFound) {
 			slog.InfoContext(ctx, "worker pod not found, treating as terminated", slog.String("workerNamespace", workerPodNs), slog.String("workerPod", workerPodName))

@@ -218,7 +218,7 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 		return "", fmt.Errorf("actor is CRASHED because it was in SUSPENDING state but has no active worker")
 	}
 
-	ateletConn, err := w.dialer.DialForWorker(assignment.GetWorkerNamespace(), assignment.GetWorkerPod())
+	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		if errors.Is(err, ErrWorkerPodNotFound) {
 			slog.ErrorContext(ctx, "Worker pod gone before checkpoint, crashing actor", "namespace", assignment.GetWorkerNamespace(), "pod", assignment.GetWorkerPod(), "in_progress_snapshot_name", actor.GetStatus().GetInProgressSnapshotName())
@@ -286,7 +286,7 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 		return "", fmt.Errorf("actor is CRASHED because it was suspending a paused snapshot with no node recorded")
 	}
 
-	ateletConn, err := w.dialer.DialForAteletOnNode(local.GetNodeVmsWithLocalSnapshots()[0])
+	ateletConn, err := w.dialer.DialForLocalSnapshot(local)
 	if err != nil {
 		// No atelet on the node is indistinguishable from an atelet restart or
 		// informer lag, and the snapshot bytes may still be on its disk: stay

@@ -29,6 +29,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/substratex509"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc/credentials"
@@ -221,7 +222,7 @@ func TestDialForWorkerTarget(t *testing.T) {
 			}
 
 			d := newDialerForPods(t, workerPod, ateletPod)
-			conn, err := d.DialForWorker("team-a", "worker-1")
+			conn, err := d.DialForWorker(&ateapipb.WorkerAssignment{WorkerNamespace: "team-a", WorkerPod: "worker-1"})
 			if err != nil {
 				t.Fatalf("DialForWorker returned error: %v", err)
 			}
@@ -247,10 +248,26 @@ func TestDialForWorkerErrors(t *testing.T) {
 			Status:     corev1.PodStatus{PodIPs: []corev1.PodIP{{IP: "10.244.1.7"}}},
 		}
 		d := newDialerForPods(t, workerPod, ateletPod)
-		if _, err := d.DialForWorker("team-a", "no-such-worker"); !errors.Is(err, ErrWorkerPodNotFound) {
+		if _, err := d.DialForWorker(&ateapipb.WorkerAssignment{WorkerNamespace: "team-a", WorkerPod: "no-such-worker"}); !errors.Is(err, ErrWorkerPodNotFound) {
 			t.Fatalf("DialForWorker error = %v, want ErrWorkerPodNotFound", err)
 		}
 	})
+
+	for _, tc := range []struct {
+		name       string
+		assignment *ateapipb.WorkerAssignment
+	}{
+		{name: "nil assignment"},
+		{name: "missing namespace", assignment: &ateapipb.WorkerAssignment{WorkerPod: "worker-1"}},
+		{name: "missing pod", assignment: &ateapipb.WorkerAssignment{WorkerNamespace: "team-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewAteletDialer(nil, nil, "", "")
+			if _, err := d.DialForWorker(tc.assignment); !errors.Is(err, ErrWorkerPodNotFound) {
+				t.Fatalf("DialForWorker error = %v, want ErrWorkerPodNotFound", err)
+			}
+		})
+	}
 
 	t.Run("atelet without assigned IPs", func(t *testing.T) {
 		ateletPod := &corev1.Pod{
@@ -258,10 +275,28 @@ func TestDialForWorkerErrors(t *testing.T) {
 			Spec:       corev1.PodSpec{NodeName: "node-1"},
 		}
 		d := newDialerForPods(t, workerPod, ateletPod)
-		if _, err := d.DialForWorker("team-a", "worker-1"); err == nil {
+		if _, err := d.DialForWorker(&ateapipb.WorkerAssignment{WorkerNamespace: "team-a", WorkerPod: "worker-1"}); err == nil {
 			t.Fatal("DialForWorker succeeded, want error for atelet with no IPs")
 		}
 	})
+}
+
+func TestDialForLocalSnapshotErrors(t *testing.T) {
+	d := NewAteletDialer(nil, newTestAteletIndexer(t), "", "")
+	for _, tc := range []struct {
+		name  string
+		local *ateapipb.LocalSnapshotInfo
+	}{
+		{name: "nil local snapshot"},
+		{name: "missing node", local: &ateapipb.LocalSnapshotInfo{}},
+		{name: "empty node", local: &ateapipb.LocalSnapshotInfo{NodeVmsWithLocalSnapshots: []string{""}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := d.DialForLocalSnapshot(tc.local); !errors.Is(err, ErrNoAteletOnNode) {
+				t.Fatalf("DialForLocalSnapshot error = %v, want ErrNoAteletOnNode", err)
+			}
+		})
+	}
 }
 
 func TestVerifyAteletServerCert(t *testing.T) {
