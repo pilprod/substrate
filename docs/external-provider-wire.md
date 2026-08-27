@@ -51,3 +51,22 @@ in the protobuf contract.
 The broker derives stable execution and locality identities from the
 authenticated registration and slot ID. A live connection, socket, URL, token,
 or route is never persisted in a `Worker` or announced by the client.
+
+## Authentication implementation boundary
+
+The first broker-auth slice is private to the `ateapi` binary and is not
+registered on a gRPC listener. Its in-process issuer returns a stable,
+non-secret enrollment UID for operator lookup or revocation plus a separately
+redacted credential. Enrollment credentials are valid for at most 24 hours;
+session credentials are valid for at most 15 minutes. Both expiries and all
+revocation timestamps use the PostgreSQL clock.
+
+PostgreSQL stores only domain-separated SHA-256 credential digests. An
+enrollment is single use, its registration retains the immutable owner
+atespace, worker namespace, worker pool, and slot limit, and each registration
+has exactly one current session digest. Revoking an enrollment also revokes its
+registration. The schema reserves session consumption and generation fields,
+but `Connect` remains `UNIMPLEMENTED` and does not authenticate or consume a
+session token until an atomic claim-and-fence contract is implemented. Network
+registration, TLS listener wiring, and deployment manifests are intentionally
+outside this slice.

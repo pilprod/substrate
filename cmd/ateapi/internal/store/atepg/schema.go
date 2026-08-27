@@ -128,6 +128,60 @@ CREATE TABLE IF NOT EXISTS leases (
 );
 
 CREATE INDEX IF NOT EXISTS leases_expires_at_idx ON leases (expires_at);
+
+-- Enrollment and broker credentials are persisted only as domain-separated
+-- SHA-256 digests. Scope columns are copied once into the registration and no
+-- adapter operation updates them afterwards.
+CREATE TABLE IF NOT EXISTS external_provider_enrollments (
+    enrollment_uid     text PRIMARY KEY
+        CHECK (octet_length(enrollment_uid) BETWEEN 1 AND 253)
+        CHECK (enrollment_uid ~ '^[A-Za-z0-9]$' OR enrollment_uid ~ '^[A-Za-z0-9][A-Za-z0-9._~-]*[A-Za-z0-9]$'),
+    credential_digest bytea NOT NULL UNIQUE
+        CHECK (octet_length(credential_digest) = 32),
+    owner_atespace     text NOT NULL
+        REFERENCES atespaces(name) ON DELETE RESTRICT,
+    worker_namespace   text NOT NULL CHECK (worker_namespace <> ''),
+    worker_pool        text NOT NULL CHECK (worker_pool <> ''),
+    max_slots          integer NOT NULL CHECK (max_slots BETWEEN 1 AND 256),
+    created_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at         timestamptz NOT NULL,
+    consumed_at        timestamptz,
+    revoked_at         timestamptz,
+    registration_uid   text UNIQUE,
+    CHECK ((consumed_at IS NULL) = (registration_uid IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS external_provider_enrollments_expires_at_idx
+    ON external_provider_enrollments (expires_at);
+
+CREATE TABLE IF NOT EXISTS external_provider_registrations (
+    registration_uid          text PRIMARY KEY
+        CHECK (octet_length(registration_uid) BETWEEN 1 AND 253)
+        CHECK (registration_uid ~ '^[A-Za-z0-9]$' OR registration_uid ~ '^[A-Za-z0-9][A-Za-z0-9._~-]*[A-Za-z0-9]$'),
+    enrollment_uid            text NOT NULL UNIQUE
+        REFERENCES external_provider_enrollments(enrollment_uid) ON DELETE RESTRICT,
+    owner_atespace            text NOT NULL
+        REFERENCES atespaces(name) ON DELETE RESTRICT,
+    worker_namespace          text NOT NULL CHECK (worker_namespace <> ''),
+    worker_pool               text NOT NULL CHECK (worker_pool <> ''),
+    max_slots                 integer NOT NULL CHECK (max_slots BETWEEN 1 AND 256),
+    refresh_digest            bytea NOT NULL UNIQUE
+        CHECK (octet_length(refresh_digest) = 32),
+    current_session_digest    bytea UNIQUE
+        CHECK (current_session_digest IS NULL OR octet_length(current_session_digest) = 32),
+    current_session_expires_at timestamptz,
+    session_consumed_at       timestamptz,
+    session_generation       bigint NOT NULL DEFAULT 0 CHECK (session_generation >= 0),
+    revoked_at                timestamptz,
+    created_at                timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at                timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((current_session_digest IS NULL) = (current_session_expires_at IS NULL)),
+    CHECK (session_consumed_at IS NULL OR current_session_digest IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS external_provider_registrations_session_expiry_idx
+    ON external_provider_registrations (current_session_expires_at)
+    WHERE current_session_digest IS NOT NULL;
 `
 
 // applySchema idempotently creates atepg's tables.
