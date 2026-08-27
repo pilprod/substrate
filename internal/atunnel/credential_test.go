@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/substratex509"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

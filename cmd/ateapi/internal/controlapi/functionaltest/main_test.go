@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/testenv"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"

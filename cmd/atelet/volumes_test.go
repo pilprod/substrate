@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/volume"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 )
 
 type fakeWorkerPlugin struct {

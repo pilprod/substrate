@@ -27,7 +27,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/imagecache"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"

@@ -98,6 +98,6 @@ When adding a new Go package, ask:
 2. **Is it shared by multiple binaries but not meant for external import?** → `internal/<pkg>`
 3. **Is it a deliberately public API for external users?** → `pkg/<pkg>`
 4. **Is it a protobuf-generated package?**
-   - Public gRPC API (control plane) → `pkg/proto/<name>`
-   - Internal gRPC API (atelet, ateom) → `internal/proto/<name>`
+   - Public gRPC API (control plane or external execution contract) → `pkg/proto/<name>`
+   - Internal node-only gRPC API → `internal/proto/<name>`
 5. **Is it a script or dev tool?** → `hack/` (shell) or `tools/<name>` (Go)

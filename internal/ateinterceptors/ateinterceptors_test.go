@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

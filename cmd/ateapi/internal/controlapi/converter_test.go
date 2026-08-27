@@ -17,8 +17,8 @@ package controlapi
 import (
 	"testing"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 )
 
 func TestToAteletSnapshotScope(t *testing.T) {

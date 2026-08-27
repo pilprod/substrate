@@ -21,7 +21,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )

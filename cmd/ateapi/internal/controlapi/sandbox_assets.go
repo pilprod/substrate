@@ -17,9 +17,9 @@ package controlapi
 import (
 	"fmt"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
