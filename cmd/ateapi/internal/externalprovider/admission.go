@@ -49,6 +49,15 @@ type ConnectAdmission struct {
 	slots        []AdmittedSlot
 }
 
+// prevalidatedConnectHello is the immutable, non-secret result of every
+// first-frame check which does not require consuming a session credential.
+// Broker.Connect can construct this before the atomic database claim, so a
+// malformed hello never burns a one-time session token.
+type prevalidatedConnectHello struct {
+	registrationUID string
+	slots           []AdmittedSlot
+}
+
 // Registration returns the authenticated registration and immutable scope.
 func (a *ConnectAdmission) Registration() Registration {
 	return a.registration
@@ -119,16 +128,23 @@ func (s AdmittedSlot) clone() AdmittedSlot {
 
 // ValidateConnectAdmission validates an authenticated claim and the first
 // client frame without claiming credentials or performing transport, storage,
-// or Worker operations.
+// or Worker operations. Broker.Connect should call prevalidateConnectHello
+// before claiming the one-time session credential, then call
+// validatePrevalidatedConnectAdmission with the resulting value.
 func ValidateConnectAdmission(claim SessionClaim, frame *externalproviderpb.ClientFrame) (*ConnectAdmission, error) {
+	hello, err := prevalidateConnectHello(frame)
+	if err != nil {
+		return nil, err
+	}
+	return validatePrevalidatedConnectAdmission(claim, hello)
+}
+
+func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidatedConnectHello, error) {
 	if frame == nil {
 		return nil, invalidConnectAdmission("frame", "is required")
 	}
 	if proto.Size(frame) > maxClientFrameBytes {
 		return nil, invalidConnectAdmission("frame", "exceeds the 1 MiB serialized limit")
-	}
-	if err := validateAdmissionClaim(claim); err != nil {
-		return nil, err
 	}
 	if frame.GetSessionGeneration() != 0 {
 		return nil, invalidConnectAdmission("frame.session_generation", "must be zero in the first frame")
@@ -141,20 +157,16 @@ func ValidateConnectAdmission(claim SessionClaim, frame *externalproviderpb.Clie
 	if hello.GetProtocolVersion() != connectProtocolVersion {
 		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 1")
 	}
-	if hello.GetRegistrationUid() != claim.Registration.UID {
-		return nil, invalidConnectAdmission("frame.hello.registration_uid", "does not match the authenticated registration")
+	if !IsValidIdentity(hello.GetRegistrationUid()) {
+		return nil, invalidConnectAdmission("frame.hello.registration_uid", "has invalid identity syntax")
 	}
 
-	slotLimit := claim.Registration.Scope.MaxSlots
-	if slotLimit > uint32(maxSlots) {
-		slotLimit = uint32(maxSlots)
-	}
 	slots := hello.GetSlots()
 	if len(slots) == 0 {
 		return nil, invalidConnectAdmission("frame.hello.slots", "must contain at least one slot")
 	}
-	if uint64(len(slots)) > uint64(slotLimit) {
-		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the authenticated slot limit")
+	if len(slots) > maxSlots {
+		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the protocol slot limit")
 	}
 
 	normalized := make([]AdmittedSlot, len(slots))
@@ -205,10 +217,35 @@ func ValidateConnectAdmission(claim SessionClaim, frame *externalproviderpb.Clie
 		}
 	}
 
+	return &prevalidatedConnectHello{
+		registrationUID: hello.GetRegistrationUid(),
+		slots:           normalized,
+	}, nil
+}
+
+func validatePrevalidatedConnectAdmission(claim SessionClaim, hello *prevalidatedConnectHello) (*ConnectAdmission, error) {
+	if err := validateAdmissionClaim(claim); err != nil {
+		return nil, err
+	}
+	if hello == nil || !IsValidIdentity(hello.registrationUID) || len(hello.slots) == 0 || len(hello.slots) > maxSlots {
+		return nil, invalidConnectAdmission("prevalidated_hello", "is invalid")
+	}
+	if hello.registrationUID != claim.Registration.UID {
+		return nil, invalidConnectAdmission("frame.hello.registration_uid", "does not match the authenticated registration")
+	}
+	slotLimit := claim.Registration.Scope.MaxSlots
+	if uint64(len(hello.slots)) > uint64(slotLimit) {
+		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the authenticated slot limit")
+	}
+
+	admittedSlots := make([]AdmittedSlot, len(hello.slots))
+	for index := range hello.slots {
+		admittedSlots[index] = hello.slots[index].clone()
+	}
 	return &ConnectAdmission{
 		registration: claim.Registration,
 		generation:   claim.Generation,
-		slots:        normalized,
+		slots:        admittedSlots,
 	}, nil
 }
 
@@ -232,8 +269,8 @@ func validateAdmissionClaim(claim SessionClaim) error {
 	if len(content.IsDNS1123Subdomain(registration.Scope.WorkerPool)) != 0 {
 		return invalidConnectAdmission("claim.registration.scope.worker_pool", "is not a DNS-1123 subdomain")
 	}
-	if registration.Scope.MaxSlots == 0 {
-		return invalidConnectAdmission("claim.registration.scope.max_slots", "must be nonzero")
+	if registration.Scope.MaxSlots == 0 || registration.Scope.MaxSlots > uint32(maxSlots) {
+		return invalidConnectAdmission("claim.registration.scope.max_slots", "must be between 1 and 256")
 	}
 	return nil
 }

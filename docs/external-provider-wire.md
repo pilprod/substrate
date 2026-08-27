@@ -86,12 +86,16 @@ or mutate a Kubernetes `Worker`.
 
 ## Connect admission validation
 
-The ateapi-private admission validator is a pure boundary between an
-already-authenticated session claim and later Worker reconciliation. It accepts
-only a first `ClientFrame` containing a protocol-v1 `ConnectHello` with zero
-client generation and a serialized size no greater than 1 MiB. The hello's
-registration must exactly match the claim and its sorted, unique slot list is
-bounded to `1..min(scope.max_slots, 256)`.
+The ateapi-private admission validator is a pure boundary between the first
+frame, an authenticated session claim, and later Worker reconciliation. It is
+split deliberately around the one-time credential claim. Credential-free
+prevalidation first accepts only a `ClientFrame` containing a protocol-v1
+`ConnectHello` with zero client generation and a serialized size no greater
+than 1 MiB, validates the registration identity, and normalizes a sorted unique
+slot list bounded to `1..256`. A malformed hello is therefore rejected without
+burning its session token. Only after the database claim does the second step
+require the hello registration to equal the authenticated registration and
+enforce `scope.max_slots`.
 
 Each slot uses the published 253-byte ASCII slot identity grammar, at most 64
 Kubernetes label key/value pairs, and nonnegative ateapi `WorkerCapacity`
@@ -102,9 +106,10 @@ an undocumented enum or nonempty constraint. The accepted result stores no
 protobuf message or caller-owned map and exposes only copied, non-secret
 registration, generation, slot, label, and capacity data.
 
-This validator does not claim a credential, receive a stream frame, reconcile a
-Worker, or change session/channel state. `Connect` remains `UNIMPLEMENTED` and
-does not invoke it.
+Neither validator claims a credential, receives a stream frame, reconciles a
+Worker, or changes session/channel state. The future `Connect` owner performs
+the receive and atomic claim between the two pure steps. `Connect` remains
+`UNIMPLEMENTED` and does not invoke them.
 
 ## Server-derived Worker plan
 

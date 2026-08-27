@@ -124,6 +124,37 @@ func TestValidateConnectAdmissionNormalizesHello(t *testing.T) {
 	}
 }
 
+func TestPrevalidateConnectHelloSeparatesCredentialFreeChecks(t *testing.T) {
+	frame := validClientFrame()
+	frame.GetHello().Slots = []*externalproviderpb.ExternalSlot{validExternalSlot("slot-a"), validExternalSlot("slot-b")}
+	prevalidated, err := prevalidateConnectHello(frame)
+	if err != nil {
+		t.Fatalf("prevalidateConnectHello() error = %v", err)
+	}
+
+	// The prevalidated value owns its normalized input and can safely survive
+	// while Connect performs the one-time credential claim.
+	frame.GetHello().RegistrationUid = "registration-mutated"
+	frame.GetHello().Slots[0].SlotId = "slot-mutated"
+	frame.GetHello().Slots[0].Labels["region"] = "mutated"
+	claim := validSessionClaim(2)
+	admission, err := validatePrevalidatedConnectAdmission(claim, prevalidated)
+	if err != nil {
+		t.Fatalf("validatePrevalidatedConnectAdmission() error = %v", err)
+	}
+	if got := admission.Slots()[0].SlotID(); got != "slot-a" {
+		t.Fatalf("prevalidated slot ID = %q, want slot-a", got)
+	}
+
+	claim.Registration.Scope.MaxSlots = 1
+	if _, err := validatePrevalidatedConnectAdmission(claim, prevalidated); !errors.Is(err, ErrInvalidConnectAdmission) || !strings.Contains(err.Error(), "authenticated slot limit") {
+		t.Fatalf("slot authority error = %v, want authenticated slot limit", err)
+	}
+	if _, err := validatePrevalidatedConnectAdmission(validSessionClaim(2), nil); !errors.Is(err, ErrInvalidConnectAdmission) {
+		t.Fatalf("nil prevalidated hello error = %v, want ErrInvalidConnectAdmission", err)
+	}
+}
+
 func TestValidateConnectAdmissionRejectsInvalidClaimAndFirstFrame(t *testing.T) {
 	baseClaim := validSessionClaim(2)
 	baseFrame := validClientFrame()
@@ -162,6 +193,7 @@ func TestValidateConnectAdmissionRejectsInvalidClaimAndFirstFrame(t *testing.T) 
 		{name: "invalid worker namespace", path: "claim.registration.scope.worker_namespace", edit: func(claim *SessionClaim) { claim.Registration.Scope.WorkerNamespace = "Bad_Name" }},
 		{name: "invalid worker pool", path: "claim.registration.scope.worker_pool", edit: func(claim *SessionClaim) { claim.Registration.Scope.WorkerPool = "Bad_Name" }},
 		{name: "zero slot authority", path: "claim.registration.scope.max_slots", edit: func(claim *SessionClaim) { claim.Registration.Scope.MaxSlots = 0 }},
+		{name: "excessive slot authority", path: "claim.registration.scope.max_slots", edit: func(claim *SessionClaim) { claim.Registration.Scope.MaxSlots = maxSlots + 1 }},
 	}
 	for _, test := range claimCases {
 		t.Run(test.name, func(t *testing.T) {
@@ -256,7 +288,7 @@ func TestValidateConnectAdmissionSlotCountBoundaries(t *testing.T) {
 
 	frame := validClientFrame()
 	frame.GetHello().Slots = makeSlots(maxSlots)
-	admission, err := ValidateConnectAdmission(validSessionClaim(maxSlots+44), frame)
+	admission, err := ValidateConnectAdmission(validSessionClaim(maxSlots), frame)
 	if err != nil {
 		t.Fatalf("ValidateConnectAdmission(256 slots) error = %v", err)
 	}
@@ -266,7 +298,7 @@ func TestValidateConnectAdmissionSlotCountBoundaries(t *testing.T) {
 
 	frame = validClientFrame()
 	frame.GetHello().Slots = makeSlots(maxSlots + 1)
-	requireInvalidAdmission(t, validSessionClaim(maxSlots+44), frame, "frame.hello.slots")
+	requireInvalidAdmission(t, validSessionClaim(maxSlots), frame, "frame.hello.slots")
 }
 
 func TestValidateConnectAdmissionSlotRules(t *testing.T) {
