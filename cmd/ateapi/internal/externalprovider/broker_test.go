@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -386,6 +387,41 @@ func TestMetadataOnlyStreamLoggingOmitsCredentialAndError(t *testing.T) {
 	}
 }
 
+func TestMetadataOnlyLoggingDoesNotExposeCredentialContextToHandler(t *testing.T) {
+	handler := &credentialInspectingLogHandler{}
+	logger := slog.New(handler)
+	ctx := bearerContext("authorization", "Bearer "+string(testCredential(0x74)))
+
+	unary := MetadataOnlyUnaryLoggingInterceptor(logger)
+	if _, err := unary(
+		ctx,
+		&externalproviderpb.EnrollRequest{},
+		&grpc.UnaryServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Enroll_FullMethodName},
+		func(context.Context, any) (any, error) { return &externalproviderpb.EnrollResponse{}, nil },
+	); err != nil {
+		t.Fatalf("unary logging interceptor error = %v", err)
+	}
+
+	stream := MetadataOnlyStreamLoggingInterceptor(logger)
+	if err := stream(
+		nil,
+		&testServerStream{ctx: ctx},
+		&grpc.StreamServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Connect_FullMethodName},
+		func(any, grpc.ServerStream) error { return nil },
+	); err != nil {
+		t.Fatalf("stream logging interceptor error = %v", err)
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.records != 2 {
+		t.Fatalf("log records = %d, want 2", handler.records)
+	}
+	if handler.sawAuthorization {
+		t.Fatal("metadata-only logger exposed credential-bearing RPC context to its handler")
+	}
+}
+
 func TestOpaqueBearerInterceptorsRejectMalformedCredentials(t *testing.T) {
 	unaryCalled := false
 	_, err := OpaqueBearerUnaryInterceptor()(
@@ -469,3 +505,25 @@ type testServerStream struct {
 }
 
 func (s *testServerStream) Context() context.Context { return s.ctx }
+
+type credentialInspectingLogHandler struct {
+	mu               sync.Mutex
+	records          int
+	sawAuthorization bool
+}
+
+func (*credentialInspectingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *credentialInspectingLogHandler) Handle(ctx context.Context, _ slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records++
+	if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get("authorization")) != 0 {
+		h.sawAuthorization = true
+	}
+	return nil
+}
+
+func (h *credentialInspectingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *credentialInspectingLogHandler) WithGroup(string) slog.Handler { return h }

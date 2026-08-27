@@ -33,7 +33,10 @@ func MetadataOnlyUnaryLoggingInterceptor(logger *slog.Logger) grpc.UnaryServerIn
 	return func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		started := time.Now()
 		response, err := handler(ctx, request)
-		logger.InfoContext(ctx, "external provider RPC",
+		// Do not pass the RPC context to the logging backend. Incoming gRPC
+		// metadata contains the opaque credential and a custom slog.Handler can
+		// inspect context values even when no metadata attribute is recorded.
+		logger.Info("external provider RPC",
 			slog.String("method", info.FullMethod),
 			slog.String("code", status.Code(err).String()),
 			slog.Duration("elapsed", time.Since(started)),
@@ -52,7 +55,9 @@ func MetadataOnlyStreamLoggingInterceptor(logger *slog.Logger) grpc.StreamServer
 	return func(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		started := time.Now()
 		err := handler(server, stream)
-		logger.InfoContext(stream.Context(), "external provider RPC",
+		// See the unary counterpart: the stream context is credential-bearing
+		// input, not safe logging context.
+		logger.Info("external provider RPC",
 			slog.String("method", info.FullMethod),
 			slog.String("code", status.Code(err).String()),
 			slog.Duration("elapsed", time.Since(started)),
