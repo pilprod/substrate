@@ -274,6 +274,7 @@ func isExternalActorIngressAssignment(assignment *ateapipb.WorkerAssignment) boo
 func workerMatchesActorIngress(actor *ateapipb.Actor, worker *ateapipb.Worker, assignment *ateapipb.WorkerAssignment) bool {
 	boundActor := worker.GetStatus().GetAssignment()
 	return actor != nil && worker != nil && assignment != nil &&
+		assignment.GetExternalSlot().GetOwnerAtespace() == actor.GetMetadata().GetAtespace() &&
 		worker.GetProvider() == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT &&
 		worker.GetMetadata().GetAtespace() == "" &&
 		worker.GetMetadata().GetName() == assignment.GetWorker().GetName() &&

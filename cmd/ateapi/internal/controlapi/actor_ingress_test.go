@@ -337,6 +337,10 @@ func TestResolveActorIngressAssignmentFailsClosed(t *testing.T) {
 		{name: "route identity changed", mutate: func(_ *ateapipb.Actor, worker *ateapipb.Worker) {
 			worker.ExternalSlot.ExecutionIdentity = "different.execution"
 		}, code: codes.FailedPrecondition},
+		{name: "owner atespace changed", mutate: func(actor *ateapipb.Actor, worker *ateapipb.Worker) {
+			actor.Status.WorkerAssignment.ExternalSlot.OwnerAtespace = "team-b"
+			worker.ExternalSlot.OwnerAtespace = "team-b"
+		}, code: codes.FailedPrecondition},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
