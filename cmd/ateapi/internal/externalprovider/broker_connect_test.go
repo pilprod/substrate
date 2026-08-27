@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -117,7 +118,11 @@ func connectTestBroker(
 ) (*Broker, *fakeStore) {
 	t.Helper()
 	store := &fakeStore{claim: claim}
-	brokerOptions := []BrokerOption{WithSessionRuntime(&SessionRuntime{coordinator: coordinator})}
+	claimInstallGate, err := newClaimInstallGate(defaultMaxClaimInstallInFlight, defaultMaxClaimInstallKeys)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	brokerOptions := []BrokerOption{WithSessionRuntime(&SessionRuntime{coordinator: coordinator, claimInstallGate: claimInstallGate})}
 	brokerOptions = append(brokerOptions, opts...)
 	broker, err := newBroker(
 		store,
@@ -300,6 +305,7 @@ func TestBrokerConnectHandshakeDeadlineBoundsSessionClaim(t *testing.T) {
 	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
 		t.Fatalf("route stats after claim deadline = %+v, want empty", stats)
 	}
+	requireClaimInstallGateStats(t, broker.sessionRuntime.claimInstallGate, claimInstallGateStats{})
 }
 
 func TestBrokerConnectReadyFailureCleansWithoutLeakingTransportError(t *testing.T) {
@@ -354,6 +360,7 @@ func TestBrokerConnectRedactsClaimFailureBeforeReady(t *testing.T) {
 	if _, current := registry.lookup("registration-a", 7); current {
 		t.Fatal("claim failure installed a session lease")
 	}
+	requireClaimInstallGateStats(t, broker.sessionRuntime.claimInstallGate, claimInstallGateStats{})
 }
 
 func TestBrokerConnectFailsClosedForUnwiredExecutionEffect(t *testing.T) {
@@ -544,6 +551,226 @@ func TestBrokerConnectReplacementInterruptsIdleFrameReceive(t *testing.T) {
 	}
 }
 
+func TestBrokerConnectSerializesClaimThroughInstallAcrossSharedRuntime(t *testing.T) {
+	coordinator, registry, routes, _ := newCoordinatorHarness(t, 1, 1, 1)
+	gate, err := newClaimInstallGate(2, 1)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	sharedRuntime := &SessionRuntime{coordinator: coordinator, claimInstallGate: gate}
+	baseClaim := validSessionClaim(1)
+	var sequence atomic.Uint64
+	firstClaimEntered := make(chan struct{})
+	releaseFirstClaim := make(chan struct{})
+	secondClaimEntered := make(chan struct{})
+	firstReady := make(chan struct{})
+	claimObservation := make(chan error, 1)
+	store := &fakeStore{claim: func(ctx context.Context, registrationUID string, _ CredentialDigest) (SessionClaim, error) {
+		generation := sequence.Add(1)
+		claim := baseClaim
+		claim.Registration.UID = registrationUID
+		claim.Generation = generation
+		switch generation {
+		case 1:
+			close(firstClaimEntered)
+			select {
+			case <-releaseFirstClaim:
+			case <-ctx.Done():
+				return SessionClaim{}, ctx.Err()
+			}
+		case 2:
+			if lease, current := registry.lookup(registrationUID, 1); !current || lease == nil {
+				claimObservation <- errors.New("second durable claim ran before generation 1 registry install")
+			}
+			close(secondClaimEntered)
+			select {
+			case <-firstReady:
+			case <-ctx.Done():
+				return SessionClaim{}, ctx.Err()
+			}
+		default:
+			return SessionClaim{}, errors.New("unexpected extra session claim")
+		}
+		return claim, nil
+	}}
+	newSharedBroker := func() *Broker {
+		broker, err := newBroker(
+			store,
+			bytes.NewReader(make([]byte, credentialEntropyBytes)),
+			time.Minute,
+			WithSessionRuntime(sharedRuntime),
+		)
+		if err != nil {
+			t.Fatalf("newBroker() error = %v", err)
+		}
+		return broker
+	}
+	firstBroker := newSharedBroker()
+	secondBroker := newSharedBroker()
+
+	firstParent, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	first := newIdleConnectTestStream(connectTestContext(firstParent, 0xa1), validClientFrame())
+	first.onSend = func(frame *externalproviderpb.ServerFrame) {
+		if frame.GetReady() != nil {
+			close(firstReady)
+		}
+	}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- firstBroker.Connect(first) }()
+	select {
+	case <-firstClaimEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Connect did not enter durable claim")
+	}
+
+	second := newConnectTestStream(
+		connectTestContext(context.Background(), 0xa2),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- secondBroker.Connect(second) }()
+	requireClaimInstallGateStats(t, gate, claimInstallGateStats{InFlight: 2, DistinctKeys: 1})
+	if got := sequence.Load(); got != 1 {
+		t.Fatalf("durable claims before first release = %d, want 1", got)
+	}
+	select {
+	case <-secondClaimEntered:
+		t.Fatal("second durable claim bypassed the first claim-install gate")
+	default:
+	}
+
+	close(releaseFirstClaim)
+	select {
+	case <-secondClaimEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second durable claim did not proceed after generation 1 install")
+	}
+	select {
+	case observation := <-claimObservation:
+		t.Fatal(observation)
+	default:
+	}
+	select {
+	case err := <-secondResult:
+		if err != nil {
+			t.Fatalf("second Connect() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Connect did not finish")
+	}
+	select {
+	case err := <-firstResult:
+		if code := status.Code(err); code != codes.Aborted && code != codes.Unavailable {
+			t.Fatalf("fenced first Connect() code = %v, want Aborted or Unavailable", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fenced first Connect did not finish")
+	}
+	requireClaimInstallGateStats(t, gate, claimInstallGateStats{})
+	requireSessionRegistryTracked(t, registry, 0, 0)
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("route stats after shared-runtime replacement = %+v, want empty", stats)
+	}
+}
+
+func TestBrokerConnectFailsClosedAndRecoversAtClaimInstallKeyCapacity(t *testing.T) {
+	coordinator, _, routes, _ := newCoordinatorHarness(t, 1, 1, 1)
+	gate, err := newClaimInstallGate(2, 1)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	blockingLease, err := gate.acquire(context.Background(), "registration-a")
+	if err != nil {
+		t.Fatalf("blocking gate acquire error = %v", err)
+	}
+	claim := validSessionClaim(1)
+	store := &fakeStore{claim: func(_ context.Context, registrationUID string, _ CredentialDigest) (SessionClaim, error) {
+		claimed := claim
+		claimed.Registration.UID = registrationUID
+		return claimed, nil
+	}}
+	broker, err := newBroker(
+		store,
+		bytes.NewReader(make([]byte, credentialEntropyBytes)),
+		time.Minute,
+		WithSessionRuntime(&SessionRuntime{coordinator: coordinator, claimInstallGate: gate}),
+	)
+	if err != nil {
+		t.Fatalf("newBroker() error = %v", err)
+	}
+	hello := validClientFrame()
+	hello.GetHello().RegistrationUid = "registration-b"
+	blocked := newConnectTestStream(
+		connectTestContext(context.Background(), 0xa3),
+		connectTestReceive{frame: hello},
+	)
+	err = broker.Connect(blocked)
+	if status.Code(err) != codes.ResourceExhausted || status.Convert(err).Message() != "session admission is busy" {
+		t.Fatalf("capacity Connect() error = %v, want fixed ResourceExhausted", err)
+	}
+	store.mu.Lock()
+	claimCalls := store.claimCalls
+	store.mu.Unlock()
+	if claimCalls != 0 || len(blocked.sentSnapshot()) != 0 {
+		t.Fatalf("capacity failure claim/send = %d/%d, want 0/0", claimCalls, len(blocked.sentSnapshot()))
+	}
+
+	blockingLease.release()
+	retry := newConnectTestStream(
+		connectTestContext(context.Background(), 0xa4),
+		connectTestReceive{frame: hello},
+	)
+	if err := broker.Connect(retry); err != nil {
+		t.Fatalf("Connect() after gate release error = %v", err)
+	}
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("route stats after capacity recovery = %+v, want empty", stats)
+	}
+	requireClaimInstallGateStats(t, gate, claimInstallGateStats{})
+}
+
+func TestBrokerConnectReusesRegistryAndGateCapacityAcrossRegistrations(t *testing.T) {
+	const capacity = 2
+	coordinator, registry, routes, _ := newCoordinatorHarness(t, capacity, capacity, capacity)
+	gate, err := newClaimInstallGate(capacity, capacity)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	claim := validSessionClaim(1)
+	store := &fakeStore{claim: func(_ context.Context, registrationUID string, _ CredentialDigest) (SessionClaim, error) {
+		claimed := claim
+		claimed.Registration.UID = registrationUID
+		return claimed, nil
+	}}
+	broker, err := newBroker(
+		store,
+		bytes.NewReader(make([]byte, credentialEntropyBytes)),
+		time.Minute,
+		WithSessionRuntime(&SessionRuntime{coordinator: coordinator, claimInstallGate: gate}),
+	)
+	if err != nil {
+		t.Fatalf("newBroker() error = %v", err)
+	}
+	for index := range capacity * 4 {
+		registrationUID := fmt.Sprintf("registration-%02d", index)
+		hello := validClientFrame()
+		hello.GetHello().RegistrationUid = registrationUID
+		stream := newConnectTestStream(
+			connectTestContext(context.Background(), byte(0xb0+index)),
+			connectTestReceive{frame: hello},
+		)
+		if err := broker.Connect(stream); err != nil {
+			t.Fatalf("Connect(%q) error = %v", registrationUID, err)
+		}
+		requireClaimInstallGateStats(t, gate, claimInstallGateStats{})
+		requireSessionRegistryTracked(t, registry, 0, 0)
+		if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+			t.Fatalf("route stats after %q = %+v, want empty", registrationUID, stats)
+		}
+	}
+}
+
 func TestBrokerConnectCancellationAndReceiveErrorCleanup(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -653,6 +880,7 @@ func requirePendingHandshakeCount(t *testing.T, broker *Broker, want int) {
 func TestSessionAuthorityBindsWorkerRuntimeExactlyOnce(t *testing.T) {
 	config := SessionRuntimeConfig{
 		MaxTrackedRegistrations: 1,
+		ClaimInstallGateLimits:  ClaimInstallGateLimits{MaxInFlight: 1, MaxDistinctKeys: 1},
 		RouteLimits:             SessionRouteDirectoryLimits{MaxRoutes: 1, MaxBindings: 1},
 		ChannelLimits:           ChannelSessionLimits{MaxOpenChannels: 1, MaxDataBytes: 1024},
 	}

@@ -296,7 +296,7 @@ func TestWorkerSessionLifecycleActivatesOnlyCurrentInstalledLease(t *testing.T) 
 	if _, err := lifecycle.activate(ctx, route, plan, reconciled); !errors.Is(err, errSessionClosing) {
 		t.Fatalf("activate(withdrawn route) error = %v, want errSessionClosing", err)
 	}
-	if !registry.remove("registration-a", 2, lease) {
+	if !registry.remove("registration-a", 2, lease, true) {
 		t.Fatal("remove(cleaned lease) = false, want true")
 	}
 }
@@ -370,7 +370,7 @@ func TestWorkerSessionLifecycleFencedCleanupCannotOfflineNewGeneration(t *testin
 			t.Errorf("availability transition cleared assignment for %q", name)
 		}
 	}
-	if registry.remove("registration-a", 1, first) {
+	if registry.remove("registration-a", 1, first, true) {
 		t.Fatal("old exact remove deleted generation 2")
 	}
 	if got, ok := registry.lookup("registration-a", 2); !ok || got != second {

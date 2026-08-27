@@ -55,8 +55,10 @@ deployment topology. For the MVP, enabling `externalProviderBroker` also pins
 ate-api-server to one replica and switches the Deployment strategy to
 `Recreate`, so an update cannot overlap two in-memory route owners. This trades
 ate-api-server high availability and zero-downtime rollouts for single-owner
-correctness. Restore HA only after route ownership and live session fencing are
-distributed across replicas.
+correctness. The claim-to-registry-install gate is also process-local; a second
+replica would bypass its generation ordering even if both replicas shared
+PostgreSQL. Restore HA only after route ownership, claim ordering, and live
+session fencing are distributed across replicas.
 
 Run `make verify-external-provider-broker-chart` to lint both profiles and
 assert the default and singleton render contracts.

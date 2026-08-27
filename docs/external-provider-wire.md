@@ -83,25 +83,34 @@ or that a route was published.
 The registry assigns the lease identity itself. Cleanup removes an entry only
 when registration UID, generation, and lease identity all match the current
 entry, so delayed cleanup from a fenced stream cannot remove its replacement.
-The registry retains the highest accepted generation as a tombstone after live
-route removal. This prevents a slow, older claim from becoming current after a
-newer stream has already disconnected. Active entries plus tombstones are
-bounded by the configured maximum number of tracked registrations. At capacity,
-an unknown registration fails closed while a tracked registration may still
-install a newer generation. Tombstones live for the registry process lifetime;
-this slice deliberately has no unsafe eviction API because safe reclamation
-requires authoritative registration revocation integration. A restart cannot
-replay an old session token because PostgreSQL consumed it atomically before the
-original admission.
+`Broker.Connect` serializes the durable claim and registry install for one
+registration with a process-local claim-install gate. It acquires that gate
+after credential-free Hello prevalidation, holds it while PostgreSQL returns the
+next generation, and releases it immediately after the registry install. A
+second claim for the registration therefore cannot overtake a delayed first
+claim, while reconciliation and route publication run outside the gate. The
+gate has separate global in-flight and distinct-registration bounds. Waiters are
+context-cancellable, and an unknown registration fails closed when the key bound
+is full.
+
+This ordering permits safe tombstone reclamation. Every operation pins its
+per-registration lifecycle pointer before waiting for the lifecycle mutex. A
+successful cleanup and exact removal frees the generation watermark only after
+the current lease is gone, conservative Worker ownership is empty, and the last
+pinned operation exits. Failed or incomplete cleanup retains the lifecycle even
+when its pending Worker set is empty. Active sessions, pending cleanup, and
+in-flight operations remain bounded by the configured maximum; sequentially
+closed registrations reuse that capacity. A restart cannot replay an old
+session token because PostgreSQL consumed it atomically before the original
+admission.
 
 Holders of a fenced lease own that reference until their stream cleanup
 finishes. Leases contain only the non-secret registration UID, generation, and
 cancellation state. The registry starts no goroutines and contains no
 credential, frame, channel, transport, or persistence state. A stable
-per-registration lifecycle record, retained with the bounded generation
-tombstone, holds at most the admitted 256 immutable Worker references which may
-still be `ACTIVE`. It contains no assignment, mutable labels, sandbox class, or
-client-supplied status.
+per-registration lifecycle record holds at most the admitted 256 immutable
+Worker references which may still be `ACTIVE`. It contains no assignment,
+mutable labels, sandbox class, or client-supplied status.
 
 The registry itself does not register a listener, receive `Connect`, or publish
 a route; the bound session authority composes it with those separate owners.
@@ -140,8 +149,11 @@ non-secret registration, generation, slot, profile, label, and capacity data.
 
 Neither validator claims a credential, receives a stream frame, reconciles a
 Worker, or changes session/channel state. `Broker.Connect` receives and
-credential-free prevalidates Hello, atomically claims the token, and passes the
-two immutable results to the coordinator.
+credential-free prevalidates Hello, acquires the shared runtime claim-install
+gate, atomically claims the token through its one-shot lease, and passes only
+the resulting package-private gated claim to the coordinator. The coordinator
+arms cleanup before releasing the gate after registry installation; there is no
+raw Connect path from a copyable database claim to session establishment.
 
 ## Server-derived Worker plan
 
@@ -237,10 +249,12 @@ and conservative `pending` sets. Only `pending` is retained for a retry or
 inherited by a replacement, so state remains bounded by the 256-slot admission
 limit and cannot accumulate across failed generations.
 
-This is deliberately an in-process core. The default ateapi deployment still
-runs multiple replicas. The opt-in external-provider Broker release profile
-therefore pins ateapi to one replica with `Recreate`, so only one process owns
-session routes at a time; HA requires a future distributed fencing authority.
+This is deliberately an in-process core. Both route ownership and the
+claim-install gate are process-local. The default ateapi deployment still runs
+multiple replicas. The opt-in external-provider Broker release profile therefore
+pins ateapi to one replica with `Recreate`, so only one process owns session
+routes and claim ordering at a time; HA requires a future distributed fencing
+authority.
 Startup recovery makes persisted external Workers `OFFLINE` before the Broker
 listener is created, and every desired Worker is preflighted `OFFLINE` on
 reconnect. The scheduling guard and Connect lifecycle share the same registry
@@ -339,8 +353,10 @@ The dedicated Broker listener is TLS-only, default-disabled, and exposes only
 `ExternalProviderBroker`. It prevalidates Hello before consuming the credential,
 sends Ready synchronously, publishes through the coordinator, then applies
 post-Ready frames with at most one frame queued. Pending first-Hello/token-claim
-handshakes have a fixed concurrency bound and deadline. The gRPC server and
-protobuf state machines both enforce the same 1 MiB inbound/frame ceiling;
+handshakes have a fixed concurrency bound and deadline; claim-install waiters
+have an additional shared-runtime global bound and bounded key map. The gRPC
+server and protobuf state machines both enforce the same 1 MiB inbound/frame
+ceiling;
 the separately bounded server-send ceiling accommodates the at-most-2 MiB
 canonical capability policy in unary responses. EOF, cancellation, transport
 failure, protocol failure, route replacement, and unsupported effects all

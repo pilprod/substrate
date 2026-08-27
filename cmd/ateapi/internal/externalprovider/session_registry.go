@@ -45,14 +45,17 @@ type sessionRegistry struct {
 	lifecycleStates         map[string]*sessionLifecycleState
 }
 
-// sessionLifecycleState is retained with the generation tombstone. Its mutex
-// serializes route replacement and Worker availability transitions for one
-// registration without blocking unrelated registrations. ownedWorkers is a
-// bounded, conservative set of Workers which may still be ACTIVE; it survives
-// route replacement so the new owner can make omitted slots unavailable.
+// sessionLifecycleState serializes route replacement and Worker availability
+// transitions for one registration without blocking unrelated registrations.
+// ownedWorkers is a bounded, conservative set of Workers which may still be
+// ACTIVE; it survives route replacement so the new owner can make omitted
+// slots unavailable. activeOperations is protected by sessionRegistry.mu and
+// pins this pointer while an operation waits for or holds mu.
 type sessionLifecycleState struct {
-	mu           sync.Mutex
-	ownedWorkers []sessionWorkerRef
+	mu               sync.Mutex
+	ownedWorkers     []sessionWorkerRef
+	activeOperations uint32
+	reclaimEligible  bool
 }
 
 // sessionLease is an immutable generation identity. Its cancellation function
@@ -104,22 +107,18 @@ func (r *sessionRegistry) installPrepared(
 		return nil, errInvalidSessionGeneration
 	}
 
-	r.mu.Lock()
-	lifecycle := r.lifecycleStates[registrationUID]
-	if lifecycle == nil {
-		if uint64(len(r.lifecycleStates)) >= uint64(r.maxTrackedRegistrations) {
-			r.mu.Unlock()
-			return nil, errSessionRegistryFull
-		}
-		lifecycle = &sessionLifecycleState{}
-		r.lifecycleStates[registrationUID] = lifecycle
+	lifecycle, err := r.acquireLifecycle(registrationUID, true)
+	if err != nil {
+		return nil, err
 	}
-	r.mu.Unlock()
 
 	// The stable per-registration gate prevents a newer generation from being
 	// installed in the middle of an older generation's Worker transition.
 	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	defer func() {
+		r.releaseLifecycleLocked(registrationUID, lifecycle)
+		lifecycle.mu.Unlock()
+	}()
 
 	r.mu.RLock()
 	highest, tracked := r.highestGenerations[registrationUID]
@@ -152,6 +151,7 @@ func (r *sessionRegistry) installPrepared(
 	}
 	r.highestGenerations[registrationUID] = generation
 	r.sessions[registrationUID] = sessionEntry{lease: lease, cancel: cancel}
+	lifecycle.reclaimEligible = false
 	if previous.lease != nil {
 		previous.cancel(errSessionFenced)
 	}
@@ -177,21 +177,23 @@ func (r *sessionRegistry) lookup(registrationUID string, generation uint64) (*se
 
 // remove drops and cancels only the exact current lease. Comparing the
 // registration, generation, and lease identity prevents cleanup from an older
-// session from deleting a newer generation.
-func (r *sessionRegistry) remove(registrationUID string, generation uint64, lease *sessionLease) bool {
+// session from deleting a newer generation. cleanupComplete authorizes idle
+// lifecycle reclamation; a failed cleanup keeps its conservative tombstone.
+func (r *sessionRegistry) remove(registrationUID string, generation uint64, lease *sessionLease, cleanupComplete bool) bool {
 	if lease == nil || lease.registrationUID != registrationUID || lease.generation != generation {
 		return false
 	}
 
-	r.mu.RLock()
-	lifecycle := r.lifecycleStates[registrationUID]
-	r.mu.RUnlock()
+	lifecycle, _ := r.acquireLifecycle(registrationUID, false)
 	if lifecycle == nil {
 		return false
 	}
 
 	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	defer func() {
+		r.releaseLifecycleLocked(registrationUID, lifecycle)
+		lifecycle.mu.Unlock()
+	}()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -200,6 +202,7 @@ func (r *sessionRegistry) remove(registrationUID string, generation uint64, leas
 		return false
 	}
 	delete(r.sessions, registrationUID)
+	lifecycle.reclaimEligible = cleanupComplete
 	current.cancel(errSessionRemoved)
 	return true
 }
@@ -237,15 +240,19 @@ func (r *sessionRegistry) withCurrentLease(lease *sessionLease, operation func(*
 		return errSessionNotCurrent
 	}
 
-	r.mu.RLock()
-	lifecycle := r.lifecycleStates[lease.registrationUID]
-	r.mu.RUnlock()
+	lifecycle, _ := r.acquireLifecycle(lease.registrationUID, false)
 	if lifecycle == nil {
+		if cause := lease.cancellationCause(); cause != nil {
+			return cause
+		}
 		return errSessionNotCurrent
 	}
 
 	lifecycle.mu.Lock()
-	defer lifecycle.mu.Unlock()
+	defer func() {
+		r.releaseLifecycleLocked(lease.registrationUID, lifecycle)
+		lifecycle.mu.Unlock()
+	}()
 
 	r.mu.RLock()
 	current, exists := r.sessions[lease.registrationUID]
@@ -258,6 +265,48 @@ func (r *sessionRegistry) withCurrentLease(lease *sessionLease, operation func(*
 		return errSessionNotCurrent
 	}
 	return operation(lifecycle, current)
+}
+
+// acquireLifecycle pins the current per-registration lifecycle before
+// releasing the global map lock. This prevents reclamation and same-key pointer
+// recreation while the caller waits for lifecycle.mu.
+func (r *sessionRegistry) acquireLifecycle(registrationUID string, create bool) (*sessionLifecycleState, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lifecycle := r.lifecycleStates[registrationUID]
+	if lifecycle == nil {
+		if !create {
+			return nil, nil
+		}
+		if uint64(len(r.lifecycleStates)) >= uint64(r.maxTrackedRegistrations) {
+			return nil, errSessionRegistryFull
+		}
+		lifecycle = &sessionLifecycleState{}
+		r.lifecycleStates[registrationUID] = lifecycle
+	}
+	lifecycle.activeOperations++
+	return lifecycle, nil
+}
+
+// releaseLifecycleLocked drops an operation pin while lifecycle.mu is held.
+// The generation watermark is reclaimed only when no current lease, pending
+// Worker ownership, or other operation can still depend on this pointer. The
+// Broker claim-install gate makes deletion safe from delayed durable claims.
+func (r *sessionRegistry) releaseLifecycleLocked(registrationUID string, lifecycle *sessionLifecycleState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if lifecycle == nil || r.lifecycleStates[registrationUID] != lifecycle || lifecycle.activeOperations == 0 {
+		return
+	}
+	lifecycle.activeOperations--
+	if lifecycle.activeOperations != 0 || len(lifecycle.ownedWorkers) != 0 || !lifecycle.reclaimEligible {
+		return
+	}
+	if current, exists := r.sessions[registrationUID]; exists && current.lease != nil {
+		return
+	}
+	delete(r.lifecycleStates, registrationUID)
+	delete(r.highestGenerations, registrationUID)
 }
 
 func (l *sessionLease) registration() string {

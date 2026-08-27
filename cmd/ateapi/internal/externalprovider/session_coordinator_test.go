@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
@@ -46,6 +47,25 @@ type fencingCoordinatorReconciler struct {
 	registry   *sessionRegistry
 	generation uint64
 	lease      *sessionLease
+}
+
+type blockingCoordinatorReconciler struct {
+	delegate WorkerPlanReconciler
+	entered  chan struct{}
+	release  chan struct{}
+	once     atomic.Bool
+}
+
+func (r *blockingCoordinatorReconciler) ReconcileExternalWorkers(ctx context.Context, plan *WorkerPlan) ([]*ateapipb.Worker, error) {
+	if r.once.CompareAndSwap(false, true) {
+		close(r.entered)
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return r.delegate.ReconcileExternalWorkers(ctx, plan)
 }
 
 func (r *fencingCoordinatorReconciler) ReconcileExternalWorkers(ctx context.Context, plan *WorkerPlan) ([]*ateapipb.Worker, error) {
@@ -170,6 +190,27 @@ func coordinatorInput(t *testing.T, registrationUID string, generation uint64, s
 	return claim, hello
 }
 
+func coordinatorGatedClaim(t *testing.T, claim SessionClaim) *gatedSessionClaim {
+	t.Helper()
+	gate, err := newClaimInstallGate(1, 1)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	lease, err := gate.acquire(context.Background(), claim.Registration.UID)
+	if err != nil {
+		t.Fatalf("claim-install gate acquire error = %v", err)
+	}
+	t.Cleanup(lease.release)
+	store := &fakeStore{claim: func(context.Context, string, CredentialDigest) (SessionClaim, error) {
+		return claim, nil
+	}}
+	gated, err := lease.claimSession(context.Background(), store, CredentialDigest{1})
+	if err != nil {
+		t.Fatalf("claimSession() error = %v", err)
+	}
+	return gated
+}
+
 func newCoordinatorHarness(t *testing.T, maxRegistrations, maxRoutes, maxBindings uint32) (*sessionCoordinator, *sessionRegistry, *SessionRouteDirectory, *coordinatorRuntime) {
 	t.Helper()
 	registry := mustSessionRegistry(t, maxRegistrations)
@@ -213,7 +254,7 @@ func TestSessionCoordinatorEstablishAndCloseOrder(t *testing.T) {
 		}
 	}
 
-	session, err := coordinator.establish(context.Background(), claim, hello, func(_ context.Context, frame *externalproviderpb.ServerFrame) error {
+	session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(_ context.Context, frame *externalproviderpb.ServerFrame) error {
 		runtime.record("ready")
 		if got := runtime.eventSnapshot(); !slices.Equal(got, []string{"reconcile", "ready"}) {
 			t.Errorf("events at Ready = %v, want reconcile then ready", got)
@@ -274,6 +315,58 @@ func TestSessionCoordinatorEstablishAndCloseOrder(t *testing.T) {
 	}
 }
 
+func TestSessionCoordinatorReleasesClaimGateBeforeReconcile(t *testing.T) {
+	coordinator, _, _, runtime := newCoordinatorHarness(t, 1, 1, 1)
+	blocking := &blockingCoordinatorReconciler{
+		delegate: runtime,
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	coordinator.reconciler = blocking
+	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
+	gate, err := newClaimInstallGate(1, 1)
+	if err != nil {
+		t.Fatalf("newClaimInstallGate() error = %v", err)
+	}
+	gateLease, err := gate.acquire(context.Background(), claim.Registration.UID)
+	if err != nil {
+		t.Fatalf("gate acquire error = %v", err)
+	}
+	t.Cleanup(gateLease.release)
+	store := &fakeStore{claim: func(context.Context, string, CredentialDigest) (SessionClaim, error) {
+		return claim, nil
+	}}
+	gatedClaim, err := gateLease.claimSession(context.Background(), store, CredentialDigest{1})
+	if err != nil {
+		t.Fatalf("claimSession() error = %v", err)
+	}
+	type establishResult struct {
+		session *coordinatedSession
+		err     error
+	}
+	result := make(chan establishResult, 1)
+	go func() {
+		session, err := coordinator.establish(context.Background(), gatedClaim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+			return nil
+		})
+		result <- establishResult{session: session, err: err}
+	}()
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not enter reconciliation")
+	}
+	requireClaimInstallGateStats(t, gate, claimInstallGateStats{})
+	close(blocking.release)
+	completed := <-result
+	if completed.err != nil || completed.session == nil {
+		t.Fatalf("establish() = (%v, %v), want session/nil", completed.session, completed.err)
+	}
+	if err := completed.session.close(context.Background()); err != nil {
+		t.Fatalf("session close error = %v", err)
+	}
+}
+
 func TestNewSessionCoordinatorRequiresOneAuthorityAndValidBounds(t *testing.T) {
 	registry := mustSessionRegistry(t, 1)
 	otherRegistry := mustSessionRegistry(t, 1)
@@ -306,7 +399,7 @@ func TestSessionCoordinatorFailuresStopAtOrderedBoundary(t *testing.T) {
 	t.Run("invalid admission", func(t *testing.T) {
 		coordinator, _, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 		claim, _ := coordinatorInput(t, "registration-a", 1, "slot-a")
-		if session, err := coordinator.establish(context.Background(), claim, nil, func(context.Context, *externalproviderpb.ServerFrame) error { return nil }); !errors.Is(err, ErrInvalidConnectAdmission) || session != nil {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), nil, func(context.Context, *externalproviderpb.ServerFrame) error { return nil }); !errors.Is(err, ErrInvalidConnectAdmission) || session != nil {
 			t.Fatalf("establish(invalid admission) = (%v, %v)", session, err)
 		}
 		if len(runtime.eventSnapshot()) != 0 || routes.Stats() != (SessionRouteDirectoryStats{}) {
@@ -320,7 +413,7 @@ func TestSessionCoordinatorFailuresStopAtOrderedBoundary(t *testing.T) {
 		runtime.reconcileErr = injected
 		claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
 		readyCalled := false
-		if session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 			readyCalled = true
 			return nil
 		}); !errors.Is(err, injected) || session != nil {
@@ -339,7 +432,7 @@ func TestSessionCoordinatorFailuresStopAtOrderedBoundary(t *testing.T) {
 		runtime.mutateWorkers = func(workers []*ateapipb.Worker) { workers[0].Metadata.Uid = "not-a-uuid" }
 		claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
 		readyCalled := false
-		if session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 			readyCalled = true
 			return nil
 		}); !errors.Is(err, ErrInvalidSessionWorkerBindings) || session != nil {
@@ -357,7 +450,7 @@ func TestSessionCoordinatorFailuresStopAtOrderedBoundary(t *testing.T) {
 		coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 		injected := errors.New("injected Ready failure")
 		claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-		if session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 			runtime.record("ready")
 			return injected
 		}); !errors.Is(err, injected) || session != nil {
@@ -393,7 +486,7 @@ func TestSessionCoordinatorDoesNotSendReadyAfterReconcileWasFenced(t *testing.T)
 	}
 	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
 	readyCalled := false
-	session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+	session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 		readyCalled = true
 		return nil
 	})
@@ -412,7 +505,7 @@ func TestSessionCoordinatorDoesNotSendReadyAfterReconcileWasFenced(t *testing.T)
 	if current, ok := registry.lookup("registration-a", 2); !ok || current != reconciler.lease {
 		t.Fatalf("newer generation = (%p, %v), want (%p, true)", current, ok, reconciler.lease)
 	}
-	if !registry.remove("registration-a", 2, reconciler.lease) {
+	if !registry.remove("registration-a", 2, reconciler.lease, true) {
 		t.Fatal("could not remove test replacement lease")
 	}
 }
@@ -425,7 +518,7 @@ func TestSessionCoordinatorRouteAndActivationFailuresFailClosed(t *testing.T) {
 		mustPublishRoute(t, routes, otherLease, mustRouteBindings(t, otherAdmission, 20))
 
 		claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-		if session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 			runtime.record("ready")
 			return nil
 		}); !errors.Is(err, ErrSessionRouteDirectoryFull) || session != nil {
@@ -457,7 +550,7 @@ func TestSessionCoordinatorRouteAndActivationFailuresFailClosed(t *testing.T) {
 			rollbackObserved.Store(!routed)
 		}
 		claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-		if session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error {
+		if session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error {
 			runtime.record("ready")
 			return nil
 		}); !errors.Is(err, injected) || session != nil {
@@ -482,7 +575,7 @@ func TestSessionCoordinatorRouteAndActivationFailuresFailClosed(t *testing.T) {
 func TestSessionCoordinatorFailedReplacementOfflinesInheritedWorkers(t *testing.T) {
 	coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim1, hello1 := coordinatorInput(t, "registration-a", 1, "slot-a")
-	first, err := coordinator.establish(context.Background(), claim1, hello1, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
+	first, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim1), hello1, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
 	if err != nil {
 		t.Fatalf("establish(generation 1) error = %v", err)
 	}
@@ -494,7 +587,7 @@ func TestSessionCoordinatorFailedReplacementOfflinesInheritedWorkers(t *testing.
 
 	claim2, hello2 := coordinatorInput(t, "registration-a", 2, "slot-a")
 	injected := errors.New("replacement Ready failure")
-	if second, err := coordinator.establish(context.Background(), claim2, hello2, func(context.Context, *externalproviderpb.ServerFrame) error { return injected }); !errors.Is(err, injected) || second != nil {
+	if second, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim2), hello2, func(context.Context, *externalproviderpb.ServerFrame) error { return injected }); !errors.Is(err, injected) || second != nil {
 		t.Fatalf("establish(generation 2 failure) = (%v, %v)", second, err)
 	}
 	if got := runtime.workerSnapshot(name).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
@@ -522,7 +615,7 @@ func TestSessionCoordinatorFailedReplacementOfflinesInheritedWorkers(t *testing.
 func TestSessionCoordinatorConcurrentCloseIsIdempotent(t *testing.T) {
 	coordinator, _, _, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-	session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
+	session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
 	if err != nil {
 		t.Fatalf("establish() error = %v", err)
 	}
@@ -560,7 +653,7 @@ func TestSessionCoordinatorConcurrentCloseIsIdempotent(t *testing.T) {
 func TestSessionCoordinatorCloseFailureKeepsLeaseForRetry(t *testing.T) {
 	coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-	session, err := coordinator.establish(context.Background(), claim, hello, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
+	session, err := coordinator.establish(context.Background(), coordinatorGatedClaim(t, claim), hello, func(context.Context, *externalproviderpb.ServerFrame) error { return nil })
 	if err != nil {
 		t.Fatalf("establish() error = %v", err)
 	}

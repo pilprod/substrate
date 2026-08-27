@@ -86,7 +86,7 @@ func WithConnectHandshakeLimits(limits ConnectHandshakeLimits) BrokerOption {
 // process-local route and Worker lifecycle authority.
 func WithSessionRuntime(runtime *SessionRuntime) BrokerOption {
 	return func(broker *Broker) error {
-		if runtime == nil || runtime.coordinator == nil {
+		if runtime == nil || runtime.coordinator == nil || runtime.claimInstallGate == nil {
 			return errors.New("external provider session runtime is not configured")
 		}
 		if broker.sessionRuntime != nil {
@@ -223,7 +223,7 @@ func (b *Broker) MintSessionToken(ctx context.Context, req *externalproviderpb.M
 // the route becomes visible and, for a forwarding-bound coordinator, Workers
 // become ACTIVE.
 func (b *Broker) Connect(stream grpc.BidiStreamingServer[externalproviderpb.ClientFrame, externalproviderpb.ServerFrame]) error {
-	if b == nil || b.store == nil || b.sessionRuntime == nil || b.sessionRuntime.coordinator == nil || stream == nil || stream.Context() == nil {
+	if b == nil || b.store == nil || b.sessionRuntime == nil || b.sessionRuntime.coordinator == nil || b.sessionRuntime.claimInstallGate == nil || stream == nil || stream.Context() == nil {
 		return status.Error(codes.FailedPrecondition, "session runtime is unavailable")
 	}
 	ctx := stream.Context()
@@ -282,7 +282,18 @@ func (b *Broker) Connect(stream grpc.BidiStreamingServer[externalproviderpb.Clie
 	}
 	sessionDigest := digestCredential(sessionDigestDomain, sessionCredential)
 	clear(sessionCredential)
-	claim, err := b.store.ClaimExternalProviderSession(handshakeCtx, hello.registrationUID, sessionDigest)
+	claimGate, err := b.sessionRuntime.claimInstallGate.acquire(handshakeCtx, hello.registrationUID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return connectContextError(ctx)
+		}
+		if handshakeCtx.Err() != nil {
+			return status.Error(codes.DeadlineExceeded, "Connect handshake deadline exceeded")
+		}
+		return status.Error(codes.ResourceExhausted, "session admission is busy")
+	}
+	defer claimGate.release()
+	gatedClaim, err := claimGate.claimSession(handshakeCtx, b.store, sessionDigest)
 	if err != nil {
 		if ctx.Err() != nil {
 			return connectContextError(ctx)
@@ -299,7 +310,7 @@ func (b *Broker) Connect(stream grpc.BidiStreamingServer[externalproviderpb.Clie
 	releaseHandshakeOnReturn = false
 	cancelHandshake()
 
-	session, err := b.sessionRuntime.coordinator.establish(ctx, claim, hello, func(_ context.Context, frame *externalproviderpb.ServerFrame) error {
+	session, err := b.sessionRuntime.coordinator.establish(ctx, gatedClaim, hello, func(_ context.Context, frame *externalproviderpb.ServerFrame) error {
 		return stream.Send(frame)
 	})
 	if err != nil {

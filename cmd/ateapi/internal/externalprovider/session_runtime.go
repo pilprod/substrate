@@ -34,6 +34,7 @@ var errInvalidSessionRuntime = errors.New("invalid external provider session run
 // live external provider sessions.
 type SessionRuntimeConfig struct {
 	MaxTrackedRegistrations uint32
+	ClaimInstallGateLimits  ClaimInstallGateLimits
 	RouteLimits             SessionRouteDirectoryLimits
 	ChannelLimits           ChannelSessionLimits
 }
@@ -43,6 +44,10 @@ type SessionRuntimeConfig struct {
 func DefaultSessionRuntimeConfig() SessionRuntimeConfig {
 	return SessionRuntimeConfig{
 		MaxTrackedRegistrations: defaultSessionRegistrations,
+		ClaimInstallGateLimits: ClaimInstallGateLimits{
+			MaxInFlight:     defaultMaxClaimInstallInFlight,
+			MaxDistinctKeys: defaultMaxClaimInstallKeys,
+		},
 		RouteLimits: SessionRouteDirectoryLimits{
 			MaxRoutes:   defaultSessionRoutes,
 			MaxBindings: defaultSessionBindings,
@@ -58,17 +63,20 @@ func DefaultSessionRuntimeConfig() SessionRuntimeConfig {
 // shared by scheduling and Connect. It is created before the control service,
 // then bound exactly once to that service's Worker persistence boundaries.
 type SessionAuthority struct {
-	registry      *sessionRegistry
-	routes        *SessionRouteDirectory
-	channelLimits ChannelSessionLimits
+	registry         *sessionRegistry
+	routes           *SessionRouteDirectory
+	claimInstallGate *claimInstallGate
+	channelLimits    ChannelSessionLimits
 
 	mu    sync.Mutex
 	bound bool
 }
 
-// SessionRuntime is the Connect-side view of one bound SessionAuthority.
+// SessionRuntime is the Connect-side view of one bound SessionAuthority. Every
+// Broker using this runtime shares its claim-install gate and route authority.
 type SessionRuntime struct {
-	coordinator *sessionCoordinator
+	coordinator      *sessionCoordinator
+	claimInstallGate *claimInstallGate
 }
 
 // NewSessionAuthority constructs an empty bounded authority. It publishes no
@@ -77,6 +85,13 @@ func NewSessionAuthority(config SessionRuntimeConfig) (*SessionAuthority, error)
 	registry, err := newSessionRegistry(config.MaxTrackedRegistrations)
 	if err != nil {
 		return nil, fmt.Errorf("%w: registry: %w", errInvalidSessionRuntime, err)
+	}
+	claimInstallGate, err := newClaimInstallGate(
+		config.ClaimInstallGateLimits.MaxInFlight,
+		config.ClaimInstallGateLimits.MaxDistinctKeys,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: claim-install gate: %w", errInvalidSessionRuntime, err)
 	}
 	routes, err := newSessionRouteDirectory(registry, config.RouteLimits)
 	if err != nil {
@@ -87,9 +102,10 @@ func NewSessionAuthority(config SessionRuntimeConfig) (*SessionAuthority, error)
 		return nil, fmt.Errorf("%w: channels: %w", errInvalidSessionRuntime, err)
 	}
 	return &SessionAuthority{
-		registry:      registry,
-		routes:        routes,
-		channelLimits: channelLimits,
+		registry:         registry,
+		routes:           routes,
+		claimInstallGate: claimInstallGate,
+		channelLimits:    channelLimits,
 	}, nil
 }
 
@@ -109,7 +125,7 @@ func (a *SessionAuthority) Bind(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
 ) (*SessionRuntime, error) {
-	if a == nil || a.registry == nil || a.routes == nil || reconciler == nil || availability == nil {
+	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
 		return nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
 	}
 	a.mu.Lock()
@@ -129,5 +145,5 @@ func (a *SessionAuthority) Bind(
 		return nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}
 	a.bound = true
-	return &SessionRuntime{coordinator: coordinator}, nil
+	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, nil
 }

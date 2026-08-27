@@ -94,12 +94,12 @@ func newSessionCoordinatorWithActivation(
 	}, nil
 }
 
-// establish validates the authenticated admission and executes the only
-// permitted startup order. The caller owns first-frame receive and the atomic
-// credential claim which produced claim and hello.
+// establish validates the gated authenticated admission and executes the only
+// permitted startup order. The claim-install gate is released immediately
+// after the registry install, before reconciliation or transport publication.
 func (c *sessionCoordinator) establish(
 	ctx context.Context,
-	claim SessionClaim,
+	gatedClaim *gatedSessionClaim,
 	hello *prevalidatedConnectHello,
 	ready sessionReadyCallback,
 ) (_ *coordinatedSession, returnedErr error) {
@@ -109,6 +109,16 @@ func (c *sessionCoordinator) establish(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	claim, claimGate, err := gatedClaim.beginInstall()
+	if err != nil {
+		return nil, err
+	}
+	releaseClaimGate := true
+	defer func() {
+		if releaseClaimGate {
+			claimGate.release()
+		}
+	}()
 	admission, err := validatePrevalidatedConnectAdmission(claim, hello)
 	if err != nil {
 		return nil, err
@@ -127,6 +137,8 @@ func (c *sessionCoordinator) establish(
 		cleanupErr := c.cleanupFailedEstablishment(ctx, lease, route)
 		returnedErr = errors.Join(returnedErr, cleanupErr)
 	}()
+	claimGate.release()
+	releaseClaimGate = false
 
 	plan, err := PlanExternalWorkers(admission)
 	if err != nil {
@@ -200,7 +212,7 @@ func (c *sessionCoordinator) cleanupFailedEstablishment(ctx context.Context, lea
 	// No handle is returned on failure. Always exact-remove this lease after
 	// the best-effort OFFLINE pass; conservative pending ownership remains in
 	// the bounded lifecycle tombstone for the next generation.
-	c.registry.remove(lease.registration(), lease.sessionGeneration(), lease)
+	c.registry.remove(lease.registration(), lease.sessionGeneration(), lease, cleanupErr == nil)
 	if cleanupErr != nil {
 		return fmt.Errorf("cleaning failed external provider session establishment: %w", cleanupErr)
 	}
@@ -236,7 +248,7 @@ func (s *coordinatedSession) close(ctx context.Context) error {
 	if _, err := s.coordinator.lifecycle.cleanup(ctx, s.route); err != nil {
 		return fmt.Errorf("cleaning external provider Workers: %w", err)
 	}
-	s.coordinator.registry.remove(s.lease.registration(), s.lease.sessionGeneration(), s.lease)
+	s.coordinator.registry.remove(s.lease.registration(), s.lease.sessionGeneration(), s.lease, true)
 	s.closed = true
 	return nil
 }

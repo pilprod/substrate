@@ -230,7 +230,7 @@ func TestSessionRouteDirectoryRejectsRemovedLease(t *testing.T) {
 	directory := mustRouteDirectory(t, registry, 1, 1)
 	bindings := mustRouteBindings(t, workerPlanAdmission(t, "registration-a", "slot-a"), 1)
 	lease := mustInstallSession(t, registry, "registration-a", 1)
-	if !registry.remove("registration-a", 1, lease) {
+	if !registry.remove("registration-a", 1, lease, true) {
 		t.Fatal("remove(current lease) = false, want true")
 	}
 	if route, err := directory.publish(lease, bindings); !errors.Is(err, ErrSessionRouteNotCurrent) || route != nil {

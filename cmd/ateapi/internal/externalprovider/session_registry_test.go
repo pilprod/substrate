@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSessionRegistryValidatesAndBoundsEntries(t *testing.T) {
@@ -44,11 +45,12 @@ func TestSessionRegistryValidatesAndBoundsEntries(t *testing.T) {
 
 	replacement := mustInstallSession(t, registry, "registration-a", 2)
 	requireSessionDone(t, first, errSessionFenced)
-	if !registry.remove("registration-b", 1, second) {
+	if !registry.remove("registration-b", 1, second, true) {
 		t.Fatal("remove(registration-b) = false, want true")
 	}
-	if lease, err := registry.install("registration-c", 1); !errors.Is(err, errSessionRegistryFull) || lease != nil {
-		t.Fatalf("install(over capacity after live removal) = (%v, %v), want (nil, errSessionRegistryFull)", lease, err)
+	third := mustInstallSession(t, registry, "registration-c", 1)
+	if !registry.remove("registration-c", 1, third, true) {
+		t.Fatal("remove(registration-c) = false, want true")
 	}
 	reconnected := mustInstallSession(t, registry, "registration-b", 2)
 	if got, ok := registry.lookup("registration-a", 2); !ok || got != replacement {
@@ -106,16 +108,16 @@ func TestSessionRegistryCompareAndDeletePreventsABACleanup(t *testing.T) {
 	first := mustInstallSession(t, registry, "registration-a", 1)
 	second := mustInstallSession(t, registry, "registration-a", 2)
 
-	if registry.remove("registration-a", 1, first) {
+	if registry.remove("registration-a", 1, first, true) {
 		t.Fatal("remove(old generation) = true, want false")
 	}
-	if registry.remove("registration-a", 2, first) {
+	if registry.remove("registration-a", 2, first, true) {
 		t.Fatal("remove(mismatched lease generation) = true, want false")
 	}
-	if registry.remove("registration-b", 2, second) {
+	if registry.remove("registration-b", 2, second, true) {
 		t.Fatal("remove(mismatched registration) = true, want false")
 	}
-	if registry.remove("registration-a", 2, nil) {
+	if registry.remove("registration-a", 2, nil, true) {
 		t.Fatal("remove(nil lease) = true, want false")
 	}
 	forged := &sessionLease{
@@ -123,29 +125,32 @@ func TestSessionRegistryCompareAndDeletePreventsABACleanup(t *testing.T) {
 		generation:      2,
 		ctx:             context.Background(),
 	}
-	if registry.remove("registration-a", 2, forged) {
+	if registry.remove("registration-a", 2, forged, true) {
 		t.Fatal("remove(forged identity) = true, want false")
 	}
 	if got, ok := registry.lookup("registration-a", 2); !ok || got != second {
 		t.Fatalf("lookup after stale cleanup = (%p, %v), want (%p, true)", got, ok, second)
 	}
 
-	if !registry.remove("registration-a", 2, second) {
+	if !registry.remove("registration-a", 2, second, true) {
 		t.Fatal("remove(exact current lease) = false, want true")
 	}
 	requireSessionDone(t, second, errSessionRemoved)
-	if registry.remove("registration-a", 2, second) {
+	if registry.remove("registration-a", 2, second, true) {
 		t.Fatal("remove(already removed lease) = true, want false")
 	}
 	if got, ok := registry.lookup("registration-a", 2); ok || got != nil {
 		t.Fatalf("lookup after removal = (%v, %v), want (nil, false)", got, ok)
 	}
-	for _, generation := range []uint64{1, 2} {
-		if lease, err := registry.install("registration-a", generation); !errors.Is(err, errSessionGenerationNotNewer) || lease != nil {
-			t.Errorf("install stale generation %d after removal = (%v, %v), want (nil, errSessionGenerationNotNewer)", generation, lease, err)
-		}
+	recreated := mustInstallSession(t, registry, "registration-a", 1)
+	if registry.remove("registration-a", 2, second, true) {
+		t.Fatal("stale remove deleted a recreated lifecycle")
+	}
+	if got, ok := registry.lookup("registration-a", 1); !ok || got != recreated {
+		t.Fatalf("lookup after stale remove = (%p, %v), want (%p, true)", got, ok, recreated)
 	}
 	third := mustInstallSession(t, registry, "registration-a", 3)
+	requireSessionDone(t, recreated, errSessionFenced)
 	if got, ok := registry.lookup("registration-a", 3); !ok || got != third {
 		t.Fatalf("lookup after tombstone replacement = (%p, %v), want (%p, true)", got, ok, third)
 	}
@@ -251,7 +256,7 @@ func TestSessionRegistryConcurrentLookupAndOldCleanupPreserveCurrent(t *testing.
 		go func() {
 			defer wait.Done()
 			<-start
-			if registry.remove("registration-a", 1, old) {
+			if registry.remove("registration-a", 1, old, true) {
 				errorsFound <- errors.New("old cleanup removed the current route")
 			}
 		}()
@@ -281,7 +286,7 @@ func TestSessionRegistryConcurrentLookupAndOldCleanupPreserveCurrent(t *testing.
 		go func() {
 			defer wait.Done()
 			<-start
-			if registry.remove("registration-a", 2, current) {
+			if registry.remove("registration-a", 2, current, true) {
 				removals.Add(1)
 			}
 		}()
@@ -294,6 +299,103 @@ func TestSessionRegistryConcurrentLookupAndOldCleanupPreserveCurrent(t *testing.
 	requireSessionDone(t, current, errSessionRemoved)
 	if got, ok := registry.lookup("registration-a", 2); ok || got != nil {
 		t.Fatalf("lookup after concurrent removal = (%v, %v), want (nil, false)", got, ok)
+	}
+	requireSessionRegistryTracked(t, registry, 0, 0)
+}
+
+func TestSessionRegistryReclaimsMoreSequentialRegistrationsThanCapacity(t *testing.T) {
+	const capacity = 4
+	registry := mustSessionRegistry(t, capacity)
+	for index := range capacity * 8 {
+		registrationUID := fmt.Sprintf("registration-%02d", index)
+		lease := mustInstallSession(t, registry, registrationUID, 1)
+		if !registry.remove(registrationUID, 1, lease, true) {
+			t.Fatalf("remove(%q) = false, want true", registrationUID)
+		}
+		requireSessionRegistryTracked(t, registry, 0, 0)
+	}
+}
+
+func TestSessionRegistryRetainsPendingWorkersAndIncompleteCleanup(t *testing.T) {
+	registry := mustSessionRegistry(t, 1)
+	first := mustInstallSession(t, registry, "registration-a", 1)
+	if err := registry.withCurrentLease(first, func(state *sessionLifecycleState, _ sessionEntry) error {
+		state.ownedWorkers = []sessionWorkerRef{{}}
+		return nil
+	}); err != nil {
+		t.Fatalf("recording pending Worker ownership: %v", err)
+	}
+	if !registry.remove("registration-a", 1, first, true) {
+		t.Fatal("remove(registration-a, 1) = false, want true")
+	}
+	requireSessionRegistryTracked(t, registry, 1, 1)
+	if lease, err := registry.install("registration-b", 1); !errors.Is(err, errSessionRegistryFull) || lease != nil {
+		t.Fatalf("install while pending ownership retained = (%v, %v), want registry full", lease, err)
+	}
+
+	second := mustInstallSession(t, registry, "registration-a", 2)
+	if err := registry.withCurrentLease(second, func(state *sessionLifecycleState, _ sessionEntry) error {
+		state.ownedWorkers = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("clearing recovered Worker ownership: %v", err)
+	}
+	if !registry.remove("registration-a", 2, second, true) {
+		t.Fatal("remove(registration-a, 2) = false, want true")
+	}
+	requireSessionRegistryTracked(t, registry, 0, 0)
+
+	third := mustInstallSession(t, registry, "registration-c", 1)
+	if !registry.remove("registration-c", 1, third, false) {
+		t.Fatal("incomplete remove(registration-c) = false, want true")
+	}
+	requireSessionRegistryTracked(t, registry, 1, 1)
+	if lease, err := registry.install("registration-d", 1); !errors.Is(err, errSessionRegistryFull) || lease != nil {
+		t.Fatalf("install while incomplete cleanup retained = (%v, %v), want registry full", lease, err)
+	}
+	recovered := mustInstallSession(t, registry, "registration-c", 2)
+	if !registry.remove("registration-c", 2, recovered, true) {
+		t.Fatal("successful recovery remove(registration-c) = false, want true")
+	}
+	requireSessionRegistryTracked(t, registry, 0, 0)
+}
+
+func TestSessionRegistryOperationPinPreventsLifecycleABA(t *testing.T) {
+	registry := mustSessionRegistry(t, 1)
+	lease := mustInstallSession(t, registry, "registration-a", 1)
+	operationEntered := make(chan struct{})
+	releaseOperation := make(chan struct{})
+	operationResult := make(chan error, 1)
+	go func() {
+		operationResult <- registry.withCurrentLease(lease, func(*sessionLifecycleState, sessionEntry) error {
+			close(operationEntered)
+			<-releaseOperation
+			return nil
+		})
+	}()
+	<-operationEntered
+
+	removeResult := make(chan bool, 1)
+	go func() { removeResult <- registry.remove("registration-a", 1, lease, true) }()
+	requireSessionRegistryOperations(t, registry, "registration-a", 2)
+	if lease, err := registry.install("registration-b", 1); !errors.Is(err, errSessionRegistryFull) || lease != nil {
+		t.Fatalf("install during pinned removal = (%v, %v), want registry full", lease, err)
+	}
+
+	close(releaseOperation)
+	if err := <-operationResult; err != nil {
+		t.Fatalf("withCurrentLease() error = %v", err)
+	}
+	if removed := <-removeResult; !removed {
+		t.Fatal("pinned remove() = false, want true")
+	}
+	requireSessionRegistryTracked(t, registry, 0, 0)
+	recreated := mustInstallSession(t, registry, "registration-b", 1)
+	if registry.remove("registration-a", 1, lease, true) {
+		t.Fatal("stale remove touched a recreated lifecycle")
+	}
+	if got, ok := registry.lookup("registration-b", 1); !ok || got != recreated {
+		t.Fatalf("recreated lookup = (%p, %v), want (%p, true)", got, ok, recreated)
 	}
 }
 
@@ -319,6 +421,37 @@ func mustInstallSession(t *testing.T, registry *sessionRegistry, registrationUID
 		t.Fatalf("install(%q, %d) error = %v", registrationUID, generation, err)
 	}
 	return lease
+}
+
+func requireSessionRegistryTracked(t *testing.T, registry *sessionRegistry, lifecycles, generations int) {
+	t.Helper()
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	if got := len(registry.lifecycleStates); got != lifecycles {
+		t.Fatalf("tracked lifecycle states = %d, want %d", got, lifecycles)
+	}
+	if got := len(registry.highestGenerations); got != generations {
+		t.Fatalf("tracked generation watermarks = %d, want %d", got, generations)
+	}
+}
+
+func requireSessionRegistryOperations(t *testing.T, registry *sessionRegistry, registrationUID string, want uint32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		registry.mu.RLock()
+		lifecycle := registry.lifecycleStates[registrationUID]
+		var got uint32
+		if lifecycle != nil {
+			got = lifecycle.activeOperations
+		}
+		registry.mu.RUnlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("active lifecycle operations for %q did not reach %d", registrationUID, want)
 }
 
 func requireSessionLive(t *testing.T, lease *sessionLease) {
