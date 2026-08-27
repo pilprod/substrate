@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -45,9 +46,10 @@ type connectTestStream struct {
 	grpc.ServerStream
 	ctx context.Context
 
-	receive chan connectTestReceive
-	sendErr error
-	onSend  func(*externalproviderpb.ServerFrame)
+	receive    chan connectTestReceive
+	sendErr    error
+	beforeSend func(*externalproviderpb.ServerFrame) error
+	onSend     func(*externalproviderpb.ServerFrame)
 
 	mu   sync.Mutex
 	sent []*externalproviderpb.ServerFrame
@@ -87,6 +89,11 @@ func (s *connectTestStream) Send(frame *externalproviderpb.ServerFrame) error {
 		return s.sendErr
 	}
 	cloned := proto.Clone(frame).(*externalproviderpb.ServerFrame)
+	if s.beforeSend != nil {
+		if err := s.beforeSend(proto.Clone(cloned).(*externalproviderpb.ServerFrame)); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	s.sent = append(s.sent, cloned)
 	s.mu.Unlock()
@@ -554,6 +561,278 @@ func TestBrokerConnectReplacementInterruptsIdleFrameReceive(t *testing.T) {
 	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
 		t.Fatalf("route stats after both streams closed = %+v, want empty", stats)
 	}
+}
+
++func TestBrokerConnectReplacementAbortsBlockedProductionSendWithoutWaitCycle(t *testing.T) {
+	coordinator, _, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
+	claim := validSessionClaim(1)
+	firstCredential := testCredential(0x92)
+	secondCredential := testCredential(0x93)
+	broker, _ := connectTestBroker(t, coordinator, func(_ context.Context, _ string, digest CredentialDigest) (SessionClaim, error) {
+		claimed := claim
+		switch digest {
+		case digestCredential(sessionDigestDomain, firstCredential):
+			claimed.Generation = 9
+		case digestCredential(sessionDigestDomain, secondCredential):
+			claimed.Generation = 10
+		default:
+			return SessionClaim{}, ErrAuthenticationFailed
+		}
+		return claimed, nil
+	})
+
+	firstParent, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	first := newIdleConnectTestStream(
+		metadata.NewIncomingContext(firstParent, metadata.Pairs("authorization", "Bearer "+string(firstCredential))),
+		validClientFrame(),
+	)
+	ready := make(chan struct{})
+	openFrames := make(chan *externalproviderpb.ServerFrame, 1)
+	first.onSend = func(frame *externalproviderpb.ServerFrame) {
+		switch {
+		case frame.GetReady() != nil:
+			close(ready)
+		case frame.GetOpen() != nil:
+			openFrames <- frame
+		}
+	}
+	dataStarted := make(chan struct{})
+	var dataOnce sync.Once
+	var activeDataSends atomic.Int32
+	first.beforeSend = func(frame *externalproviderpb.ServerFrame) error {
+		if frame.GetData() == nil {
+			return nil
+		}
+		activeDataSends.Add(1)
+		defer activeDataSends.Add(-1)
+		dataOnce.Do(func() { close(dataStarted) })
+		// Model gRPC flow control: production Send ignores the request context
+		// and unblocks only after the RPC handler returns and gRPC cancels the
+		// actual stream context.
+		<-first.Context().Done()
+		return context.Cause(first.Context())
+	}
+	firstResult := make(chan error, 1)
+	go func() {
+		err := broker.Connect(first)
+		// A real gRPC server cancels stream.Context after the handler returns.
+		// Keeping this ordering in the fake exposes a synchronous-cleanup cycle.
+		cancelFirst()
+		firstResult <- err
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation 9 Connect did not send Ready")
+	}
+	requireCoordinatorWorkerState(t, runtime, ateapipb.WorkerState_WORKER_STATE_ACTIVE)
+
+	assignment := executionAssignment(onlyCoordinatorWorker(t, runtime))
+	dialResult := startExecutionDial(context.Background(), &ExternalExecutionDialer{forwarder: coordinator.forwarder}, assignment)
+	var open *externalproviderpb.ServerFrame
+	select {
+	case open = <-openFrames:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation 9 did not send execution Open")
+	}
+	first.receive <- connectTestReceive{frame: clientAckFrame(open.GetSessionGeneration(), open.GetOpen().GetChannelId(), true, "")}
+	var connection net.Conn
+	select {
+	case dialed := <-dialResult:
+		if dialed.err != nil || dialed.conn == nil {
+			t.Fatalf("DialContext() = (%v, %v)", dialed.conn, dialed.err)
+		}
+		connection = dialed.conn
+	case <-time.After(5 * time.Second):
+		t.Fatal("DialContext did not complete after OpenAck")
+	}
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := connection.Write([]byte("blocked-by-flow-control"))
+		writeResult <- err
+	}()
+	select {
+	case <-dataStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("production Data Send did not enter flow-control wait")
+	}
+
+	second := newConnectTestStream(
+		metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+string(secondCredential))),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- broker.Connect(second) }()
+
+	select {
+	case err := <-firstResult:
+		if status.Code(err) != codes.Aborted {
+			t.Fatalf("generation 9 Connect code = %v, want Aborted", status.Code(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation 9 handler could not return to abort its blocked stream.Send")
+	}
+	select {
+	case err := <-secondResult:
+		if err != nil {
+			t.Fatalf("generation 10 Connect error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement remained blocked after old stream context cancellation")
+	}
+	select {
+	case err := <-writeResult:
+		if err == nil {
+			t.Fatal("old Write succeeded after its production stream was aborted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old Write remained blocked after stream context cancellation")
+	}
+	if active := activeDataSends.Load(); active != 0 {
+		t.Fatalf("replacement returned with %d old production Send calls active", active)
+	}
+	for _, frame := range first.sentSnapshot() {
+		if frame.GetData() != nil {
+			t.Fatalf("old Data frame crossed after replacement: %v", frame)
+		}
+	}
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("route stats after replacement = %+v, want empty", stats)
+	}
+}
+
+func TestBrokerConnectRevokesAssignmentBeforeDetachedBlockedSendCleanup(t *testing.T) {
+	coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
+	claim := validSessionClaim(1)
+	claim.Generation = 11
+	credential := testCredential(0x94)
+	broker, _ := connectTestBroker(t, coordinator, func(_ context.Context, _ string, digest CredentialDigest) (SessionClaim, error) {
+		if digest != digestCredential(sessionDigestDomain, credential) {
+			return SessionClaim{}, ErrAuthenticationFailed
+		}
+		return claim, nil
+	})
+
+	streamParent, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	stream := newIdleConnectTestStream(
+		metadata.NewIncomingContext(streamParent, metadata.Pairs("authorization", "Bearer "+string(credential))),
+		validClientFrame(),
+	)
+	ready := make(chan struct{})
+	openFrames := make(chan *externalproviderpb.ServerFrame, 1)
+	stream.onSend = func(frame *externalproviderpb.ServerFrame) {
+		switch {
+		case frame.GetReady() != nil:
+			close(ready)
+		case frame.GetOpen() != nil:
+			openFrames <- frame
+		}
+	}
+	dataStarted := make(chan struct{})
+	var dataOnce sync.Once
+	stream.beforeSend = func(frame *externalproviderpb.ServerFrame) error {
+		if frame.GetData() == nil {
+			return nil
+		}
+		dataOnce.Do(func() { close(dataStarted) })
+		<-stream.Context().Done()
+		return context.Cause(stream.Context())
+	}
+	connectResult := make(chan error, 1)
+	go func() {
+		err := broker.Connect(stream)
+		cancelStream() // model gRPC canceling stream.Context after handler return
+		connectResult <- err
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not send Ready")
+	}
+	worker := onlyCoordinatorWorker(t, runtime)
+	dialResult := startExecutionDial(context.Background(), &ExternalExecutionDialer{forwarder: coordinator.forwarder}, executionAssignment(worker))
+	var open *externalproviderpb.ServerFrame
+	select {
+	case open = <-openFrames:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not send execution Open")
+	}
+	stream.receive <- connectTestReceive{frame: clientAckFrame(open.GetSessionGeneration(), open.GetOpen().GetChannelId(), true, "")}
+	var connection net.Conn
+	select {
+	case dialed := <-dialResult:
+		if dialed.err != nil || dialed.conn == nil {
+			t.Fatalf("DialContext() = (%v, %v)", dialed.conn, dialed.err)
+		}
+		connection = dialed.conn
+	case <-time.After(5 * time.Second):
+		t.Fatal("DialContext did not complete after OpenAck")
+	}
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := connection.Write([]byte("blocked-before-receive-error"))
+		writeResult <- err
+	}()
+	select {
+	case <-dataStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Data Send did not enter the production transport")
+	}
+
+	// EOF has no primary error. The detached branch must still return a
+	// non-success status while retaining explicit cleanup ownership.
+	close(stream.receive)
+	select {
+	case err := <-connectResult:
+		if status.Code(err) != codes.Unavailable {
+			t.Fatalf("Connect code = %v, want Unavailable", status.Code(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return to abort the blocked production Send")
+	}
+	if routes.AssignmentGuard().AllowsCandidate(worker) {
+		t.Fatal("Connect returned while its old route still allowed assignment")
+	}
+	mutationCalled := false
+	err := routes.AssignmentGuard().GuardAssignment(
+		context.Background(),
+		worker.GetExternalSlot().GetOwnerAtespace(),
+		worker,
+		func(func(*ateapipb.Worker) error) error {
+			mutationCalled = true
+			return nil
+		},
+	)
+	if !errors.Is(err, ErrExternalRouteAssignmentUnavailable) || mutationCalled {
+		t.Fatalf("GuardAssignment after handler return = (%v, mutation:%v), want unavailable/no mutation", err, mutationCalled)
+	}
+	select {
+	case err := <-writeResult:
+		if err == nil {
+			t.Fatal("old Write succeeded after stream abort")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old Write remained blocked after handler returned")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if routes.Stats() == (SessionRouteDirectoryStats{}) {
+			if _, current := registry.lookup(claim.Registration.UID, claim.Generation); !current {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("detached cleanup route stats = %+v, want empty", stats)
+	}
+	if _, current := registry.lookup(claim.Registration.UID, claim.Generation); current {
+		t.Fatal("detached cleanup retained the exact session lease")
+	}
+	requireCoordinatorWorkerState(t, runtime, ateapipb.WorkerState_WORKER_STATE_OFFLINE)
 }
 
 func TestBrokerConnectSerializesClaimThroughInstallAcrossSharedRuntime(t *testing.T) {

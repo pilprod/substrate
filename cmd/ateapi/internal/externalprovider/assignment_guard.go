@@ -71,7 +71,7 @@ func (d *SessionRouteDirectory) AssignmentGuard() RouteAssignmentGuard {
 func (g *ExternalRouteAssignmentGuard) AllowsCandidate(worker *ateapipb.Worker) bool {
 	route, binding, ok := g.lookup(worker)
 	return ok && routeLiveError(route) == nil &&
-		g.routes.AuthorizesWorker(route, binding.WorkerName(), binding.WorkerUID(), binding.ExecutionIdentity())
+		g.routes.AuthorizesBinding(route, binding)
 }
 
 // GuardAssignment linearizes one final assignment mutation with route close,
@@ -87,7 +87,7 @@ func (g *ExternalRouteAssignmentGuard) GuardAssignment(
 		return ErrInvalidExternalAssignmentMutation
 	}
 	route, binding, ok := g.lookup(worker)
-	if !ok || worker.GetExternalSlot().GetOwnerAtespace() != expectedActorAtespace {
+	if !ok || binding.OwnerAtespace() != expectedActorAtespace {
 		return ErrExternalRouteAssignmentUnavailable
 	}
 	if g.afterLookup != nil {
@@ -98,12 +98,9 @@ func (g *ExternalRouteAssignmentGuard) GuardAssignment(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if routeLiveError(route) != nil || !g.routes.AuthorizesWorker(
-			route,
-			binding.WorkerName(),
-			binding.WorkerUID(),
-			binding.ExecutionIdentity(),
-		) {
+		route.assignmentGate.RLock()
+		defer route.assignmentGate.RUnlock()
+		if routeLiveError(route) != nil || !g.routes.AuthorizesBinding(route, binding) {
 			return ErrExternalRouteAssignmentUnavailable
 		}
 
@@ -114,21 +111,11 @@ func (g *ExternalRouteAssignmentGuard) GuardAssignment(
 			if expectedActorAtespace == "" {
 				return ErrInvalidExternalAssignmentMutation
 			}
-			if current == nil ||
-				current.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT ||
-				current.GetMetadata().GetName() != binding.WorkerName() ||
-				current.GetMetadata().GetUid() != binding.WorkerUID() ||
-				current.GetExternalSlot().GetExecutionIdentity() != binding.ExecutionIdentity() ||
-				current.GetExternalSlot().GetOwnerAtespace() != expectedActorAtespace ||
+			if !bindingMatchesWorker(binding, current) || binding.OwnerAtespace() != expectedActorAtespace ||
 				current.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
 				return fmt.Errorf("%w: authoritative Worker identity or state changed", ErrExternalRouteAssignmentUnavailable)
 			}
-			if routeLiveError(route) != nil || !g.routes.AuthorizesWorker(
-				route,
-				current.GetMetadata().GetName(),
-				current.GetMetadata().GetUid(),
-				current.GetExternalSlot().GetExecutionIdentity(),
-			) {
+			if routeLiveError(route) != nil || !g.routes.AuthorizesBinding(route, binding) {
 				return ErrExternalRouteAssignmentUnavailable
 			}
 			return nil
@@ -155,10 +142,23 @@ func (g *ExternalRouteAssignmentGuard) lookup(worker *ateapipb.Worker) (*Session
 		return nil, SessionWorkerBinding{}, false
 	}
 	route, binding, ok := g.routes.LookupExecutionIdentity(worker.GetExternalSlot().GetExecutionIdentity())
-	if !ok || binding.WorkerName() != worker.GetMetadata().GetName() ||
-		binding.WorkerUID() != worker.GetMetadata().GetUid() ||
-		binding.ExecutionIdentity() != worker.GetExternalSlot().GetExecutionIdentity() {
+	if !ok || !bindingMatchesWorker(binding, worker) {
 		return nil, SessionWorkerBinding{}, false
 	}
 	return route, binding, true
+}
+
+func bindingMatchesWorker(binding SessionWorkerBinding, worker *ateapipb.Worker) bool {
+	return worker != nil && worker.GetMetadata() != nil &&
+		worker.GetProvider() == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT &&
+		worker.GetMetadata().GetAtespace() == "" &&
+		worker.GetMetadata().GetName() == binding.WorkerName() &&
+		worker.GetMetadata().GetUid() == binding.WorkerUID() &&
+		worker.GetWorkerNamespace() == binding.WorkerNamespace() &&
+		worker.GetWorkerPool() == binding.WorkerPool() &&
+		worker.GetWorkerPod() == "" && worker.GetWorkerPodUid() == "" && worker.GetNodeName() == "" && worker.GetIp() == "" &&
+		worker.GetExternalSlot() != nil &&
+		worker.GetExternalSlot().GetExecutionIdentity() == binding.ExecutionIdentity() &&
+		worker.GetExternalSlot().GetLocalityIdentity() == binding.LocalityIdentity() &&
+		worker.GetExternalSlot().GetOwnerAtespace() == binding.OwnerAtespace()
 }

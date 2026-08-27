@@ -37,7 +37,11 @@ func TestBuildSessionWorkerBindingsPinsWorkerIncarnationsWithoutAliasing(t *test
 
 	want := append([]SessionWorkerBinding(nil), bindings...)
 	workers[0].Metadata.Uid = routeWorkerUID(99)
+	workers[0].WorkerNamespace = "mutated-namespace"
+	workers[0].WorkerPool = "mutated-pool"
 	workers[0].ExternalSlot.ExecutionIdentity = "mutated-execution"
+	workers[0].ExternalSlot.LocalityIdentity = "mutated-locality"
+	workers[0].ExternalSlot.OwnerAtespace = "mutated-owner"
 	workers[0].Metadata.Name = "mutated-worker"
 	bindings[0] = SessionWorkerBinding{}
 
@@ -50,7 +54,9 @@ func TestBuildSessionWorkerBindingsPinsWorkerIncarnationsWithoutAliasing(t *test
 	}
 	for _, binding := range second {
 		if binding.RegistrationUID() != "registration-a" || binding.SlotID() == "" ||
-			binding.WorkerName() == "" || binding.WorkerUID() == "" || binding.ExecutionIdentity() == "" {
+			binding.WorkerName() == "" || binding.WorkerUID() == "" || binding.WorkerNamespace() == "" ||
+			binding.WorkerPool() == "" || binding.ExecutionIdentity() == "" ||
+			binding.LocalityIdentity() == "" || binding.OwnerAtespace() == "" {
 			t.Fatalf("incomplete binding: %+v", binding)
 		}
 	}
@@ -78,6 +84,22 @@ func TestBuildSessionWorkerBindingsRejectsInconsistentWorkers(t *testing.T) {
 		}},
 		{name: "changed execution identity", mutate: func(workers []*ateapipb.Worker) []*ateapipb.Worker {
 			workers[0].ExternalSlot.ExecutionIdentity = "different-execution"
+			return workers
+		}},
+		{name: "changed namespace", mutate: func(workers []*ateapipb.Worker) []*ateapipb.Worker {
+			workers[0].WorkerNamespace = "different-namespace"
+			return workers
+		}},
+		{name: "changed pool", mutate: func(workers []*ateapipb.Worker) []*ateapipb.Worker {
+			workers[0].WorkerPool = "different-pool"
+			return workers
+		}},
+		{name: "changed locality", mutate: func(workers []*ateapipb.Worker) []*ateapipb.Worker {
+			workers[0].ExternalSlot.LocalityIdentity = "different-locality"
+			return workers
+		}},
+		{name: "changed owner", mutate: func(workers []*ateapipb.Worker) []*ateapipb.Worker {
+			workers[0].ExternalSlot.OwnerAtespace = "different-owner"
 			return workers
 		}},
 	}
@@ -147,6 +169,14 @@ func TestSessionRouteDirectoryValidatesAndBoundsCapacity(t *testing.T) {
 	}
 	if !directory.AuthorizesWorker(routeA2, gotBinding.WorkerName(), gotBinding.WorkerUID(), gotBinding.ExecutionIdentity()) {
 		t.Fatal("current route did not authorize its exact Worker binding")
+	}
+	if !directory.AuthorizesBinding(routeA2, gotBinding) {
+		t.Fatal("current route did not authorize its complete immutable binding")
+	}
+	staleBinding := gotBinding
+	staleBinding.localityIdentity = "different-locality"
+	if directory.AuthorizesBinding(routeA2, staleBinding) {
+		t.Fatal("route authorized a binding with stale locality identity")
 	}
 	if directory.AuthorizesWorker(routeA2, gotBinding.WorkerName(), routeWorkerUID(999), gotBinding.ExecutionIdentity()) {
 		t.Fatal("route authorized a recreated Worker UID")

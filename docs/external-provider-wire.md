@@ -375,13 +375,27 @@ text.
 
 `SessionAuthority.BindExecutionForwarding` returns the only server-side
 `ExternalExecutionDialer`. `DialContext` accepts only an `ExternalSlot`
-assignment whose Worker name, canonical resource UID, execution identity, and
-current route all match. It allocates a never-reused even channel ID, emits
+assignment whose global Worker reference, canonical resource UID, namespace,
+pool, execution identity, locality identity, owner Atespace, and current route
+all match the immutable route binding. Kubernetes Pod coordinates are forbidden
+on this path. It allocates a never-reused even channel ID, emits
 `EXECUTION_GRPC` Open, and returns a `net.Conn`-compatible byte stream only
-after an accepted OpenAck. Reads, writes, half-close, reset, deadlines, send
-queueing, and per-channel receive buffering are bounded. An ambiguous timed-
-out send fences the whole generation; `Close` uses its own bounded reset
-deadline so a live but non-reading peer cannot stall cleanup.
+after an accepted OpenAck. Caller cancellation before that Ack fences the whole
+generation because a pending Open cannot be retracted unambiguously. Reads,
+writes, half-close, reset, dynamically updated deadlines, send queueing, and
+per-channel receive buffering are bounded. Route close or replacement first
+cancels the execution generation and then synchronously joins any production
+`stream.Send` which already crossed the transport boundary; after the route
+operation returns, no old-generation callback or frame can cross it. An
+ambiguous timed-out send fences the whole generation; connection `Close` uses
+its own bounded reset deadline so a live but non-reading peer cannot stall that
+per-connection reset. If production `stream.Send` is flow-control blocked while
+the RPC context is otherwise live, the Connect handler detaches exact cleanup
+from its return path only after synchronously closing route assignment authority
+and joining any final mutation which already crossed the route check. Returning
+lets gRPC cancel the real stream context, then an explicitly owned, redacted,
+bounded-retry cleanup joins the aborted Send without a handler/fence wait cycle;
+that detached branch never converts a clean EOF into a successful response.
 
 This slice does not bind `ACTOR_INGRESS` or `ACTOR_EGRESS`; a client-opened
 egress channel receives a bounded negative OpenAck. The ateapi binary still

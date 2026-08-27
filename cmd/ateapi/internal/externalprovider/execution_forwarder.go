@@ -24,13 +24,16 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 )
 
 const (
@@ -131,6 +134,13 @@ type sessionWire struct {
 	queue  chan wireSendRequest
 
 	opGate chan struct{}
+	// sendMu is held across the production transport callback itself. Unlike
+	// the operation gate, it is not released when a request context wakes the
+	// caller while stream.Send is still running. A route fence takes this lock
+	// after canceling the wire, thereby joining an already-started Send and
+	// preventing a queued Send from crossing the fence afterwards.
+	sendMu     sync.Mutex
+	sendActive atomic.Bool
 }
 
 func newSessionWire(parent context.Context, send sessionReadyCallback, queueDepth uint32) (*sessionWire, error) {
@@ -184,6 +194,28 @@ func (w *sessionWire) unlockOperation() {
 	}
 }
 
+// fenceOperations joins the one operation which may already have crossed the
+// route/context checks and entered the transport sender. Route cancellation is
+// performed before this call, so later operations fail when they acquire the
+// gate. Waiting here is the safety boundary which prevents an old generation's
+// Send from completing after Close/replacement returns.
+func (w *sessionWire) fenceOperations(cause error, fence func()) {
+	if w == nil {
+		if fence != nil {
+			fence()
+		}
+		return
+	}
+	w.close(cause)
+	<-w.opGate
+	defer w.unlockOperation()
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	if fence != nil {
+		fence()
+	}
+}
+
 func (w *sessionWire) run() {
 	for {
 		select {
@@ -208,7 +240,30 @@ func (w *sessionWire) run() {
 				}
 				continue
 			}
-			err := w.send(request.ctx, proto.Clone(request.frame).(*externalproviderpb.ServerFrame))
+			// The cancellation check and transport call share sendMu with the
+			// route barrier. Thus either this Send was already in flight and the
+			// barrier joins it, or cancellation wins and this queued frame is
+			// rejected without crossing the old generation boundary.
+			w.sendMu.Lock()
+			// Publish immediately after taking sendMu, before the cancellation
+			// check. If shutdown observes false, a preempted sender can only
+			// resume after wire cancellation and will reject the frame; if it
+			// observes true, the RPC handler returns to abort a callback which
+			// may already depend on stream.Context.
+			w.sendActive.Store(true)
+			var err error
+			if w.ctx.Err() != nil {
+				err = context.Cause(w.ctx)
+			} else if request.ctx == nil || request.ctx.Err() != nil {
+				err = ErrExternalExecutionUnavailable
+				if request.ctx != nil {
+					err = context.Cause(request.ctx)
+				}
+			} else {
+				err = w.send(request.ctx, proto.Clone(request.frame).(*externalproviderpb.ServerFrame))
+			}
+			w.sendActive.Store(false)
+			w.sendMu.Unlock()
 			select {
 			case request.result <- err:
 			default:
@@ -273,6 +328,18 @@ func (w *sessionWire) done() <-chan struct{} {
 	return w.ctx.Done()
 }
 
+// transportIdle is a non-blocking proof that no sender can cross the production
+// transport boundary. The caller must cancel the wire first. sendActive is
+// published immediately after sendMu acquisition, before the cancellation
+// recheck, which closes the preemption window without confusing a route fence
+// merely holding sendMu with a blocked production callback.
+func (w *sessionWire) transportIdle() bool {
+	if w == nil {
+		return true
+	}
+	return !w.sendActive.Load()
+}
+
 // ExternalExecutionDialer opens generation-fenced EXECUTION_GRPC byte streams.
 // It is returned only by SessionAuthority.BindExecutionForwarding.
 type ExternalExecutionDialer struct {
@@ -315,35 +382,65 @@ func (f *executionForwarder) dial(ctx context.Context, assignment *ateapipb.Work
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalidExternalExecutionAssignment)
 	}
-	workerName, workerUID, executionIdentity, err := validateExecutionAssignment(assignment)
+	snapshot, err := validateExecutionAssignment(assignment)
 	if err != nil {
 		return nil, err
 	}
-	route, binding, found := f.routes.LookupExecutionIdentity(executionIdentity)
-	if !found || binding.WorkerName() != workerName || binding.WorkerUID() != workerUID || binding.ExecutionIdentity() != executionIdentity {
+	route, binding, found := f.routes.LookupExecutionIdentity(snapshot.executionIdentity)
+	if !found || !snapshot.matches(binding) {
 		return nil, ErrExternalExecutionUnavailable
 	}
 	f.mu.RLock()
 	session := f.sessions[route]
 	f.mu.RUnlock()
-	if session == nil || !f.routes.AuthorizesWorker(route, workerName, workerUID, executionIdentity) {
+	if session == nil || !f.routes.AuthorizesBinding(route, binding) {
 		return nil, ErrExternalExecutionUnavailable
 	}
 	return session.open(ctx, binding)
 }
 
-func validateExecutionAssignment(assignment *ateapipb.WorkerAssignment) (string, string, string, error) {
+type executionAssignmentSnapshot struct {
+	workerName        string
+	workerUID         string
+	workerNamespace   string
+	workerPool        string
+	executionIdentity string
+	localityIdentity  string
+	ownerAtespace     string
+}
+
+func (s executionAssignmentSnapshot) matches(binding SessionWorkerBinding) bool {
+	return s.workerName == binding.WorkerName() && s.workerUID == binding.WorkerUID() &&
+		s.workerNamespace == binding.WorkerNamespace() && s.workerPool == binding.WorkerPool() &&
+		s.executionIdentity == binding.ExecutionIdentity() && s.localityIdentity == binding.LocalityIdentity() &&
+		s.ownerAtespace == binding.OwnerAtespace()
+}
+
+func validateExecutionAssignment(assignment *ateapipb.WorkerAssignment) (executionAssignmentSnapshot, error) {
 	if assignment == nil || assignment.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT ||
 		assignment.GetWorker() == nil || assignment.GetWorker().GetAtespace() != "" ||
-		!IsValidIdentity(assignment.GetWorker().GetName()) || assignment.GetExternalSlot() == nil ||
-		!IsValidIdentity(assignment.GetExternalSlot().GetExecutionIdentity()) {
-		return "", "", "", ErrInvalidExternalExecutionAssignment
+		!resources.IsValidResourceName(assignment.GetWorker().GetName()) ||
+		len(content.IsDNS1123Label(assignment.GetWorkerNamespace())) != 0 ||
+		len(content.IsDNS1123Subdomain(assignment.GetWorkerPool())) != 0 ||
+		assignment.GetWorkerPod() != "" || assignment.GetWorkerPodUid() != "" || assignment.GetWorkerPodIp() != "" ||
+		assignment.GetExternalSlot() == nil || !IsValidIdentity(assignment.GetExternalSlot().GetExecutionIdentity()) ||
+		!IsValidIdentity(assignment.GetExternalSlot().GetLocalityIdentity()) ||
+		!resources.IsValidResourceName(assignment.GetExternalSlot().GetOwnerAtespace()) {
+		return executionAssignmentSnapshot{}, ErrInvalidExternalExecutionAssignment
 	}
 	parsedUID, err := uuid.Parse(assignment.GetWorkerResourceUid())
 	if err != nil || parsedUID.String() != assignment.GetWorkerResourceUid() {
-		return "", "", "", ErrInvalidExternalExecutionAssignment
+		return executionAssignmentSnapshot{}, ErrInvalidExternalExecutionAssignment
 	}
-	return assignment.GetWorker().GetName(), assignment.GetWorkerResourceUid(), assignment.GetExternalSlot().GetExecutionIdentity(), nil
+	return executionAssignmentSnapshot{
+		workerName:        assignment.GetWorker().GetName(),
+		workerUID:         assignment.GetWorkerResourceUid(),
+		workerNamespace:   assignment.GetWorkerNamespace(),
+		workerPool:        assignment.GetWorkerPool(),
+		executionIdentity: assignment.GetExternalSlot().GetExecutionIdentity(),
+		localityIdentity:  assignment.GetExternalSlot().GetLocalityIdentity(),
+		ownerAtespace:     assignment.GetExternalSlot().GetOwnerAtespace(),
+	}, nil
 }
 
 func (f *executionForwarder) bind(route *SessionRoute, channels *ChannelSessionState, wire *sessionWire) (*executionSession, error) {
@@ -359,7 +456,11 @@ func (f *executionForwarder) bind(route *SessionRoute, channels *ChannelSessionS
 	if !slices.Equal(wantSlots, channels.SlotIDs()) {
 		return nil, ErrExternalExecutionUnavailable
 	}
-	sessionCtx, cancel := context.WithCancelCause(wire.ctx)
+	// Deriving directly from the route eliminates the observer window: route
+	// Close/replacement synchronously fences every operation context before the
+	// directory mutation returns. observeRoute still handles wire failure and
+	// deterministic map/connection cleanup.
+	sessionCtx, cancel := context.WithCancelCause(route.ctx)
 	session := &executionSession{
 		forwarder: f,
 		route:     route,
@@ -373,6 +474,11 @@ func (f *executionForwarder) bind(route *SessionRoute, channels *ChannelSessionS
 	var replaced []*executionSession
 	f.mu.Lock()
 	if _, exists := f.sessions[route]; exists || routeLiveError(route) != nil {
+		f.mu.Unlock()
+		cancel(ErrExternalExecutionUnavailable)
+		return nil, ErrExternalExecutionUnavailable
+	}
+	if !route.installExecutionFence(session.fenceRoute) {
 		f.mu.Unlock()
 		cancel(ErrExternalExecutionUnavailable)
 		return nil, ErrExternalExecutionUnavailable
@@ -424,7 +530,29 @@ func (s *executionSession) observeRoute() {
 	case <-s.wire.done():
 		s.close(context.Cause(s.wire.ctx))
 	case <-s.ctx.Done():
+		// s.ctx is a direct child of route.ctx, so route cancellation can make
+		// both select cases ready. Recheck the parents to ensure choosing this
+		// case never skips deterministic map/connection cleanup. A direct
+		// s.close cancellation has already performed that cleanup.
+		if cause := s.route.CancellationCause(); cause != nil {
+			s.close(cause)
+		} else if cause := context.Cause(s.wire.ctx); cause != nil {
+			s.close(cause)
+		}
 	}
+}
+
+func (s *executionSession) fenceRoute(cause error) {
+	if s == nil {
+		return
+	}
+	if cause == nil {
+		cause = ErrExternalExecutionUnavailable
+	}
+	s.cancel(cause)
+	s.wire.fenceOperations(cause, func() {
+		s.close(cause)
+	})
 }
 
 func (s *executionSession) close(cause error) {
@@ -484,14 +612,20 @@ func (s *executionSession) open(ctx context.Context, binding SessionWorkerBindin
 		if s.wire.ctx.Err() != nil {
 			s.close(context.Cause(s.wire.ctx))
 		}
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
 		return nil, fmt.Errorf("%w: opening channel", ErrExternalExecutionUnavailable)
 	}
 
 	accepted, err := connection.waitForAck(ctx)
 	if err != nil {
-		if connection.abandon() {
-			_ = s.resetBestEffort(connection)
-		}
+		// The channel state machine cannot retract an Open while it is awaiting
+		// the peer's ack. Once the caller stops waiting, the outcome is ambiguous;
+		// fence the entire generation so the pending channel can never consume
+		// capacity in a reusable live session.
+		s.wire.close(err)
+		s.close(err)
 		return nil, err
 	}
 	if !accepted {
@@ -512,7 +646,7 @@ func (s *executionSession) open(ctx context.Context, binding SessionWorkerBindin
 
 func (s *executionSession) liveBindingError(binding SessionWorkerBinding) error {
 	if s == nil || s.ctx.Err() != nil || routeLiveError(s.route) != nil ||
-		!s.forwarder.routes.AuthorizesWorker(s.route, binding.WorkerName(), binding.WorkerUID(), binding.ExecutionIdentity()) {
+		!s.forwarder.routes.AuthorizesBinding(s.route, binding) {
 		return ErrExternalExecutionUnavailable
 	}
 	return nil
@@ -557,6 +691,9 @@ func (s *executionSession) applyClientFrame(frame *externalproviderpb.ClientFram
 		return err
 	}
 	defer s.wire.unlockOperation()
+	if s.ctx.Err() != nil || routeLiveError(s.route) != nil {
+		return ErrExternalExecutionUnavailable
+	}
 	effect, err := s.channels.ApplyClientFrame(frame)
 	if err != nil {
 		return err
@@ -637,7 +774,8 @@ func (s *executionSession) write(ctx context.Context, connection *executionConn,
 		return err
 	}
 	defer s.wire.unlockOperation()
-	if s.connection(connection.channelID) != connection || connection.localWriteIsClosed() || s.ctx.Err() != nil {
+	if s.connection(connection.channelID) != connection || connection.localWriteIsClosed() ||
+		s.liveBindingError(connection.binding) != nil {
 		return net.ErrClosed
 	}
 	effect, err := s.channels.SendServerData(connection.channelID, data)
@@ -658,7 +796,7 @@ func (s *executionSession) halfClose(ctx context.Context, connection *executionC
 		return err
 	}
 	defer s.wire.unlockOperation()
-	if s.connection(connection.channelID) != connection || s.ctx.Err() != nil {
+	if s.connection(connection.channelID) != connection || s.liveBindingError(connection.binding) != nil {
 		return net.ErrClosed
 	}
 	effect, err := s.channels.HalfCloseServerChannel(connection.channelID)
@@ -681,6 +819,10 @@ func (s *executionSession) reset(ctx context.Context, connection *executionConn)
 	defer s.wire.unlockOperation()
 	if s.connection(connection.channelID) != connection {
 		return nil
+	}
+	if s.liveBindingError(connection.binding) != nil {
+		s.removeConnection(connection.channelID, connection)
+		return ErrExternalExecutionUnavailable
 	}
 	effect, err := s.channels.ResetServerChannel(connection.channelID, uint32(codes.Canceled), "server closed execution channel")
 	if err != nil {
@@ -722,6 +864,7 @@ type executionConn struct {
 	writeOperation uint64
 	writeCancel    context.CancelCauseFunc
 	writeTimer     *time.Timer
+	writeTimerGen  uint64
 	notify         chan struct{}
 
 	readMu  sync.Mutex
@@ -933,10 +1076,7 @@ func (c *executionConn) writeContext() (context.Context, func(), error) {
 	cleanup := func() {
 		c.stateMu.Lock()
 		if c.writeOperation == operation {
-			if c.writeTimer != nil {
-				c.writeTimer.Stop()
-				c.writeTimer = nil
-			}
+			c.stopWriteTimerLocked()
 			c.writeCancel = nil
 		}
 		c.stateMu.Unlock()
@@ -946,10 +1086,7 @@ func (c *executionConn) writeContext() (context.Context, func(), error) {
 }
 
 func (c *executionConn) installWriteTimerLocked(cancel context.CancelCauseFunc) {
-	if c.writeTimer != nil {
-		c.writeTimer.Stop()
-		c.writeTimer = nil
-	}
+	c.stopWriteTimerLocked()
 	if c.writeDeadline.IsZero() || cancel == nil {
 		return
 	}
@@ -958,7 +1095,39 @@ func (c *executionConn) installWriteTimerLocked(cancel context.CancelCauseFunc) 
 		cancel(os.ErrDeadlineExceeded)
 		return
 	}
-	c.writeTimer = time.AfterFunc(remaining, func() { cancel(os.ErrDeadlineExceeded) })
+	c.writeTimerGen++
+	generation := c.writeTimerGen
+	operation := c.writeOperation
+	c.writeTimer = time.AfterFunc(remaining, func() {
+		c.expireWriteDeadline(operation, generation, cancel)
+	})
+}
+
+func (c *executionConn) stopWriteTimerLocked() {
+	// Increment even when Timer.Stop reports success: a callback can already be
+	// runnable, and its generation must not cancel a rescheduled/current write.
+	c.writeTimerGen++
+	if c.writeTimer != nil {
+		c.writeTimer.Stop()
+		c.writeTimer = nil
+	}
+}
+
+func (c *executionConn) expireWriteDeadline(operation, generation uint64, cancel context.CancelCauseFunc) {
+	c.stateMu.Lock()
+	if c.writeOperation != operation || c.writeTimerGen != generation || c.writeCancel == nil {
+		c.stateMu.Unlock()
+		return
+	}
+	c.writeTimer = nil
+	// Invalidate duplicate/runnable callbacks before invoking cancellation.
+	c.writeTimerGen++
+	// Cancel under stateMu so a concurrent deadline extension either wins the
+	// generation check first or observes an already-expired operation. Unlocking
+	// between the check and cancel would let a stopped old timer cancel the newly
+	// rescheduled write.
+	cancel(os.ErrDeadlineExceeded)
+	c.stateMu.Unlock()
 }
 
 // CloseWrite sends the byte-stream half-close used by gRPC transports.
@@ -989,6 +1158,7 @@ func (c *executionConn) SetDeadline(deadline time.Time) error {
 	c.stateMu.Lock()
 	c.readDeadline = deadline
 	c.writeDeadline = deadline
+	c.installWriteTimerLocked(c.writeCancel)
 	c.stateMu.Unlock()
 	c.signal()
 	return nil

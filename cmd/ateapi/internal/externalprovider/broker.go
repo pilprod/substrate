@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -353,9 +354,27 @@ func runConnectedSession(
 	}()
 	defer stopPump()
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := session.close(cleanupCtx); err != nil && returnedErr == nil {
+		// Stop new wire work before deciding whether cleanup may be joined in
+		// this handler. Production stream.Send is tied to stream.Context, not
+		// the callback context. If one is still in flight while the RPC context
+		// is live, synchronous session.close would wait for the route fence while
+		// Send waits for this handler to return: a permanent cycle. Detach only
+		// that cleanup case; returning lets gRPC cancel stream.Context, after
+		// which the exact cleanup still joins Send and completes normally.
+		// beginClose is the synchronous authority boundary: it cancels the
+		// route and joins a final assignment mutation without waiting for the
+		// transport callback which may require this handler to return.
+		_ = session.coordinator.routes.beginClose(session.route)
+		session.wire.close(ErrExternalExecutionUnavailable)
+		session.cancel(ErrExternalExecutionUnavailable)
+		if ctx.Err() == nil && !session.wire.transportIdle() {
+			if returnedErr == nil {
+				returnedErr = status.Error(codes.Unavailable, "session transport shutdown is in progress")
+			}
+			go cleanupConnectedSessionDetached(session)
+			return
+		}
+		if err := cleanupConnectedSession(session); err != nil && returnedErr == nil {
 			returnedErr = status.Error(codes.Unavailable, "session cleanup failed")
 		}
 	}()
@@ -368,9 +387,15 @@ func runConnectedSession(
 		case <-ctx.Done():
 			return connectContextError(ctx)
 		case <-session.done():
+			if ctx.Err() != nil {
+				return connectContextError(ctx)
+			}
 			return status.Error(codes.Aborted, "session was replaced or closed")
 		case result, open := <-received:
 			if !open {
+				if ctx.Err() != nil {
+					return connectContextError(ctx)
+				}
 				return status.Error(codes.Unavailable, "session transport failed")
 			}
 			if result.err != nil {
@@ -390,6 +415,36 @@ func runConnectedSession(
 			}
 		}
 	}
+}
+
+func cleanupConnectedSession(session *coordinatedSession) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return session.close(cleanupCtx)
+}
+
+func cleanupConnectedSessionDetached(session *coordinatedSession) {
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := cleanupConnectedSession(session); err == nil {
+			return
+		}
+		if session == nil || session.coordinator == nil || session.coordinator.registry == nil || session.lease == nil {
+			return
+		}
+		current, owned := session.coordinator.registry.lookup(session.lease.registration(), session.lease.sessionGeneration())
+		if !owned || current != session.lease {
+			// A newer generation completed the same exact lifecycle cleanup.
+			return
+		}
+		if attempt != attempts {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// Never log the cleanup error: persistence implementations may attach
+	// secrets. The retained CLOSING route and current lease remain retryable by
+	// the next exact generation install.
+	slog.Error("detached external provider session cleanup exhausted retries", "attempts", attempts)
 }
 
 type connectHandshakeLease struct {

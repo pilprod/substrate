@@ -22,8 +22,10 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 )
 
 const (
@@ -79,7 +81,11 @@ type SessionWorkerBinding struct {
 	slotID            string
 	workerName        string
 	workerUID         string
+	workerNamespace   string
+	workerPool        string
 	executionIdentity string
+	localityIdentity  string
+	ownerAtespace     string
 }
 
 // RegistrationUID returns the non-secret provider registration identity.
@@ -94,8 +100,20 @@ func (b SessionWorkerBinding) WorkerName() string { return b.workerName }
 // WorkerUID returns the exact server-created Worker incarnation.
 func (b SessionWorkerBinding) WorkerUID() string { return b.workerUID }
 
+// WorkerNamespace returns the immutable WorkerPool namespace snapshot.
+func (b SessionWorkerBinding) WorkerNamespace() string { return b.workerNamespace }
+
+// WorkerPool returns the immutable WorkerPool name snapshot.
+func (b SessionWorkerBinding) WorkerPool() string { return b.workerPool }
+
 // ExecutionIdentity returns the stable opaque reverse-index key.
 func (b SessionWorkerBinding) ExecutionIdentity() string { return b.executionIdentity }
+
+// LocalityIdentity returns the stable provider locality identity.
+func (b SessionWorkerBinding) LocalityIdentity() string { return b.localityIdentity }
+
+// OwnerAtespace returns the server-issued Actor ownership boundary.
+func (b SessionWorkerBinding) OwnerAtespace() string { return b.ownerAtespace }
 
 // BuildSessionWorkerBindings validates reconciled Workers against admission
 // and returns bindings ordered by execution identity. Input protobufs and the
@@ -148,7 +166,11 @@ func BuildSessionWorkerBindings(admission *ConnectAdmission, reconciled []*ateap
 			slotID:            slot.slotID,
 			workerName:        workerName,
 			workerUID:         worker.GetMetadata().GetUid(),
+			workerNamespace:   worker.GetWorkerNamespace(),
+			workerPool:        worker.GetWorkerPool(),
 			executionIdentity: worker.GetExternalSlot().GetExecutionIdentity(),
+			localityIdentity:  worker.GetExternalSlot().GetLocalityIdentity(),
+			ownerAtespace:     worker.GetExternalSlot().GetOwnerAtespace(),
 		})
 	}
 	slices.SortFunc(bindings, func(left, right SessionWorkerBinding) int {
@@ -163,6 +185,19 @@ type SessionRoute struct {
 	lease    *sessionLease
 	bindings []SessionWorkerBinding
 	ctx      context.Context
+
+	// assignmentGate linearizes a transport-side route shutdown with the final
+	// authoritative assignment mutation. GuardAssignment holds a read lock only
+	// after it owns the registration lifecycle gate; beginClose takes the write
+	// lock without that gate so a terminating RPC can revoke scheduling before
+	// returning, while still joining any mutation which already crossed its
+	// final route check.
+	assignmentGate sync.RWMutex
+
+	executionFenceMu   sync.Mutex
+	executionFenceHook func(error)
+	executionFenceDone chan struct{}
+	executionFenced    bool
 }
 
 // RegistrationUID returns the route's provider registration identity.
@@ -230,6 +265,53 @@ func (r *SessionRoute) CancellationCause() error {
 	return context.Cause(r.ctx)
 }
 
+// installExecutionFence binds the one transport barrier which must complete
+// before route Close/replacement returns. The hook is deliberately private:
+// only the forwarding authority may attach transport work to a route proof.
+func (r *SessionRoute) installExecutionFence(hook func(error)) bool {
+	if r == nil || hook == nil || r.ctx == nil {
+		return false
+	}
+	r.executionFenceMu.Lock()
+	defer r.executionFenceMu.Unlock()
+	if r.executionFenced || r.executionFenceHook != nil || context.Cause(r.ctx) != nil {
+		return false
+	}
+	r.executionFenceHook = hook
+	return true
+}
+
+// fenceExecution runs and joins the transport barrier exactly once. A second
+// route closer waits for the first instead of returning through an in-flight
+// Send window. Callers must not hold the route-directory mutex.
+func (r *SessionRoute) fenceExecution(cause error) {
+	if r == nil {
+		return
+	}
+	if cause == nil {
+		cause = ErrSessionRouteNotCurrent
+	}
+	r.executionFenceMu.Lock()
+	if r.executionFenced {
+		done := r.executionFenceDone
+		r.executionFenceMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return
+	}
+	r.executionFenced = true
+	hook := r.executionFenceHook
+	done := r.executionFenceDone
+	r.executionFenceMu.Unlock()
+	if hook != nil {
+		hook(cause)
+	}
+	if done != nil {
+		close(done)
+	}
+}
+
 var closedRouteDone = func() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)
@@ -280,6 +362,7 @@ func (d *SessionRouteDirectory) publish(lease *sessionLease, bindings []SessionW
 	}
 
 	var published *SessionRoute
+	var replacedRoute *SessionRoute
 	var publishErr error
 	current := d != nil && d.registry.whileCurrent(lease, func() {
 		d.mu.Lock()
@@ -320,7 +403,15 @@ func (d *SessionRouteDirectory) publish(lease *sessionLease, bindings []SessionW
 		}
 
 		ctx, cancel := context.WithCancelCause(lease.ctx)
-		route := &SessionRoute{lease: lease, bindings: slices.Clone(validated), ctx: ctx}
+		route := &SessionRoute{
+			lease:              lease,
+			bindings:           slices.Clone(validated),
+			ctx:                ctx,
+			executionFenceDone: make(chan struct{}),
+		}
+		context.AfterFunc(ctx, func() {
+			route.fenceExecution(context.Cause(ctx))
+		})
 		if replacing {
 			for _, binding := range existing.route.bindings {
 				delete(d.executions, binding.executionIdentity)
@@ -333,9 +424,16 @@ func (d *SessionRouteDirectory) publish(lease *sessionLease, bindings []SessionW
 		d.totalBindings = uint32(bindingCount)
 		published = route
 		if replacing {
+			replacedRoute = existing.route
 			existing.cancel(ErrSessionRouteReplaced)
 		}
 	})
+	if replacedRoute != nil {
+		// Publication can replace a route directly in tests or future callers;
+		// joining the captured old proof makes replacement a synchronous
+		// transport fence without consulting indexes now owned by the new route.
+		replacedRoute.fenceExecution(ErrSessionRouteReplaced)
+	}
 	if !current {
 		return nil, ErrSessionRouteNotCurrent
 	}
@@ -357,14 +455,15 @@ func (d *SessionRouteDirectory) Withdraw(proof workerSessionRoute) bool {
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	entry, exists := d.routes[route.RegistrationUID()]
 	if !exists || entry.route != route || entry.route.Generation() != route.Generation() {
+		d.mu.Unlock()
 		return false
 	}
 	for _, binding := range route.bindings {
 		indexed, found := d.executions[binding.executionIdentity]
 		if !found || indexed.route != route || indexed.binding != binding {
+			d.mu.Unlock()
 			return false
 		}
 	}
@@ -374,6 +473,8 @@ func (d *SessionRouteDirectory) Withdraw(proof workerSessionRoute) bool {
 	delete(d.routes, route.RegistrationUID())
 	d.totalBindings -= uint32(len(route.bindings))
 	entry.cancel(ErrSessionRouteWithdrawn)
+	d.mu.Unlock()
+	route.fenceExecution(ErrSessionRouteWithdrawn)
 	return true
 }
 
@@ -425,7 +526,8 @@ func (d *SessionRouteDirectory) AuthorizesWorker(proof workerSessionRoute, worke
 		d.mu.RLock()
 		defer d.mu.RUnlock()
 		published, exists := d.routes[route.RegistrationUID()]
-		if !exists || published.route != route || published.route.Generation() != route.Generation() {
+		if !exists || published.route != route || published.route.Generation() != route.Generation() ||
+			routeLiveError(published.route) != nil {
 			return
 		}
 		indexed, exists := d.executions[executionIdentity]
@@ -433,6 +535,31 @@ func (d *SessionRouteDirectory) AuthorizesWorker(proof workerSessionRoute, worke
 			return
 		}
 		authorized = true
+	})
+	return current && authorized
+}
+
+// AuthorizesBinding reports whether the complete immutable Worker identity is
+// still owned by the exact current route generation. Unlike AuthorizesWorker,
+// it also fences denormalized assignment fields which do not participate in
+// the execution-identity reverse index.
+func (d *SessionRouteDirectory) AuthorizesBinding(proof workerSessionRoute, expected SessionWorkerBinding) bool {
+	route, valid := proof.(*SessionRoute)
+	if d == nil || !valid || route == nil || route.lifecycleLease() == nil ||
+		!validSessionWorkerBinding(expected, route.RegistrationUID()) {
+		return false
+	}
+	var authorized bool
+	current := d.registry.whileCurrent(route.lifecycleLease(), func() {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		published, exists := d.routes[route.RegistrationUID()]
+		if !exists || published.route != route || published.route.Generation() != route.Generation() ||
+			routeLiveError(published.route) != nil {
+			return
+		}
+		indexed, exists := d.executions[expected.executionIdentity]
+		authorized = exists && indexed.route == route && indexed.binding == expected
 	})
 	return current && authorized
 }
@@ -446,14 +573,31 @@ func (d *SessionRouteDirectory) Close(proof workerSessionRoute) bool {
 	if d == nil || !valid || route == nil || route.lifecycleLease() == nil {
 		return false
 	}
+	if !d.beginClose(route) {
+		return false
+	}
+	route.fenceExecution(ErrSessionRouteClosing)
+	return true
+}
 
+// beginClose revokes assignment authority and joins any final store mutation
+// which already crossed the route check, but deliberately does not wait for a
+// production transport Send. It lets the Connect handler close authority
+// before returning so gRPC can cancel stream.Context and release that Send.
+func (d *SessionRouteDirectory) beginClose(route *SessionRoute) bool {
+	if d == nil || route == nil || route.lifecycleLease() == nil {
+		return false
+	}
+	route.assignmentGate.Lock()
+	defer route.assignmentGate.Unlock()
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	entry, exists := d.routes[route.RegistrationUID()]
 	if !exists || entry.route != route || entry.route.Generation() != route.Generation() {
+		d.mu.Unlock()
 		return false
 	}
 	entry.cancel(ErrSessionRouteClosing)
+	d.mu.Unlock()
 	return true
 }
 
@@ -499,10 +643,7 @@ func validateRouteBindings(lease *sessionLease, bindings []SessionWorkerBinding)
 	seenUIDs := make(map[string]struct{}, len(validated))
 	seenExecutions := make(map[string]struct{}, len(validated))
 	for _, binding := range validated {
-		uid, err := uuid.Parse(binding.workerUID)
-		if binding.registrationUID != lease.registrationUID || !IsValidIdentity(binding.slotID) ||
-			!IsValidIdentity(binding.workerName) || err != nil || uid.String() != binding.workerUID ||
-			!IsValidIdentity(binding.executionIdentity) {
+		if !validSessionWorkerBinding(binding, lease.registrationUID) {
 			return nil, fmt.Errorf("%w: a binding identity is invalid", ErrInvalidSessionWorkerBindings)
 		}
 		if _, duplicate := seenSlots[binding.slotID]; duplicate {
@@ -526,6 +667,17 @@ func validateRouteBindings(lease *sessionLease, bindings []SessionWorkerBinding)
 		return cmp.Compare(left.executionIdentity, right.executionIdentity)
 	})
 	return validated, nil
+}
+
+func validSessionWorkerBinding(binding SessionWorkerBinding, registrationUID string) bool {
+	uid, err := uuid.Parse(binding.workerUID)
+	return binding.registrationUID == registrationUID && IsValidIdentity(registrationUID) &&
+		IsValidIdentity(binding.slotID) && resources.IsValidResourceName(binding.workerName) &&
+		err == nil && uid.String() == binding.workerUID &&
+		len(content.IsDNS1123Label(binding.workerNamespace)) == 0 &&
+		len(content.IsDNS1123Subdomain(binding.workerPool)) == 0 &&
+		IsValidIdentity(binding.executionIdentity) && IsValidIdentity(binding.localityIdentity) &&
+		resources.IsValidResourceName(binding.ownerAtespace)
 }
 
 func equalSessionBindings(left, right []SessionWorkerBinding) bool {

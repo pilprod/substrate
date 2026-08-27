@@ -90,10 +90,20 @@ func TestExternalRouteAssignmentGuardRequiresExactOpenActiveRoute(t *testing.T) 
 		"offline": func(worker *ateapipb.Worker) {
 			worker.Status.State = ateapipb.WorkerState_WORKER_STATE_OFFLINE
 		},
-		"different uid": func(worker *ateapipb.Worker) { worker.Metadata.Uid = "different-worker-uid" },
+		"different uid":     func(worker *ateapipb.Worker) { worker.Metadata.Uid = "different-worker-uid" },
+		"namespaced Worker": func(worker *ateapipb.Worker) { worker.Metadata.Atespace = "unexpected-scope" },
 		"different execution": func(worker *ateapipb.Worker) {
 			worker.ExternalSlot.ExecutionIdentity = "different-execution"
 		},
+		"different namespace": func(worker *ateapipb.Worker) { worker.WorkerNamespace = "different-namespace" },
+		"different pool":      func(worker *ateapipb.Worker) { worker.WorkerPool = "different-pool" },
+		"different locality": func(worker *ateapipb.Worker) {
+			worker.ExternalSlot.LocalityIdentity = "different-locality"
+		},
+		"different owner": func(worker *ateapipb.Worker) {
+			worker.ExternalSlot.OwnerAtespace = "different-owner"
+		},
+		"forbidden pod identity": func(worker *ateapipb.Worker) { worker.WorkerPod = "stale-pod" },
 		"kubernetes": func(worker *ateapipb.Worker) {
 			worker.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
 		},
@@ -225,6 +235,38 @@ func TestExternalRouteAssignmentGuardRejectsDifferentOwnerAtespace(t *testing.T)
 	})
 	if !errors.Is(err, ErrExternalRouteAssignmentUnavailable) {
 		t.Fatalf("GuardAssignment(authoritative owner drift) error = %v, want ErrExternalRouteAssignmentUnavailable", err)
+	}
+}
+
+func TestExternalRouteAssignmentGuardRejectsAuthoritativeIdentityDrift(t *testing.T) {
+	h := newRouteGuardHarness(t)
+	tests := []struct {
+		name   string
+		mutate func(*ateapipb.Worker)
+	}{
+		{name: "global scope", mutate: func(worker *ateapipb.Worker) { worker.Metadata.Atespace = "unexpected-scope" }},
+		{name: "namespace", mutate: func(worker *ateapipb.Worker) { worker.WorkerNamespace = "different-namespace" }},
+		{name: "pool", mutate: func(worker *ateapipb.Worker) { worker.WorkerPool = "different-pool" }},
+		{name: "pod", mutate: func(worker *ateapipb.Worker) { worker.WorkerPod = "unexpected-pod" }},
+		{name: "locality", mutate: func(worker *ateapipb.Worker) { worker.ExternalSlot.LocalityIdentity = "different-locality" }},
+		{name: "owner", mutate: func(worker *ateapipb.Worker) { worker.ExternalSlot.OwnerAtespace = "different-owner" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := h.guard.GuardAssignment(
+				context.Background(),
+				h.worker.GetExternalSlot().GetOwnerAtespace(),
+				h.worker,
+				func(validate func(*ateapipb.Worker) error) error {
+					current := proto.Clone(h.worker).(*ateapipb.Worker)
+					test.mutate(current)
+					return validate(current)
+				},
+			)
+			if !errors.Is(err, ErrExternalRouteAssignmentUnavailable) {
+				t.Fatalf("GuardAssignment(authoritative drift) error = %v, want unavailable", err)
+			}
+		})
 	}
 }
 
