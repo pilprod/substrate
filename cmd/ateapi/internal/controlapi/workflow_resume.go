@@ -855,13 +855,23 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			SandboxAssets:          sandboxAssets,
 			Spec:                   workloadSpec,
 			ActorUid:               actor.GetMetadata().Uid,
-			EgressGateway:          egressGateway,
+			EgressGateway:          w.runEgressGateway(assignment),
 			CpuMilli:               cpuMilli,
 			MemoryBytes:            memBytes,
 		}
 		_, err = client.Run(ctx, req)
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while creating workload from spec", ateattr.OperationResume)
 	}
+}
+
+func (w *ActorWorkflow) runEgressGateway(assignment *ateapipb.WorkerAssignment) *ateletpb.EgressGateway {
+	// The configured gateway is an in-cluster endpoint. ExternalSlot execution
+	// runs outside that network and its provider-owned Herder must not receive a
+	// Kubernetes-only address it cannot reach or is required to reject.
+	if effectiveWorkerProvider(assignment.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		return nil
+	}
+	return w.egressGateway()
 }
 
 func (w *ActorWorkflow) egressGateway() *ateletpb.EgressGateway {

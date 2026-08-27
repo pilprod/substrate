@@ -243,6 +243,7 @@ func TestExternalSlotColdBootCallsRunWithoutKubernetesSandboxAssets(t *testing.T
 		Status: atev1alpha1.ActorTemplateStatus{GoldenSnapshot: "legacy-golden"},
 	}
 	workflow := newTestActorWorkflowForTemplate(t, persistence, template)
+	workflow.egressGatewayAddress = "in-cluster-egress.ate-system.svc:8443"
 	actorRef := resources.ActorRef{Atespace: "team-a", Name: "external-actor"}
 	seedWorkflowActor(t, ctx, persistence, actorRef, template.Namespace, template.Name, ateapipb.ActorState_ACTOR_STATE_SUSPENDED, func(actor *ateapipb.Actor) {
 		actor.Status.WorkerAssignment = &ateapipb.WorkerAssignment{
@@ -293,7 +294,28 @@ func TestExternalSlotColdBootCallsRunWithoutKubernetesSandboxAssets(t *testing.T
 	if recorder.runRequest == nil || recorder.runRequest.GetSandboxAssets() != nil {
 		t.Fatalf("ExternalSlot Run sandbox assets = %+v, want nil", recorder.runRequest.GetSandboxAssets())
 	}
+	if recorder.runRequest.GetEgressGateway() != nil {
+		t.Fatalf("ExternalSlot Run egress gateway = %+v, want nil", recorder.runRequest.GetEgressGateway())
+	}
 	if telemetry.SnapshotKind != "boot" {
 		t.Fatalf("snapshot telemetry kind = %q, want boot", telemetry.SnapshotKind)
+	}
+}
+
+func TestRunEgressGatewayPreservesKubernetesAndOmitsExternalSlot(t *testing.T) {
+	workflow := &ActorWorkflow{egressGatewayAddress: "in-cluster-egress.ate-system.svc:8443"}
+	for _, provider := range []ateapipb.WorkerProvider{
+		ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED,
+		ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD,
+	} {
+		gateway := workflow.runEgressGateway(&ateapipb.WorkerAssignment{Provider: provider})
+		if gateway.GetAddress() != workflow.egressGatewayAddress {
+			t.Fatalf("Kubernetes provider %s gateway = %+v, want configured in-cluster endpoint", provider, gateway)
+		}
+	}
+	if gateway := workflow.runEgressGateway(&ateapipb.WorkerAssignment{
+		Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+	}); gateway != nil {
+		t.Fatalf("ExternalSlot gateway = %+v, want nil", gateway)
 	}
 }
