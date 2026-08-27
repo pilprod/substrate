@@ -52,15 +52,17 @@ The broker derives stable execution and locality identities from the
 authenticated registration and slot ID. A live connection, socket, URL, token,
 or route is never persisted in a `Worker` or announced by the client.
 
-### Live session registry boundary
+### Live session generation boundary
 
-The ateapi-private in-process registry is the generation fence for live route
+The ateapi-private in-process registry is the generation fence for live session
 ownership. An install is accepted only for a valid registration UID and a
 nonzero generation which is greater than that registration's current live
-generation. Publishing the replacement and cancelling the previous lease happen
+generation. Installing the replacement and cancelling the previous lease happen
 under the same registry lock. Exact lookups use both registration UID and
 generation; callers must also observe the returned lease's done signal because a
-newer generation may fence it immediately after lookup.
+newer generation may fence it immediately after lookup. Installation only
+reserves the current generation: it does not prove that `ConnectReady` was sent
+or that a route was published.
 
 The registry assigns the lease identity itself. Cleanup removes an entry only
 when registration UID, generation, and lease identity all match the current
@@ -79,10 +81,14 @@ original admission.
 Holders of a fenced lease own that reference until their stream cleanup
 finishes. Leases contain only the non-secret registration UID, generation, and
 cancellation state. The registry starts no goroutines and contains no
-credential, frame, channel, transport, Worker, or persistence state.
+credential, frame, channel, transport, or persistence state. A stable
+per-registration lifecycle record, retained with the bounded generation
+tombstone, holds at most the admitted 256 immutable Worker references which may
+still be `ACTIVE`. It contains no assignment, mutable labels, sandbox class, or
+client-supplied status.
 
-This slice does not register a listener, implement `Connect`, route a channel,
-or mutate a Kubernetes `Worker`.
+This boundary does not register a listener, implement `Connect`, or publish a
+route.
 
 ## Connect admission validation
 
@@ -140,6 +146,70 @@ Concurrent creates and updates are retried with the store's UID/version guards.
 The reconciler neither activates current slots nor modifies slots omitted by a
 new plan: route installation and session teardown own `ACTIVE`/`OFFLINE`, while
 drain and deletion remain operator actions.
+
+## Generation-safe Worker availability
+
+The ateapi-private Worker session lifecycle joins a route-publication proof to
+the existing control-plane availability primitive without making Worker status
+client-writable. The required caller order is:
+
+1. Install the nonzero generation lease; it is not routable by itself.
+2. Reconcile the complete Worker plan while every new Worker starts `OFFLINE`.
+3. Initialize the stream and send `ConnectReady`.
+4. Atomically publish all route bindings and obtain the immutable publication
+   proof from the route directory.
+5. Pass that proof to Worker activation.
+
+Activation rejects a bare lease, an unpublished or withdrawn proof, a proof for
+another lease/generation, and any Worker tuple not authorized by the current
+publication. Only the exact live registry lease behind that proof may enter the
+per-registration lifecycle gate. Under the gate, activation proceeds in this
+order:
+
+1. Set every conservatively owned Worker from the previous generation to
+   `OFFLINE`, including a slot omitted from the new complete declaration.
+2. Preflight every desired Worker to `OFFLINE`. This also closes desired slots
+   which a previous ateapi process may have left active.
+3. Set the desired Workers to `ACTIVE` in deterministic Worker-name order.
+
+The route is therefore Ready and published before any Worker becomes `ACTIVE`.
+A replacement install uses the same per-registration gate, so it cannot fence a
+lease halfway through an availability pass. Conversely, cleanup of a fenced
+lease observes that it is no longer current and performs no Worker mutation;
+the current generation has inherited the conservative ownership set.
+
+Normal cleanup first asks the authoritative directory to compare-and-withdraw
+the exact publication proof. Only after the proof is no longer routable does it
+enter the registry lifecycle gate and attempt to set every owned Worker
+`OFFLINE`. The caller may exact-remove the generation lease afterward. A
+transition changes only
+`WorkerStatus.state`; the control-plane primitive preserves any Actor assignment
+and uses the stored Worker UID/version preconditions. Before activation, the
+lifecycle validates every reconciled Worker against the server-derived plan.
+Every returned transition is checked again against the retained immutable
+namespace, pool, capacity, execution identity, locality identity, name, and UID;
+the store's immutable mutation contract prevents those fields from drifting
+within that UID.
+
+Availability changes are separate optimistic writes, not one database
+transaction. On a partial activation failure, the lifecycle withdraws the route
+and immediately attempts `OFFLINE` rollback for every call which may have
+committed, including the failing call. Cleanup continues after individual
+errors and returns deterministic sorted `offlined` and conservative `pending`
+sets. Only `pending` is retained for a retry or inherited by a replacement, so
+state remains bounded by the 256-slot admission limit and cannot accumulate
+across failed generations.
+
+This is deliberately an in-process core. The current ateapi deployment runs
+multiple replicas, so a listener must not enable `Connect` until route and
+Worker ownership have a distributed fencing authority or all sessions for a
+registration are proven to land on one authoritative replica. Process restart
+also loses the conservative set: desired Workers are preflighted safely, but an
+omitted Worker left `ACTIVE` by the old process requires a startup/distributed
+sweeper. This slice consumes only a narrow route-authority interface; it does
+not build a second route directory or binding index. It does not register a
+listener, implement `Connect`, receive or send stream frames, route channels,
+or send `ConnectReady`.
 
 ## Post-Ready channel state
 

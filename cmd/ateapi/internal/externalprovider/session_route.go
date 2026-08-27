@@ -340,10 +340,14 @@ func (d *SessionRouteDirectory) publish(lease *sessionLease, bindings []SessionW
 	return published, nil
 }
 
-// withdraw removes only the exact route pointer currently owned by its
-// registration and generation. Stale cleanup cannot remove a replacement.
-func (d *SessionRouteDirectory) withdraw(route *SessionRoute) bool {
-	if d == nil || route == nil || route.lifecycleLease() == nil {
+// Withdraw removes only the exact concrete route pointer currently owned by
+// its registration and generation. The interface boundary lets the Worker
+// lifecycle consume publication proofs without granting it construction or
+// index authority; a substituted implementation always fails closed. Stale
+// cleanup cannot remove a replacement.
+func (d *SessionRouteDirectory) Withdraw(proof workerSessionRoute) bool {
+	route, valid := proof.(*SessionRoute)
+	if d == nil || !valid || route == nil || route.lifecycleLease() == nil {
 		return false
 	}
 
@@ -406,8 +410,9 @@ func (d *SessionRouteDirectory) LookupExecutionIdentity(executionIdentity string
 // binds the named Worker incarnation to executionIdentity. It is a point-in-
 // time generation-fenced proof; lifecycle callers must also observe
 // route.Done across longer operations.
-func (d *SessionRouteDirectory) AuthorizesWorker(route *SessionRoute, workerName, workerUID, executionIdentity string) bool {
-	if d == nil || route == nil || route.lifecycleLease() == nil || !IsValidIdentity(executionIdentity) {
+func (d *SessionRouteDirectory) AuthorizesWorker(proof workerSessionRoute, workerName, workerUID, executionIdentity string) bool {
+	route, valid := proof.(*SessionRoute)
+	if d == nil || !valid || route == nil || route.lifecycleLease() == nil || !IsValidIdentity(executionIdentity) {
 		return false
 	}
 	var authorized bool

@@ -131,7 +131,7 @@ func TestSessionRouteDirectoryValidatesAndBoundsCapacity(t *testing.T) {
 	leaseA2 := mustInstallSession(t, registry, "registration-a", 2)
 	bindingsA2 := mustRouteBindings(t, workerPlanAdmission(t, "registration-a", "slot-a"), 1)
 	routeA2 := mustPublishRoute(t, directory, leaseA2, bindingsA2)
-	if directory.withdraw(routeA1) {
+	if directory.Withdraw(routeA1) {
 		t.Fatal("stale route cleanup removed a replacement")
 	}
 	if stats := directory.Stats(); stats != (SessionRouteDirectoryStats{Routes: 1, Bindings: 1}) {
@@ -155,7 +155,7 @@ func TestSessionRouteDirectoryValidatesAndBoundsCapacity(t *testing.T) {
 		t.Fatalf("BindingForWorker() = (%+v, %v), want exact binding", bound, found)
 	}
 
-	if !directory.withdraw(routeA2) {
+	if !directory.Withdraw(routeA2) {
 		t.Fatal("withdraw(current route) = false, want true")
 	}
 	requireRouteDone(t, routeA2, ErrSessionRouteWithdrawn)
@@ -217,7 +217,7 @@ func TestSessionRouteDirectoryFencesLookupBeforeReplacementPublishes(t *testing.
 	if firstRoute == secondRoute || secondRoute.Generation() != 2 {
 		t.Fatalf("replacement route = %p generation %d, want new route generation 2", secondRoute, secondRoute.Generation())
 	}
-	if directory.withdraw(firstRoute) {
+	if directory.Withdraw(firstRoute) {
 		t.Fatal("old cleanup withdrew a newer route")
 	}
 	if got, _, ok := directory.LookupExecutionIdentity(bindings[0].ExecutionIdentity()); !ok || got != secondRoute {
@@ -328,7 +328,7 @@ func TestSessionRouteDirectoryConcurrentReplaceWithdrawAndLookup(t *testing.T) {
 		staleCleanup.Add(1)
 		go func() {
 			defer staleCleanup.Done()
-			if directory.withdraw(old) {
+			if directory.Withdraw(old) {
 				failed.Store(true)
 			}
 		}()

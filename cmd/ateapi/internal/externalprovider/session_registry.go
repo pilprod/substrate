@@ -27,21 +27,36 @@ var (
 	errSessionGenerationNotNewer      = errors.New("external provider session generation is not newer")
 	errSessionRegistryFull            = errors.New("external provider session registry is full")
 	errSessionFenced                  = errors.New("external provider session was fenced")
+	errSessionActivationFailed        = errors.New("external provider session activation failed")
+	errSessionClosing                 = errors.New("external provider session is closing")
 	errSessionRemoved                 = errors.New("external provider session was removed")
+	errSessionNotCurrent              = errors.New("external provider session is not current")
 )
 
-// sessionRegistry owns the current in-process route lease and generation fence
-// for each tracked registration. It has no transport, persistence, or
-// credential authority.
+// sessionRegistry owns the current in-process session lease, generation fence,
+// and bounded conservative Worker ownership for each tracked registration. A
+// current lease is not proof that a route was published. The registry has no
+// transport, persistence, or credential authority.
 type sessionRegistry struct {
 	mu                      sync.RWMutex
 	maxTrackedRegistrations uint32
 	highestGenerations      map[string]uint64
 	sessions                map[string]sessionEntry
+	lifecycleStates         map[string]*sessionLifecycleState
 }
 
-// sessionLease is an immutable routing identity. Its cancellation function is
-// retained separately so only the registry can fence or remove it.
+// sessionLifecycleState is retained with the generation tombstone. Its mutex
+// serializes route replacement and Worker availability transitions for one
+// registration without blocking unrelated registrations. ownedWorkers is a
+// bounded, conservative set of Workers which may still be ACTIVE; it survives
+// route replacement so the new owner can make omitted slots unavailable.
+type sessionLifecycleState struct {
+	mu           sync.Mutex
+	ownedWorkers []sessionWorkerRef
+}
+
+// sessionLease is an immutable generation identity. Its cancellation function
+// is retained separately so only the registry can fence or remove it.
 type sessionLease struct {
 	registrationUID string
 	generation      uint64
@@ -61,12 +76,13 @@ func newSessionRegistry(maxTrackedRegistrations uint32) (*sessionRegistry, error
 		maxTrackedRegistrations: maxTrackedRegistrations,
 		highestGenerations:      make(map[string]uint64),
 		sessions:                make(map[string]sessionEntry),
+		lifecycleStates:         make(map[string]*sessionLifecycleState),
 	}, nil
 }
 
-// install publishes generation if it is newer than the current generation for
-// registrationUID. The returned lease is owned by the session handler, which
-// must pass it back to remove during cleanup.
+// install reserves generation if it is newer than the current generation for
+// registrationUID. The returned lease is not routable by itself and is owned
+// by the session handler, which must pass it back to remove during cleanup.
 func (r *sessionRegistry) install(registrationUID string, generation uint64) (*sessionLease, error) {
 	if !IsValidIdentity(registrationUID) {
 		return nil, errInvalidSessionRegistration
@@ -76,14 +92,28 @@ func (r *sessionRegistry) install(registrationUID string, generation uint64) (*s
 	}
 
 	r.mu.Lock()
+	lifecycle := r.lifecycleStates[registrationUID]
+	if lifecycle == nil {
+		if uint64(len(r.lifecycleStates)) >= uint64(r.maxTrackedRegistrations) {
+			r.mu.Unlock()
+			return nil, errSessionRegistryFull
+		}
+		lifecycle = &sessionLifecycleState{}
+		r.lifecycleStates[registrationUID] = lifecycle
+	}
+	r.mu.Unlock()
+
+	// The stable per-registration gate prevents a newer generation from being
+	// installed in the middle of an older generation's Worker transition.
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+
+	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	highest, tracked := r.highestGenerations[registrationUID]
 	if tracked && generation <= highest {
 		return nil, errSessionGenerationNotNewer
-	}
-	if !tracked && uint64(len(r.highestGenerations)) >= uint64(r.maxTrackedRegistrations) {
-		return nil, errSessionRegistryFull
 	}
 
 	previous := r.sessions[registrationUID]
@@ -102,8 +132,8 @@ func (r *sessionRegistry) install(registrationUID string, generation uint64) (*s
 }
 
 // lookup returns a lease only while the exact registration and generation are
-// current. A returned lease may be fenced immediately afterward, so routing
-// users must also observe done.
+// current. It does not prove route publication. A returned lease may be fenced
+// immediately afterward, so users must also observe done.
 func (r *sessionRegistry) lookup(registrationUID string, generation uint64) (*sessionLease, bool) {
 	if !IsValidIdentity(registrationUID) || generation == 0 {
 		return nil, false
@@ -120,11 +150,21 @@ func (r *sessionRegistry) lookup(registrationUID string, generation uint64) (*se
 
 // remove drops and cancels only the exact current lease. Comparing the
 // registration, generation, and lease identity prevents cleanup from an older
-// session from deleting a newer route.
+// session from deleting a newer generation.
 func (r *sessionRegistry) remove(registrationUID string, generation uint64, lease *sessionLease) bool {
 	if lease == nil || lease.registrationUID != registrationUID || lease.generation != generation {
 		return false
 	}
+
+	r.mu.RLock()
+	lifecycle := r.lifecycleStates[registrationUID]
+	r.mu.RUnlock()
+	if lifecycle == nil {
+		return false
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -159,6 +199,38 @@ func (r *sessionRegistry) whileCurrent(lease *sessionLease, fn func()) bool {
 	}
 	fn()
 	return true
+}
+
+// withCurrentLease serializes one lifecycle operation with install and remove
+// for the lease's registration, then rechecks exact session ownership. It never
+// retains state for an untracked registration and never holds the registry's
+// global session lock while the callback performs persistence I/O.
+func (r *sessionRegistry) withCurrentLease(lease *sessionLease, operation func(*sessionLifecycleState, sessionEntry) error) error {
+	if lease == nil || operation == nil || !IsValidIdentity(lease.registrationUID) || lease.generation == 0 {
+		return errSessionNotCurrent
+	}
+
+	r.mu.RLock()
+	lifecycle := r.lifecycleStates[lease.registrationUID]
+	r.mu.RUnlock()
+	if lifecycle == nil {
+		return errSessionNotCurrent
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+
+	r.mu.RLock()
+	current, exists := r.sessions[lease.registrationUID]
+	isCurrent := exists && current.lease == lease && current.lease.generation == lease.generation
+	r.mu.RUnlock()
+	if !isCurrent {
+		if cause := lease.cancellationCause(); cause != nil {
+			return cause
+		}
+		return errSessionNotCurrent
+	}
+	return operation(lifecycle, current)
 }
 
 func (l *sessionLease) registration() string {

@@ -100,14 +100,23 @@ func (p *WorkerPlan) ValidateExisting(existing *ateapipb.Worker) error {
 		return fmt.Errorf("%w: Worker name is not present in the admission", ErrInvalidWorkerPlan)
 	}
 	desired := p.workers[index]
-	if existing.GetMetadata().GetAtespace() != "" ||
+	return validatePlannedWorkerIdentity(desired, existing)
+}
+
+// validatePlannedWorkerIdentity compares only the durable, immutable provider
+// identity. Mutable scheduling hints, server metadata/status, and liveness are
+// deliberately outside this check.
+func validatePlannedWorkerIdentity(desired, existing *ateapipb.Worker) error {
+	if desired == nil || existing == nil || desired.GetMetadata().GetName() == "" ||
+		existing.GetMetadata().GetName() != desired.GetMetadata().GetName() ||
+		existing.GetMetadata().GetAtespace() != "" ||
 		existing.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT ||
 		existing.GetWorkerNamespace() != desired.GetWorkerNamespace() ||
 		existing.GetWorkerPool() != desired.GetWorkerPool() ||
 		existing.GetWorkerPod() != "" || existing.GetWorkerPodUid() != "" || existing.GetNodeName() != "" || existing.GetIp() != "" ||
 		!proto.Equal(existing.GetExternalSlot(), desired.GetExternalSlot()) ||
 		!proto.Equal(existing.GetCapacity(), desired.GetCapacity()) {
-		return fmt.Errorf("%w: immutable fields differ for Worker %q", ErrWorkerIdentityCollision, name)
+		return fmt.Errorf("%w: immutable fields differ for Worker %q", ErrWorkerIdentityCollision, desired.GetMetadata().GetName())
 	}
 	return nil
 }
