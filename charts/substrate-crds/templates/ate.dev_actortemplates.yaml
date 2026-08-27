@@ -407,12 +407,17 @@ spec:
                 - microvm
                 type: string
               snapshotsConfig:
-                description: Snapshots configuration for the actor.
+                description: |-
+                  Snapshots configuration for the actor. ExternalSlot templates retain the
+                  object for API compatibility but must omit location; Pause and Suspend
+                  reject before mutating actor state.
                 properties:
                   location:
                     description: |-
                       Location is the base object-storage URI snapshots of this template's
-                      actors are stored under.
+                      actors are stored under. It is required for KubernetesPod templates and
+                      must be omitted for ExternalSlot templates, whose first protocol version
+                      supports cold Run and Terminate only.
                     minLength: 1
                     type: string
                   onCommit:
@@ -461,8 +466,6 @@ spec:
                         - Golden
                         type: string
                     type: object
-                required:
-                - location
                 type: object
                 x-kubernetes-validations:
                 - message: onCommit must be a subset of onPause
@@ -760,6 +763,16 @@ spec:
               rule: '!has(self.volumes) || self.volumes.all(v, has(self.containers)
                 && self.containers.exists(c, has(c.volumeMounts) && c.volumeMounts.exists(vm,
                 vm.name == v.name)))'
+            - message: snapshotsConfig.location is required for KubernetesPod and
+                forbidden for ExternalSlot
+              rule: '(has(self.workerProvider) && self.workerProvider == ''ExternalSlot'')
+                ? !has(self.snapshotsConfig.location) : has(self.snapshotsConfig.location)'
+            - message: workerSelector is not supported for ExternalSlot
+              rule: '!(has(self.workerProvider) && self.workerProvider == ''ExternalSlot'')
+                || !has(self.workerSelector)'
+            - message: volumes are not supported for ExternalSlot
+              rule: '!(has(self.workerProvider) && self.workerProvider == ''ExternalSlot'')
+                || !has(self.volumes) || size(self.volumes) == 0'
             - message: 'onResume.fromData: Golden is not supported when sandboxClass
                 is ''gvisor'''
               rule: '(has(self.sandboxClass) && self.sandboxClass == ''microvm'')

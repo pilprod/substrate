@@ -178,6 +178,14 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	if err != nil {
 		return nil, nil, src, fmt.Errorf("while getting ActorTemplate: %w", err)
 	}
+	hasSnapshotSource := actor.GetSourceSnapshotTag() != nil ||
+		actor.GetStatus().GetSourceSnapshot() != nil ||
+		actor.GetStatus().GetLocalSnapshotInfo() != nil ||
+		actor.GetStatus().GetLatestSnapshot() != nil ||
+		(!boot && actorTemplate.Status.GoldenSnapshot != "")
+	if err := rejectUnsupportedSnapshotSource(actorTemplate, hasSnapshotSource, "resuming from a snapshot"); err != nil {
+		return nil, nil, src, err
+	}
 	if ref := actor.GetStatus().GetLatestSnapshot(); ref != nil {
 		snapshot, err := w.store.GetActorSnapshot(ctx, resources.ActorSnapshotRefFromObjectRef(ref))
 		if errors.Is(err, store.ErrNotFound) {
@@ -826,12 +834,16 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		slog.InfoContext(ctx, "Actor has no snapshot; ActorTemplate has no golden snapshot; Booting from ActorTemplate spec")
 		tele.SnapshotKind = ateattr.SnapshotKindBoot
 
-		// Booting from scratch: resolve the sandbox binaries from the pool's
-		// SandboxConfig and send them so atelet can fetch and record them.
-		// (Restores above are self-describing via the snapshot manifest.)
-		sandboxAssets, err := resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool())
-		if err != nil {
-			return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
+		// Kubernetes workers need cluster-owned sandbox binaries from their
+		// SandboxConfig. ExternalSlot launchers are owned and verified by the
+		// connected provider, so sending Kubernetes sandbox assets would both
+		// leak an in-cluster implementation detail and override local policy.
+		var sandboxAssets *ateletpb.SandboxAssets
+		if effectiveWorkerProvider(assignment.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+			sandboxAssets, err = resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool())
+			if err != nil {
+				return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
+			}
 		}
 
 		req := &ateletpb.RunRequest{

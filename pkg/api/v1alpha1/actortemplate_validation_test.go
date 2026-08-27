@@ -102,16 +102,55 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 	}, {
-		name: "external worker provider is explicit and valid",
+		name: "external worker provider is explicit and valid without cluster lifecycle fields",
 		mutate: func(at *ActorTemplate) {
 			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
 		},
 		wantErr: false,
 		verify: func(t *testing.T, at *ActorTemplate) {
 			if at.Spec.WorkerProvider != WorkerProviderExternalSlot {
 				t.Errorf("workerProvider = %q, want %q", at.Spec.WorkerProvider, WorkerProviderExternalSlot)
 			}
+			if at.Spec.SnapshotsConfig.Location != "" {
+				t.Errorf("snapshotsConfig.location = %q, want omitted", at.Spec.SnapshotsConfig.Location)
+			}
+			if at.Spec.WorkerSelector != nil {
+				t.Errorf("workerSelector = %#v, want nil", at.Spec.WorkerSelector)
+			}
 		},
+	}, {
+		name: "external worker provider rejects snapshot location",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.WorkerSelector = nil
+		},
+		wantErr: true,
+		errMsg:  "snapshotsConfig.location is required for KubernetesPod and forbidden for ExternalSlot",
+	}, {
+		name: "external worker provider rejects worker selector",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+		},
+		wantErr: true,
+		errMsg:  "workerSelector is not supported for ExternalSlot",
+	}, {
+		name: "external worker provider rejects volumes",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
+			at.Spec.Volumes = []Volume{
+				{Name: "vol1", VolumeSource: VolumeSource{DurableDir: &DurableDirVolumeSource{}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "vol1", MountPath: "/home"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "volumes are not supported for ExternalSlot",
 	}, {
 		name: "unknown worker provider is rejected",
 		mutate: func(at *ActorTemplate) {

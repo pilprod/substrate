@@ -62,6 +62,9 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	if err != nil {
 		return nil, err
 	}
+	if err = rejectUnsupportedSnapshotLifecycle(actorTemplate, "pause"); err != nil {
+		return nil, err
+	}
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED {
 		// Fully paused already: FinalizePaused commits PAUSED and the cleared
 		// worker assignment in a single update, so there is nothing left to do.

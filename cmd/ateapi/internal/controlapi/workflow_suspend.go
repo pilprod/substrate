@@ -64,6 +64,9 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 	if err != nil {
 		return nil, err
 	}
+	if err = rejectUnsupportedSnapshotLifecycle(actorTemplate, "suspend"); err != nil {
+		return nil, err
+	}
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		// Fully suspended already: FinalizeSuspended commits SUSPENDED and the
 		// cleared worker assignment in a single update, so there is nothing

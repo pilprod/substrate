@@ -522,11 +522,13 @@ type OnResumeConfig struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.onPause) ? self.onPause : 'Full') == 'Full' || (has(self.onCommit) ? self.onCommit : 'Full') == (has(self.onPause) ? self.onPause : 'Full')",message="onCommit must be a subset of onPause"
 type SnapshotsConfig struct {
 	// Location is the base object-storage URI snapshots of this template's
-	// actors are stored under.
+	// actors are stored under. It is required for KubernetesPod templates and
+	// must be omitted for ExternalSlot templates, whose first protocol version
+	// supports cold Run and Terminate only.
 	//
-	// +required
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	Location string `json:"location"`
+	Location string `json:"location,omitempty"`
 
 	// OnPause specifies what to include in the snapshot when the actor is paused.
 	// If not provided, the "Full" behavior is used by default.
@@ -563,6 +565,9 @@ type SnapshotsConfig struct {
 // ActorTemplateSpec defined desired spec of an actor.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.volumes) || self.volumes.all(v, has(self.containers) && self.containers.exists(c, has(c.volumeMounts) && c.volumeMounts.exists(vm, vm.name == v.name)))",message="All volumes defined in spec.volumes must be mounted by at least one container"
+// +kubebuilder:validation:XValidation:rule="(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') ? !has(self.snapshotsConfig.location) : has(self.snapshotsConfig.location)",message="snapshotsConfig.location is required for KubernetesPod and forbidden for ExternalSlot"
+// +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.workerSelector)",message="workerSelector is not supported for ExternalSlot"
+// +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.volumes) || size(self.volumes) == 0",message="volumes are not supported for ExternalSlot"
 // +kubebuilder:validation:XValidation:rule="(has(self.sandboxClass) && self.sandboxClass == 'microvm') || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData) ? self.snapshotsConfig.onResume.fromData : 'ColdBoot') != 'Golden'",message="onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.requests)",message="spec.resources.requests is not supported; actors are sized by spec.resources.limits only"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.claims)",message="spec.resources.claims is not supported"
@@ -595,7 +600,9 @@ type ActorTemplateSpec struct {
 	// +kubebuilder:validation:MaxItems=10
 	Containers []Container `json:"containers,omitempty"`
 
-	// Snapshots configuration for the actor.
+	// Snapshots configuration for the actor. ExternalSlot templates retain the
+	// object for API compatibility but must omit location; Pause and Suspend
+	// reject before mutating actor state.
 	//
 	// +required
 	SnapshotsConfig SnapshotsConfig `json:"snapshotsConfig"`
