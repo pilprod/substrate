@@ -51,5 +51,12 @@ balancer. External clients need a separately governed path to that port and
 must trust the `servicedns.podcert.ate.dev` CA.
 
 `Connect` remains disabled until its live route authority is safe for the
-deployment topology. Before enabling it, use one authoritative Broker replica
-or replace the in-memory route directory with distributed ownership.
+deployment topology. For the MVP, enabling `externalProviderBroker` also pins
+ate-api-server to one replica and switches the Deployment strategy to
+`Recreate`, so an update cannot overlap two in-memory route owners. This trades
+ate-api-server high availability and zero-downtime rollouts for single-owner
+correctness. Restore HA only after route ownership and live session fencing are
+distributed across replicas.
+
+Run `make verify-external-provider-broker-chart` to lint both profiles and
+assert the default and singleton render contracts.

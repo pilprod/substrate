@@ -59,11 +59,17 @@ metadata:
   name: {{ include "substrate.fullname" (list "ate-api-server" .) }}
   namespace: {{ .Release.Namespace }}
 spec:
+{{- if .Values.externalProviderBroker.enabled }}
+  replicas: 1
+  strategy:
+    type: Recreate
+{{- else }}
   replicas: 2
   strategy:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
+{{- end }}
   selector:
     matchLabels:
       app: ate-api-server
