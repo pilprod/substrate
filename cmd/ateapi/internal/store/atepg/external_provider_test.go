@@ -124,6 +124,9 @@ func TestExternalProviderStoreLifecycle(t *testing.T) {
 	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, externalProviderDigest(5), time.Minute); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
 		t.Errorf("RotateExternalProviderSession() after revoke error = %v, want ErrAuthenticationFailed", err)
 	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionTwo); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Errorf("ClaimExternalProviderSession() after registration revoke error = %v, want ErrAuthenticationFailed", err)
+	}
 	var revokedSessionExpiry, revokedSessionConsumed *time.Time
 	var revokedDigest []byte
 	if err := persistence.pool.QueryRow(ctx, `
@@ -188,6 +191,9 @@ func TestExternalProviderEnrollmentRevokeBlocksRedeemAndMint(t *testing.T) {
 	}
 	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refresh, externalProviderDigest(16), time.Minute); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
 		t.Errorf("mint after enrollment revoke error = %v, want ErrAuthenticationFailed", err)
+	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, externalProviderDigest(15)); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Errorf("claim after enrollment revoke error = %v, want ErrAuthenticationFailed", err)
 	}
 
 	var enrollmentRevoked, registrationRevoked, sessionExpiry, sessionConsumed *time.Time
@@ -313,6 +319,229 @@ func TestExternalProviderSessionRotationAcrossReplicasKeepsOneCurrent(t *testing
 	}
 	if !bytes.Equal(current, sessions[0][:]) && !bytes.Equal(current, sessions[1][:]) {
 		t.Fatalf("current session digest = %x, want one concurrently minted digest", current)
+	}
+}
+
+func TestExternalProviderSessionClaimAdvancesFencingGeneration(t *testing.T) {
+	persistence := setupExternalProviderPersistence(t)
+	ctx := context.Background()
+	enrollmentDigest := externalProviderDigest(51)
+	refreshDigest := externalProviderDigest(52)
+	sessionOne := externalProviderDigest(53)
+	sessionTwo := externalProviderDigest(54)
+
+	if _, err := persistence.CreateExternalProviderEnrollment(ctx, "enrollment-claim", enrollmentDigest, externalProviderScope(), time.Hour); err != nil {
+		t.Fatalf("creating enrollment: %v", err)
+	}
+	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-claim", refreshDigest)
+	if err != nil {
+		t.Fatalf("consuming enrollment: %v", err)
+	}
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, sessionOne, time.Minute); err != nil {
+		t.Fatalf("minting first session: %v", err)
+	}
+
+	first, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionOne)
+	if err != nil {
+		t.Fatalf("claiming first session: %v", err)
+	}
+	if first.Registration != registration || first.Generation != 1 {
+		t.Errorf("first claim = %+v, want registration and generation 1", first)
+	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionOne); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Errorf("reusing first session error = %v, want ErrAuthenticationFailed", err)
+	}
+
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, sessionTwo, time.Minute); err != nil {
+		t.Fatalf("minting second session: %v", err)
+	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionOne); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Errorf("claiming rotated-out session error = %v, want ErrAuthenticationFailed", err)
+	}
+	second, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionTwo)
+	if err != nil {
+		t.Fatalf("claiming second session: %v", err)
+	}
+	if second.Registration != registration || second.Generation != 2 {
+		t.Errorf("second claim = %+v, want registration and generation 2", second)
+	}
+
+	var consumedAt *time.Time
+	var generation int64
+	if err := persistence.pool.QueryRow(ctx, `
+		SELECT session_consumed_at, session_generation
+		FROM external_provider_registrations
+		WHERE registration_uid = $1`, registration.UID).Scan(&consumedAt, &generation); err != nil {
+		t.Fatalf("reading claimed session state: %v", err)
+	}
+	if consumedAt == nil || generation != 2 {
+		t.Errorf("claimed session consumed_at/generation = %v/%d, want nonnil/2", consumedAt, generation)
+	}
+}
+
+func TestExternalProviderSessionClaimSingleWinnerAcrossReplicas(t *testing.T) {
+	persistence := setupExternalProviderPersistence(t)
+	replica, err := NewPersistence(context.Background(), persistence.pool)
+	if err != nil {
+		t.Fatalf("NewPersistence(replica) error = %v", err)
+	}
+	t.Cleanup(replica.Close)
+
+	ctx := context.Background()
+	enrollmentDigest := externalProviderDigest(61)
+	refreshDigest := externalProviderDigest(62)
+	sessionDigest := externalProviderDigest(63)
+	if _, err := persistence.CreateExternalProviderEnrollment(ctx, "enrollment-claim-race", enrollmentDigest, externalProviderScope(), time.Hour); err != nil {
+		t.Fatalf("creating enrollment: %v", err)
+	}
+	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-claim-race", refreshDigest)
+	if err != nil {
+		t.Fatalf("consuming enrollment: %v", err)
+	}
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, sessionDigest, time.Minute); err != nil {
+		t.Fatalf("minting session: %v", err)
+	}
+
+	type result struct {
+		claim externalprovider.SessionClaim
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wait sync.WaitGroup
+	for _, candidate := range []*Persistence{persistence, replica} {
+		candidate := candidate
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			claim, err := candidate.ClaimExternalProviderSession(ctx, registration.UID, sessionDigest)
+			results <- result{claim: claim, err: err}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	var successes, rejected int
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+			if result.claim.Registration != registration || result.claim.Generation != 1 {
+				t.Errorf("winning claim = %+v, want registration and generation 1", result.claim)
+			}
+		case errors.Is(result.err, externalprovider.ErrAuthenticationFailed):
+			rejected++
+		default:
+			t.Fatalf("concurrent claim error = %v", result.err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("concurrent claim outcomes = %d success/%d rejected, want 1/1", successes, rejected)
+	}
+}
+
+func TestExternalProviderSessionRevocationRemainsAuthoritativeAcrossReplicas(t *testing.T) {
+	persistence := setupExternalProviderPersistence(t)
+	replica, err := NewPersistence(context.Background(), persistence.pool)
+	if err != nil {
+		t.Fatalf("NewPersistence(replica) error = %v", err)
+	}
+	t.Cleanup(replica.Close)
+
+	ctx := context.Background()
+	enrollmentDigest := externalProviderDigest(81)
+	refreshDigest := externalProviderDigest(82)
+	sessionDigest := externalProviderDigest(83)
+	if _, err := persistence.CreateExternalProviderEnrollment(ctx, "enrollment-claim-revoke-race", enrollmentDigest, externalProviderScope(), time.Hour); err != nil {
+		t.Fatalf("creating enrollment: %v", err)
+	}
+	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-claim-revoke-race", refreshDigest)
+	if err != nil {
+		t.Fatalf("consuming enrollment: %v", err)
+	}
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, sessionDigest, time.Minute); err != nil {
+		t.Fatalf("minting session: %v", err)
+	}
+
+	start := make(chan struct{})
+	claimResult := make(chan error, 1)
+	revokeResult := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionDigest)
+		claimResult <- err
+	}()
+	go func() {
+		<-start
+		revokeResult <- replica.RevokeExternalProviderRegistration(ctx, registration.UID)
+	}()
+	close(start)
+
+	if err := <-revokeResult; err != nil {
+		t.Fatalf("concurrent revoke error = %v", err)
+	}
+	if err := <-claimResult; err != nil && !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Fatalf("concurrent claim error = %v, want success or ErrAuthenticationFailed", err)
+	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionDigest); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Fatalf("claim after completed revoke error = %v, want ErrAuthenticationFailed", err)
+	}
+
+	var revokedAt *time.Time
+	var currentDigest []byte
+	if err := persistence.pool.QueryRow(ctx, `
+		SELECT revoked_at, current_session_digest
+		FROM external_provider_registrations
+		WHERE registration_uid = $1`, registration.UID).Scan(&revokedAt, &currentDigest); err != nil {
+		t.Fatalf("reading final revoked state: %v", err)
+	}
+	if revokedAt == nil || currentDigest != nil {
+		t.Errorf("final revoked_at/current_session_digest = %v/%x, want nonnil/nil", revokedAt, currentDigest)
+	}
+}
+
+func TestExternalProviderSessionClaimRejectsInvalidAndExpiredCredentials(t *testing.T) {
+	persistence := setupExternalProviderPersistence(t)
+	ctx := context.Background()
+	enrollmentDigest := externalProviderDigest(71)
+	refreshDigest := externalProviderDigest(72)
+	sessionDigest := externalProviderDigest(73)
+	if _, err := persistence.CreateExternalProviderEnrollment(ctx, "enrollment-expired-session", enrollmentDigest, externalProviderScope(), time.Hour); err != nil {
+		t.Fatalf("creating enrollment: %v", err)
+	}
+	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-expired-session", refreshDigest)
+	if err != nil {
+		t.Fatalf("consuming enrollment: %v", err)
+	}
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, sessionDigest, 5*time.Millisecond); err != nil {
+		t.Fatalf("minting expiring session: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		uid    string
+		digest externalprovider.CredentialDigest
+	}{
+		{name: "missing registration", uid: "registration-missing", digest: sessionDigest},
+		{name: "invalid registration", uid: "/invalid", digest: sessionDigest},
+		{name: "zero digest", uid: registration.UID},
+		{name: "wrong digest", uid: registration.UID, digest: externalProviderDigest(74)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := persistence.ClaimExternalProviderSession(ctx, test.uid, test.digest); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+				t.Errorf("ClaimExternalProviderSession() error = %v, want ErrAuthenticationFailed", err)
+			}
+		})
+	}
+
+	if _, err := persistence.pool.Exec(ctx, `SELECT pg_sleep(0.02)`); err != nil {
+		t.Fatalf("advancing database clock: %v", err)
+	}
+	if _, err := persistence.ClaimExternalProviderSession(ctx, registration.UID, sessionDigest); !errors.Is(err, externalprovider.ErrAuthenticationFailed) {
+		t.Errorf("claiming expired session error = %v, want ErrAuthenticationFailed", err)
 	}
 }
 

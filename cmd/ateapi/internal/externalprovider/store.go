@@ -125,6 +125,14 @@ type SessionAuthorization struct {
 	ExpiresAt    time.Time
 }
 
+// SessionClaim is the non-secret authority established by atomically
+// consuming one current session token. Generation fences older sessions for
+// the same registration.
+type SessionClaim struct {
+	Registration Registration
+	Generation   uint64
+}
+
 // ExternalProviderStore is deliberately separate from store.Interface. It is
 // the minimal persistence boundary for enrollment and broker authentication.
 // Every credential crossing this boundary is already a digest.
@@ -132,6 +140,7 @@ type ExternalProviderStore interface {
 	CreateExternalProviderEnrollment(context.Context, string, CredentialDigest, Scope, time.Duration) (Enrollment, error)
 	ConsumeExternalProviderEnrollment(context.Context, CredentialDigest, string, CredentialDigest) (Registration, error)
 	RotateExternalProviderSession(context.Context, string, CredentialDigest, CredentialDigest, time.Duration) (SessionAuthorization, error)
+	ClaimExternalProviderSession(context.Context, string, CredentialDigest) (SessionClaim, error)
 	RevokeExternalProviderEnrollment(context.Context, string) error
 	RevokeExternalProviderRegistration(context.Context, string) error
 }

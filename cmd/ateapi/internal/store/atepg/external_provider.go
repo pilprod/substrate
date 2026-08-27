@@ -211,6 +211,59 @@ func (p *Persistence) RotateExternalProviderSession(ctx context.Context, registr
 	return authorization, nil
 }
 
+// ClaimExternalProviderSession atomically consumes the current unexpired
+// session credential and advances its registration generation. PostgreSQL
+// rechecks the predicate after row-lock waits, so concurrent callers across
+// replicas have exactly one winner.
+func (p *Persistence) ClaimExternalProviderSession(ctx context.Context, registrationUID string, sessionDigest externalprovider.CredentialDigest) (externalprovider.SessionClaim, error) {
+	if !externalprovider.IsValidIdentity(registrationUID) || sessionDigest == (externalprovider.CredentialDigest{}) {
+		return externalprovider.SessionClaim{}, externalprovider.ErrAuthenticationFailed
+	}
+
+	var claim externalprovider.SessionClaim
+	var generation int64
+	err := p.pool.QueryRow(ctx, `
+		UPDATE external_provider_registrations AS registration
+		SET session_consumed_at = clock_timestamp(),
+		    session_generation = registration.session_generation + 1,
+		    updated_at = clock_timestamp()
+		FROM external_provider_enrollments AS enrollment
+		WHERE registration.registration_uid = $1
+		  AND registration.current_session_digest = $2
+		  AND registration.current_session_expires_at > clock_timestamp()
+		  AND registration.session_consumed_at IS NULL
+		  AND registration.session_generation < 9223372036854775807
+		  AND registration.revoked_at IS NULL
+		  AND enrollment.enrollment_uid = registration.enrollment_uid
+		  AND enrollment.revoked_at IS NULL
+		RETURNING registration.registration_uid, registration.enrollment_uid,
+		          registration.owner_atespace, registration.worker_namespace,
+		          registration.worker_pool, registration.max_slots,
+		          registration.created_at, registration.session_generation`,
+		registrationUID, sessionDigest[:],
+	).Scan(
+		&claim.Registration.UID,
+		&claim.Registration.EnrollmentUID,
+		&claim.Registration.Scope.OwnerAtespace,
+		&claim.Registration.Scope.WorkerNamespace,
+		&claim.Registration.Scope.WorkerPool,
+		&claim.Registration.Scope.MaxSlots,
+		&claim.Registration.CreatedAt,
+		&generation,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return externalprovider.SessionClaim{}, externalprovider.ErrAuthenticationFailed
+	}
+	if err != nil {
+		return externalprovider.SessionClaim{}, fmt.Errorf("claiming external provider session: %w", err)
+	}
+	if generation <= 0 {
+		return externalprovider.SessionClaim{}, errors.New("claimed external provider session has a nonpositive generation")
+	}
+	claim.Generation = uint64(generation)
+	return claim, nil
+}
+
 // RevokeExternalProviderEnrollment uses the database clock and atomically
 // invalidates both the enrollment and any registration created from it.
 func (p *Persistence) RevokeExternalProviderEnrollment(ctx context.Context, enrollmentUID string) error {

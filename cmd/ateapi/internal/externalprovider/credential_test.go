@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -134,6 +135,26 @@ func TestIdentityGrammar(t *testing.T) {
 	for _, identity := range invalid {
 		if IsValidIdentity(identity) {
 			t.Errorf("IsValidIdentity(%q) = true, want false", identity)
+		}
+	}
+}
+
+func TestSessionClaimContainsOnlyNonSecretAuthority(t *testing.T) {
+	claimType := reflect.TypeFor[SessionClaim]()
+	want := []struct {
+		name   string
+		typeOf reflect.Type
+	}{
+		{name: "Registration", typeOf: reflect.TypeFor[Registration]()},
+		{name: "Generation", typeOf: reflect.TypeFor[uint64]()},
+	}
+	if claimType.NumField() != len(want) {
+		t.Fatalf("SessionClaim fields = %d, want %d", claimType.NumField(), len(want))
+	}
+	for index, expected := range want {
+		field := claimType.Field(index)
+		if field.Name != expected.name || field.Type != expected.typeOf {
+			t.Errorf("SessionClaim field %d = %s %v, want %s %v", index, field.Name, field.Type, expected.name, expected.typeOf)
 		}
 	}
 }

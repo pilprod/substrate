@@ -66,7 +66,9 @@ enrollment is single use, its registration retains the immutable owner
 atespace, worker namespace, worker pool, and slot limit, and each registration
 has exactly one current session digest. Revoking an enrollment also revokes its
 registration. The schema reserves session consumption and generation fields,
-but `Connect` remains `UNIMPLEMENTED` and does not authenticate or consume a
-session token until an atomic claim-and-fence contract is implemented. Network
-registration, TLS listener wiring, and deployment manifests are intentionally
-outside this slice.
+and PostgreSQL now provides an atomic session claim: it validates the current
+unexpired token, consumes it exactly once, and advances a nonzero generation
+which fences older sessions. `Connect` remains `UNIMPLEMENTED` and does not yet
+invoke that primitive. Network registration, TLS listener wiring, Worker
+mutation, channel routing, and deployment manifests are intentionally outside
+this slice.

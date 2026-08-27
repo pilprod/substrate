@@ -36,11 +36,13 @@ type fakeStore struct {
 	createCalls             int
 	consumeCalls            int
 	rotateCalls             int
+	claimCalls              int
 	revokeEnrollmentCalls   int
 	revokeRegistrationCalls int
 	create                  func(context.Context, string, CredentialDigest, Scope, time.Duration) (Enrollment, error)
 	consume                 func(context.Context, CredentialDigest, string, CredentialDigest) (Registration, error)
 	rotate                  func(context.Context, string, CredentialDigest, CredentialDigest, time.Duration) (SessionAuthorization, error)
+	claim                   func(context.Context, string, CredentialDigest) (SessionClaim, error)
 	revokeEnrollment        func(context.Context, string) error
 	revokeRegistration      func(context.Context, string) error
 }
@@ -64,6 +66,13 @@ func (f *fakeStore) RotateExternalProviderSession(ctx context.Context, uid strin
 	f.rotateCalls++
 	f.mu.Unlock()
 	return f.rotate(ctx, uid, refresh, session, ttl)
+}
+
+func (f *fakeStore) ClaimExternalProviderSession(ctx context.Context, uid string, session CredentialDigest) (SessionClaim, error) {
+	f.mu.Lock()
+	f.claimCalls++
+	f.mu.Unlock()
+	return f.claim(ctx, uid, session)
 }
 
 func (f *fakeStore) RevokeExternalProviderEnrollment(ctx context.Context, uid string) error {
@@ -275,8 +284,38 @@ func TestConnectIsUnimplementedWithoutStoreAccess(t *testing.T) {
 	if err := broker.Connect(nil); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("Connect() code = %v, want Unimplemented", status.Code(err))
 	}
-	if store.createCalls != 0 || store.consumeCalls != 0 || store.rotateCalls != 0 || store.revokeEnrollmentCalls != 0 || store.revokeRegistrationCalls != 0 {
+	if store.createCalls != 0 || store.consumeCalls != 0 || store.rotateCalls != 0 || store.claimCalls != 0 || store.revokeEnrollmentCalls != 0 || store.revokeRegistrationCalls != 0 {
 		t.Fatalf("Connect accessed store: %+v", store)
+	}
+}
+
+func TestFakeStoreSessionClaimReturnsOnlyAuthority(t *testing.T) {
+	digest := digestCredential(sessionDigestDomain, testCredential(0x66))
+	want := SessionClaim{
+		Registration: Registration{
+			UID:           "registration-a",
+			EnrollmentUID: "enrollment-a",
+			Scope:         Scope{OwnerAtespace: "tenant-a", WorkerNamespace: "workers", WorkerPool: "pool-a", MaxSlots: 4},
+		},
+		Generation: 7,
+	}
+	store := &fakeStore{
+		claim: func(_ context.Context, uid string, gotDigest CredentialDigest) (SessionClaim, error) {
+			if uid != want.Registration.UID || gotDigest != digest {
+				t.Errorf("claim arguments = %q/%x, want %q/%x", uid, gotDigest, want.Registration.UID, digest)
+			}
+			return want, nil
+		},
+	}
+	got, err := store.ClaimExternalProviderSession(context.Background(), want.Registration.UID, digest)
+	if err != nil {
+		t.Fatalf("ClaimExternalProviderSession() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("ClaimExternalProviderSession() = %+v, want %+v", got, want)
+	}
+	if store.claimCalls != 1 {
+		t.Errorf("claim calls = %d, want 1", store.claimCalls)
 	}
 }
 
