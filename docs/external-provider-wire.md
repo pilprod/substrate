@@ -52,6 +52,28 @@ The broker derives stable execution and locality identities from the
 authenticated registration and slot ID. A live connection, socket, URL, token,
 or route is never persisted in a `Worker` or announced by the client.
 
+## Connect admission validation
+
+The ateapi-private admission validator is a pure boundary between an
+already-authenticated session claim and later Worker reconciliation. It accepts
+only a first `ClientFrame` containing a protocol-v1 `ConnectHello` with zero
+client generation and a serialized size no greater than 1 MiB. The hello's
+registration must exactly match the claim and its sorted, unique slot list is
+bounded to `1..min(scope.max_slots, 256)`.
+
+Each slot uses the published 253-byte ASCII slot identity grammar, at most 64
+Kubernetes label key/value pairs, and nonnegative ateapi `WorkerCapacity`
+fields. A nil capacity is normalized to zero, retaining ateapi's
+unknown/unconstrained meaning. `sandbox_class` remains provider-neutral and
+opaque: admission requires valid UTF-8 and at most 253 bytes, but does not add
+an undocumented enum or nonempty constraint. The accepted result stores no
+protobuf message or caller-owned map and exposes only copied, non-secret
+registration, generation, slot, label, and capacity data.
+
+This validator does not claim a credential, receive a stream frame, reconcile a
+Worker, or change session/channel state. `Connect` remains `UNIMPLEMENTED` and
+does not invoke it.
+
 ## Authentication implementation boundary
 
 The first broker-auth slice is private to the `ateapi` binary and is not

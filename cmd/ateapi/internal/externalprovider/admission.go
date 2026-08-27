@@ -1,0 +1,266 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package externalprovider
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"unicode/utf8"
+
+	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
+	"google.golang.org/protobuf/proto"
+	"k8s.io/apimachinery/pkg/api/validate/content"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+)
+
+const (
+	connectProtocolVersion = 1
+	maxClientFrameBytes    = 1 << 20
+	maxSlotLabels          = 64
+	maxSandboxClassBytes   = 253
+)
+
+var (
+	// ErrInvalidConnectAdmission identifies a first-frame or authenticated
+	// claim which cannot be admitted. It carries no transport status.
+	ErrInvalidConnectAdmission = errors.New("invalid external provider Connect admission")
+)
+
+// ConnectAdmission is an immutable, non-secret snapshot of one validated
+// Connect hello and its authenticated authority. Its accessors return copies.
+type ConnectAdmission struct {
+	registration Registration
+	generation   uint64
+	slots        []AdmittedSlot
+}
+
+// Registration returns the authenticated registration and immutable scope.
+func (a *ConnectAdmission) Registration() Registration {
+	return a.registration
+}
+
+// Generation returns the nonzero fencing generation assigned by PostgreSQL.
+func (a *ConnectAdmission) Generation() uint64 {
+	return a.generation
+}
+
+// Slots returns independent copies in ascending SlotID order.
+func (a *ConnectAdmission) Slots() []AdmittedSlot {
+	slots := make([]AdmittedSlot, len(a.slots))
+	for index := range a.slots {
+		slots[index] = a.slots[index].clone()
+	}
+	return slots
+}
+
+type admittedLabel struct {
+	key   string
+	value string
+}
+
+// AdmittedSlot is immutable provider-neutral scheduling data for one slot.
+// Map and protobuf accessors allocate fresh values on every call.
+type AdmittedSlot struct {
+	slotID       string
+	sandboxClass string
+	labels       []admittedLabel
+	cpuMilli     int64
+	memoryBytes  int64
+}
+
+// SlotID returns the registration-scoped stable slot identity.
+func (s AdmittedSlot) SlotID() string {
+	return s.slotID
+}
+
+// SandboxClass returns the opaque scheduling class.
+func (s AdmittedSlot) SandboxClass() string {
+	return s.sandboxClass
+}
+
+// Labels returns a fresh Kubernetes label map.
+func (s AdmittedSlot) Labels() map[string]string {
+	labels := make(map[string]string, len(s.labels))
+	for _, label := range s.labels {
+		labels[label.key] = label.value
+	}
+	return labels
+}
+
+// Capacity returns a fresh WorkerCapacity message. Zero fields retain the
+// ateapi meaning of unknown or unconstrained capacity.
+func (s AdmittedSlot) Capacity() *ateapipb.WorkerCapacity {
+	return &ateapipb.WorkerCapacity{
+		CpuMilli:    s.cpuMilli,
+		MemoryBytes: s.memoryBytes,
+	}
+}
+
+func (s AdmittedSlot) clone() AdmittedSlot {
+	clone := s
+	clone.labels = slices.Clone(s.labels)
+	return clone
+}
+
+// ValidateConnectAdmission validates an authenticated claim and the first
+// client frame without claiming credentials or performing transport, storage,
+// or Worker operations.
+func ValidateConnectAdmission(claim SessionClaim, frame *externalproviderpb.ClientFrame) (*ConnectAdmission, error) {
+	if frame == nil {
+		return nil, invalidConnectAdmission("frame", "is required")
+	}
+	if proto.Size(frame) > maxClientFrameBytes {
+		return nil, invalidConnectAdmission("frame", "exceeds the 1 MiB serialized limit")
+	}
+	if err := validateAdmissionClaim(claim); err != nil {
+		return nil, err
+	}
+	if frame.GetSessionGeneration() != 0 {
+		return nil, invalidConnectAdmission("frame.session_generation", "must be zero in the first frame")
+	}
+	helloFrame, ok := frame.GetFrame().(*externalproviderpb.ClientFrame_Hello)
+	if !ok || helloFrame.Hello == nil {
+		return nil, invalidConnectAdmission("frame", "must contain only a nonnil hello")
+	}
+	hello := helloFrame.Hello
+	if hello.GetProtocolVersion() != connectProtocolVersion {
+		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 1")
+	}
+	if hello.GetRegistrationUid() != claim.Registration.UID {
+		return nil, invalidConnectAdmission("frame.hello.registration_uid", "does not match the authenticated registration")
+	}
+
+	slotLimit := claim.Registration.Scope.MaxSlots
+	if slotLimit > uint32(maxSlots) {
+		slotLimit = uint32(maxSlots)
+	}
+	slots := hello.GetSlots()
+	if len(slots) == 0 {
+		return nil, invalidConnectAdmission("frame.hello.slots", "must contain at least one slot")
+	}
+	if uint64(len(slots)) > uint64(slotLimit) {
+		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the authenticated slot limit")
+	}
+
+	normalized := make([]AdmittedSlot, len(slots))
+	for index, slot := range slots {
+		path := fmt.Sprintf("frame.hello.slots[%d]", index)
+		if slot == nil {
+			return nil, invalidConnectAdmission(path, "is required")
+		}
+		slotID := slot.GetSlotId()
+		if !IsValidIdentity(slotID) {
+			return nil, invalidConnectAdmission(path+".slot_id", "has invalid identity syntax")
+		}
+		if index > 0 {
+			previous := slots[index-1].GetSlotId()
+			switch {
+			case slotID == previous:
+				return nil, invalidConnectAdmission(path+".slot_id", "duplicates the previous slot_id")
+			case slotID < previous:
+				return nil, invalidConnectAdmission(path+".slot_id", "is not in ascending order")
+			}
+		}
+
+		sandboxClass := slot.GetSandboxClass()
+		if !utf8.ValidString(sandboxClass) {
+			return nil, invalidConnectAdmission(path+".sandbox_class", "must be valid UTF-8")
+		}
+		if len(sandboxClass) > maxSandboxClassBytes {
+			return nil, invalidConnectAdmission(path+".sandbox_class", "exceeds 253 UTF-8 bytes")
+		}
+
+		labels, err := normalizeAdmissionLabels(path+".labels", slot.GetLabels())
+		if err != nil {
+			return nil, err
+		}
+		capacity := slot.GetCapacity()
+		if capacity.GetCpuMilli() < 0 {
+			return nil, invalidConnectAdmission(path+".capacity.cpu_milli", "must be nonnegative")
+		}
+		if capacity.GetMemoryBytes() < 0 {
+			return nil, invalidConnectAdmission(path+".capacity.memory_bytes", "must be nonnegative")
+		}
+		normalized[index] = AdmittedSlot{
+			slotID:       slotID,
+			sandboxClass: sandboxClass,
+			labels:       labels,
+			cpuMilli:     capacity.GetCpuMilli(),
+			memoryBytes:  capacity.GetMemoryBytes(),
+		}
+	}
+
+	return &ConnectAdmission{
+		registration: claim.Registration,
+		generation:   claim.Generation,
+		slots:        normalized,
+	}, nil
+}
+
+func validateAdmissionClaim(claim SessionClaim) error {
+	if claim.Generation == 0 {
+		return invalidConnectAdmission("claim.generation", "must be nonzero")
+	}
+	registration := claim.Registration
+	if !IsValidIdentity(registration.UID) {
+		return invalidConnectAdmission("claim.registration.uid", "has invalid identity syntax")
+	}
+	if !IsValidIdentity(registration.EnrollmentUID) {
+		return invalidConnectAdmission("claim.registration.enrollment_uid", "has invalid identity syntax")
+	}
+	if !resources.IsValidResourceName(registration.Scope.OwnerAtespace) {
+		return invalidConnectAdmission("claim.registration.scope.owner_atespace", "is invalid")
+	}
+	if len(content.IsDNS1123Label(registration.Scope.WorkerNamespace)) != 0 {
+		return invalidConnectAdmission("claim.registration.scope.worker_namespace", "is not a DNS-1123 label")
+	}
+	if len(content.IsDNS1123Subdomain(registration.Scope.WorkerPool)) != 0 {
+		return invalidConnectAdmission("claim.registration.scope.worker_pool", "is not a DNS-1123 subdomain")
+	}
+	if registration.Scope.MaxSlots == 0 {
+		return invalidConnectAdmission("claim.registration.scope.max_slots", "must be nonzero")
+	}
+	return nil
+}
+
+func normalizeAdmissionLabels(path string, labels map[string]string) ([]admittedLabel, error) {
+	if len(labels) > maxSlotLabels {
+		return nil, invalidConnectAdmission(path, "exceeds 64 entries")
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	normalized := make([]admittedLabel, 0, len(keys))
+	for _, key := range keys {
+		if len(k8svalidation.IsQualifiedName(key)) != 0 {
+			return nil, invalidConnectAdmission(path, "contains an invalid Kubernetes label key")
+		}
+		value := labels[key]
+		if len(k8svalidation.IsValidLabelValue(value)) != 0 {
+			return nil, invalidConnectAdmission(path, "contains an invalid Kubernetes label value")
+		}
+		normalized = append(normalized, admittedLabel{key: key, value: value})
+	}
+	return normalized, nil
+}
+
+func invalidConnectAdmission(path, reason string) error {
+	return fmt.Errorf("%w: %s %s", ErrInvalidConnectAdmission, path, reason)
+}
