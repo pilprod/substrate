@@ -52,6 +52,38 @@ The broker derives stable execution and locality identities from the
 authenticated registration and slot ID. A live connection, socket, URL, token,
 or route is never persisted in a `Worker` or announced by the client.
 
+### Live session registry boundary
+
+The ateapi-private in-process registry is the generation fence for live route
+ownership. An install is accepted only for a valid registration UID and a
+nonzero generation which is greater than that registration's current live
+generation. Publishing the replacement and cancelling the previous lease happen
+under the same registry lock. Exact lookups use both registration UID and
+generation; callers must also observe the returned lease's done signal because a
+newer generation may fence it immediately after lookup.
+
+The registry assigns the lease identity itself. Cleanup removes an entry only
+when registration UID, generation, and lease identity all match the current
+entry, so delayed cleanup from a fenced stream cannot remove its replacement.
+The registry retains the highest accepted generation as a tombstone after live
+route removal. This prevents a slow, older claim from becoming current after a
+newer stream has already disconnected. Active entries plus tombstones are
+bounded by the configured maximum number of tracked registrations. At capacity,
+an unknown registration fails closed while a tracked registration may still
+install a newer generation. Tombstones live for the registry process lifetime;
+this slice deliberately has no unsafe eviction API because safe reclamation
+requires authoritative registration revocation integration. A restart cannot
+replay an old session token because PostgreSQL consumed it atomically before the
+original admission.
+
+Holders of a fenced lease own that reference until their stream cleanup
+finishes. Leases contain only the non-secret registration UID, generation, and
+cancellation state. The registry starts no goroutines and contains no
+credential, frame, channel, transport, Worker, or persistence state.
+
+This slice does not register a listener, implement `Connect`, route a channel,
+or mutate a Kubernetes `Worker`.
+
 ## Connect admission validation
 
 The ateapi-private admission validator is a pure boundary between an
