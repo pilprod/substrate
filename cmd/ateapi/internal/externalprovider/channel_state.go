@@ -221,29 +221,16 @@ type ServerHeartbeatAckEffect struct {
 func (*ServerHeartbeatAckEffect) isSessionEffect() {}
 func (e *ServerHeartbeatAckEffect) Nonce() uint64  { return e.nonce }
 
-// NewChannelSessionState snapshots the generation and admitted slots. It
-// assumes ConnectReady with these limits has already been sent.
+// NewChannelSessionState snapshots the generation and admitted slots. It may
+// be constructed immediately before ConnectReady, but callers must not apply
+// post-Ready frames until that boundary succeeds.
 func NewChannelSessionState(admission *ConnectAdmission, limits ChannelSessionLimits) (*ChannelSessionState, error) {
 	if admission == nil || admission.Generation() == 0 {
 		return nil, invalidChannelConfig("admission", "must pin a nonzero generation")
 	}
-	if limits.MaxOpenChannels == 0 || limits.MaxOpenChannels > maxReadyOpenChannels {
-		return nil, invalidChannelConfig("max_open_channels", "must be in 1..65535")
-	}
-	if limits.MaxDataBytes == 0 || limits.MaxDataBytes > maxReadyDataBytes {
-		return nil, invalidChannelConfig("max_data_bytes", "must be in 1..65536")
-	}
-	if limits.RememberedChannelLimit == 0 {
-		limits.RememberedChannelLimit = defaultRememberedChannelLimit
-	}
-	if limits.RememberedChannelLimit < limits.MaxOpenChannels || limits.RememberedChannelLimit > maximumRememberedChannelLimit {
-		return nil, invalidChannelConfig("remembered_channel_limit", "must be at least max_open_channels and at most 1048576")
-	}
-	if limits.PendingHeartbeatLimit == 0 {
-		limits.PendingHeartbeatLimit = defaultPendingHeartbeatLimit
-	}
-	if limits.PendingHeartbeatLimit > maximumPendingHeartbeatLimit {
-		return nil, invalidChannelConfig("pending_heartbeat_limit", "must be at most 65535")
+	limits, err := normalizeChannelSessionLimits(limits)
+	if err != nil {
+		return nil, err
 	}
 
 	slots := admission.Slots()
@@ -273,6 +260,28 @@ func NewChannelSessionState(admission *ConnectAdmission, limits ChannelSessionLi
 		channels:          make(map[uint64]*channelState),
 		pendingHeartbeats: make(map[uint64]struct{}),
 	}, nil
+}
+
+func normalizeChannelSessionLimits(limits ChannelSessionLimits) (ChannelSessionLimits, error) {
+	if limits.MaxOpenChannels == 0 || limits.MaxOpenChannels > maxReadyOpenChannels {
+		return ChannelSessionLimits{}, invalidChannelConfig("max_open_channels", "must be in 1..65535")
+	}
+	if limits.MaxDataBytes == 0 || limits.MaxDataBytes > maxReadyDataBytes {
+		return ChannelSessionLimits{}, invalidChannelConfig("max_data_bytes", "must be in 1..65536")
+	}
+	if limits.RememberedChannelLimit == 0 {
+		limits.RememberedChannelLimit = defaultRememberedChannelLimit
+	}
+	if limits.RememberedChannelLimit < limits.MaxOpenChannels || limits.RememberedChannelLimit > maximumRememberedChannelLimit {
+		return ChannelSessionLimits{}, invalidChannelConfig("remembered_channel_limit", "must be at least max_open_channels and at most 1048576")
+	}
+	if limits.PendingHeartbeatLimit == 0 {
+		limits.PendingHeartbeatLimit = defaultPendingHeartbeatLimit
+	}
+	if limits.PendingHeartbeatLimit > maximumPendingHeartbeatLimit {
+		return ChannelSessionLimits{}, invalidChannelConfig("pending_heartbeat_limit", "must be at most 65535")
+	}
+	return limits, nil
 }
 
 // Generation returns the pinned fencing generation.

@@ -262,6 +262,60 @@ channel semantics.
 This slice does not claim a session, run a stream loop, install a route, mutate
 a Worker, or register a listener. `Broker.Connect` remains `UNIMPLEMENTED`.
 
+## Transport-neutral session coordination
+
+The ateapi-private session coordinator now composes the admission, Worker,
+channel, route, and availability primitives without owning a socket or
+registering `Connect`. A future transport owner first receives and
+credential-free prevalidates `ConnectHello`, then atomically claims the
+one-time session token. It passes only the resulting non-secret `SessionClaim`
+and immutable prevalidated hello to the coordinator.
+
+For one generation, the coordinator enforces this order:
+
+1. Complete authenticated admission validation.
+2. Install the non-routable generation lease.
+3. Derive and reconcile the complete Worker plan, then validate every returned
+   Worker incarnation and build route bindings.
+4. Construct the bounded post-Ready channel state.
+5. Invoke one synchronous transport callback with a copied `ConnectReady`
+   frame. The callback returns success only after the frame is visible to the
+   peer.
+6. Publish the bindings through the existing `SessionRouteDirectory`.
+7. Activate Workers through the generation-gated Worker lifecycle.
+
+No Worker becomes `ACTIVE` before both the Ready callback and route publication
+succeed. Admission, reconciliation, and channel-state failures never cross the
+Ready boundary. A Ready callback failure never publishes a route. A route
+publication failure never activates a Worker. An activation failure uses the
+existing compare-and-withdraw plus deterministic OFFLINE rollback.
+The Ready callback and route publication run under the registry's stable
+per-registration lifecycle gate. A replacement cannot fence the lease between
+those two operations, and a generation fenced during reconciliation never
+sends Ready.
+
+Failure before publication also enters the lifecycle gate and offlines the
+bounded conservative Worker set inherited from a fenced generation. Failed
+setup exact-removes its lease after that best-effort pass; any Workers whose
+OFFLINE write failed remain in the bounded lifecycle tombstone for a newer
+generation to preflight. A successfully established session closes in the
+opposite safety order: compare-and-withdraw its exact route, set owned Workers
+`OFFLINE`, then exact-remove its lease. If OFFLINE fails during normal close,
+the route stays unavailable while the handle retains the lease for an explicit
+bounded retry.
+
+The coordinator starts no goroutine and emits no log. Its callback frame and
+all retained state contain no credential or data payload. Existing admission,
+route, registry, channel, and Worker bounds remain authoritative; the
+coordinator adds no second route map or unbounded retry.
+
+This does not make the broker deployable. `Broker.Connect` is still
+`UNIMPLEMENTED`, no listener is registered, and no stream receive/send pump or
+execution channel opener exists. The directory and lease are process-local.
+The current multi-replica ateapi deployment therefore remains unsafe for live
+external-provider routing until a distributed authority or proven singleton
+placement boundary is implemented.
+
 ## Authentication implementation boundary
 
 The first broker-auth slice is private to the `ateapi` binary and is not

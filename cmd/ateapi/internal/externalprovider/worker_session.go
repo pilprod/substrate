@@ -273,6 +273,28 @@ func (l *workerSessionLifecycle) cleanup(ctx context.Context, route workerSessio
 	return cleanup, err
 }
 
+// cleanupUnpublished makes inherited Worker ownership unavailable when the
+// current generation fails before publishing a route. It cannot activate a
+// Worker and deliberately has no route authority. The caller may exact-remove
+// the lease after this method returns.
+func (l *workerSessionLifecycle) cleanupUnpublished(ctx context.Context, lease *sessionLease) (workerCleanupResult, error) {
+	if lease == nil {
+		return workerCleanupResult{}, errSessionNotCurrent
+	}
+	var cleanup workerCleanupResult
+	err := l.registry.withCurrentLease(lease, func(state *sessionLifecycleState, current sessionEntry) error {
+		current.cancel(errSessionClosing)
+		var cleanupErr error
+		cleanup, cleanupErr = l.offline(ctx, state.ownedWorkers)
+		state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
+		return cleanupErr
+	})
+	if errors.Is(err, errSessionFenced) {
+		return workerCleanupResult{superseded: true}, nil
+	}
+	return cleanup, err
+}
+
 func routeLease(route workerSessionRoute) *sessionLease {
 	if route == nil {
 		return nil
