@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/agent-substrate/substrate/internal/volume"
@@ -303,11 +305,90 @@ func TestCreateActorVolumes(t *testing.T) {
 type trackingVolumePlugin struct {
 	volume.VolumePluginControlPlane
 	deletedIDs []string
+	attached   []string
+}
+
+func (t *trackingVolumePlugin) AttachVolume(_ context.Context, volumeID, node string) error {
+	t.attached = append(t.attached, volumeID+"@"+node)
+	return nil
 }
 
 func (t *trackingVolumePlugin) DeleteVolume(ctx context.Context, volumeID string) error {
 	t.deletedIDs = append(t.deletedIDs, volumeID)
 	return nil
+}
+
+func TestEnsureVolumesAttachedIsProviderAware(t *testing.T) {
+	ctx := context.Background()
+	mountedTemplate := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		Volumes: []atev1alpha1.Volume{{Name: "data"}},
+		Containers: []atev1alpha1.Container{{
+			Name:         "main",
+			VolumeMounts: []atev1alpha1.VolumeMount{{Name: "data", MountPath: "/data"}},
+		}},
+	}}
+	actorWithVolume := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-a"},
+		Status: &ateapipb.ActorStatus{ActorVolumes: []*ateapipb.ExternalVolume{{
+			VolumeName:      "data",
+			StorageVolumeId: "volume-a",
+			VolumeType:      "mock",
+		}}},
+	}
+
+	tests := []struct {
+		name         string
+		actor        *ateapipb.Actor
+		template     *atev1alpha1.ActorTemplate
+		worker       *ateapipb.Worker
+		wantCode     codes.Code
+		wantAttached []string
+	}{
+		{
+			name:     "ExternalSlot with no mounted volumes needs no node",
+			actor:    &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-a"}, Status: &ateapipb.ActorStatus{}},
+			template: &atev1alpha1.ActorTemplate{},
+			worker:   &ateapipb.Worker{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT},
+		},
+		{
+			name:     "ExternalSlot rejects cluster-attached volume",
+			actor:    actorWithVolume,
+			template: mountedTemplate,
+			worker:   &ateapipb.Worker{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT},
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name:         "KubernetesPod attaches mounted volume to node",
+			actor:        actorWithVolume,
+			template:     mountedTemplate,
+			worker:       &ateapipb.Worker{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, NodeName: "node-a"},
+			wantAttached: []string{"volume-a@node-a"},
+		},
+		{
+			name:     "legacy KubernetesPod still requires its node",
+			actor:    &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-a"}, Status: &ateapipb.ActorStatus{}},
+			template: &atev1alpha1.ActorTemplate{},
+			worker:   &ateapipb.Worker{},
+			wantCode: codes.Unknown,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plugin := &trackingVolumePlugin{}
+			workflow := &ActorWorkflow{pluginRegistry: &mockPluginRegistry{plugins: map[string]volume.VolumePluginControlPlane{"mock": plugin}}}
+			err := workflow.ensureVolumesAttached(ctx, test.actor, test.worker, test.template)
+			if test.wantCode == codes.OK {
+				if err != nil {
+					t.Fatalf("ensureVolumesAttached() error = %v", err)
+				}
+			} else if status.Code(err) != test.wantCode {
+				t.Fatalf("ensureVolumesAttached() code = %v, want %v (error %v)", status.Code(err), test.wantCode, err)
+			}
+			if diff := cmp.Diff(test.wantAttached, plugin.attached); diff != "" {
+				t.Errorf("attached volumes mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestDeleteActorVolumes(t *testing.T) {

@@ -142,6 +142,10 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 
 	workerPodNs := assignment.GetWorkerNamespace()
 	workerPodName := assignment.GetWorkerPod()
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return err
+	}
 
 	conn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
@@ -188,7 +192,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 	}
 
 	req := &ateletpb.TerminateRequest{
-		TargetAteomUid:         assignment.GetWorkerPodUid(),
+		TargetAteomUid:         targetUID,
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
 		ActorUid:               actor.GetMetadata().GetUid(),

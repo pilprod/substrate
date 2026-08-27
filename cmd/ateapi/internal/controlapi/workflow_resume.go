@@ -689,13 +689,20 @@ func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actor *ateapi
 	ctx, done := stepSpan(ctx, "AttachVolumes")
 	defer func() { err = done(err) }()
 
+	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
+	mounted := getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate)
+	if effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if len(mounted) == 0 {
+			return nil
+		}
+		return status.Error(codes.FailedPrecondition, "ExternalSlot workers do not support cluster-attached volumes")
+	}
 	node := worker.GetNodeName()
 	if node == "" {
 		return fmt.Errorf("assigned worker has no node name")
 	}
 
-	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
-	for _, vol := range getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate) {
+	for _, vol := range mounted {
 		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
 		plugin, err := w.pluginRegistry.GetPlugin(ctx, vol.GetVolumeType())
 		if err != nil {
@@ -720,6 +727,10 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 	defer func() { err = done(err) }()
 
 	assignment := actor.GetStatus().GetWorkerAssignment()
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return tele, err
+	}
 	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		return tele, err
@@ -741,7 +752,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 
 		req := &ateletpb.RestoreRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
@@ -789,7 +800,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		tele.WireSnapshotScope = ateattr.SnapshotScopeValue(scope)
 		req := &ateletpb.RestoreRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
@@ -824,7 +835,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 
 		req := &ateletpb.RunRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),

@@ -217,6 +217,10 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 		}
 		return "", fmt.Errorf("actor is CRASHED because it was in SUSPENDING state but has no active worker")
 	}
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return "", err
+	}
 
 	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
@@ -245,7 +249,7 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
 	req := &ateletpb.CheckpointRequest{
-		TargetAteomUid:         assignment.GetWorkerPodUid(),
+		TargetAteomUid:         targetUID,
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
 		ActorTemplateNamespace: actor.GetActorTemplateNamespace(),

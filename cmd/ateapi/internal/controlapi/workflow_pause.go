@@ -165,6 +165,10 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 		}
 		return "", status.Errorf(codes.FailedPrecondition, "CallAteletPause prerequisite not met for Actor: %s. No worker assignment", actorRef)
 	}
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return "", err
+	}
 
 	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
@@ -188,7 +192,7 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
 	req := &ateletpb.CheckpointRequest{
-		TargetAteomUid:         assignment.GetWorkerPodUid(),
+		TargetAteomUid:         targetUID,
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
 		ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
