@@ -105,6 +105,26 @@ func (a *fakeWorkerRouteAuthority) AuthorizesWorker(route workerSessionRoute, na
 	return found && binding.uid == uid && binding.executionIdentity == executionIdentity
 }
 
+func (a *fakeWorkerRouteAuthority) Close(route workerSessionRoute) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	concrete, ok := route.(*fakeWorkerSessionRoute)
+	if !ok || a.current != concrete {
+		return false
+	}
+	concrete.cancel(ErrSessionRouteClosing)
+	return true
+}
+
+func (a *fakeWorkerRouteAuthority) CurrentRoute(lease *sessionLease) workerSessionRoute {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.current == nil || a.current.lease != lease {
+		return nil
+	}
+	return a.current
+}
+
 func (a *fakeWorkerRouteAuthority) Withdraw(route workerSessionRoute) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -249,8 +269,8 @@ func TestWorkerSessionLifecycleActivatesOnlyCurrentInstalledLease(t *testing.T) 
 	if _, err := lifecycle.activate(ctx, unpublished, plan, reconciled); !errors.Is(err, errSessionRouteNotPublished) {
 		t.Fatalf("activate(unpublished route) error = %v, want errSessionRouteNotPublished", err)
 	}
-	if got := availability.callCount(); got != 0 {
-		t.Fatalf("unpublished activation made %d availability calls, want 0", got)
+	if got := availability.callCount(); got != len(reconciled) {
+		t.Fatalf("unpublished activation made %d fail-closed OFFLINE calls, want %d", got, len(reconciled))
 	}
 	requireSessionDone(t, lease, errSessionActivationFailed)
 
@@ -385,9 +405,18 @@ func TestWorkerSessionLifecyclePartialActivationReturnsDeterministicCleanup(t *t
 	if !errors.Is(err, activateFailure) || !errors.Is(err, rollbackFailure) {
 		t.Fatalf("activate(partial) error = %v, want both injected errors", err)
 	}
-	requireSessionDone(t, lease, errSessionActivationFailed)
-	if len(cleanup.offlined) != 1 || cleanup.offlined[0].name() != secondName {
-		t.Errorf("offlined cleanup = %v, want only %q", cleanupNames(cleanup.offlined), secondName)
+	if cause := lease.cancellationCause(); cause != nil {
+		t.Fatalf("lease was fenced before failed OFFLINE rollback completed: %v", cause)
+	}
+	if _, ok := registry.lookup("registration-a", 1); !ok {
+		t.Fatal("failed OFFLINE rollback did not retain the current lease for retry")
+	}
+	if err := routeLiveError(route); !errors.Is(err, ErrSessionRouteClosing) {
+		t.Fatalf("route after failed rollback error = %v, want ErrSessionRouteClosing", err)
+	}
+	wantOfflined := []string{ordered[1].GetMetadata().GetName(), ordered[2].GetMetadata().GetName()}
+	if got := cleanupNames(cleanup.offlined); !slices.Equal(got, wantOfflined) {
+		t.Errorf("offlined cleanup = %v, want %v", got, wantOfflined)
 	}
 	if len(cleanup.pending) != 1 || cleanup.pending[0].name() != firstName {
 		t.Errorf("pending cleanup = %v, want only %q", cleanupNames(cleanup.pending), firstName)
@@ -451,12 +480,18 @@ func TestWorkerSessionLifecycleRequiresCompletePublishedBindings(t *testing.T) {
 	if _, err := lifecycle.activate(ctx, route, plan, reconciled); !errors.Is(err, errSessionRouteNotPublished) {
 		t.Fatalf("activate(incomplete route) error = %v, want errSessionRouteNotPublished", err)
 	}
-	if got := availability.callCount(); got != 0 {
-		t.Fatalf("incomplete route made %d availability calls, want 0", got)
+	if got := availability.callCount(); got != len(reconciled) {
+		t.Fatalf("incomplete route made %d fail-closed OFFLINE calls, want %d", got, len(reconciled))
 	}
 	requireSessionDone(t, lease, errSessionActivationFailed)
-	if err := routeLiveError(route); !errors.Is(err, errFakeRouteWithdrawn) {
-		t.Fatalf("route after rejected activation error = %v, want withdrawn", err)
+	if err := routeLiveError(route); !errors.Is(err, ErrSessionRouteClosing) {
+		t.Fatalf("route after rejected activation error = %v, want closing", err)
+	}
+	routes.mu.Lock()
+	currentRoute := routes.current
+	routes.mu.Unlock()
+	if currentRoute != nil {
+		t.Fatal("incomplete route remained physically published after OFFLINE rollback")
 	}
 }
 

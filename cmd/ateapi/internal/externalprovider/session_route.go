@@ -58,6 +58,11 @@ var (
 	// ErrSessionRouteWithdrawn is the cancellation cause for an exactly-owned
 	// route removed during session cleanup.
 	ErrSessionRouteWithdrawn = errors.New("external provider session route was withdrawn")
+
+	// ErrSessionRouteClosing is the cancellation cause for a route which has
+	// stopped accepting new assignments but still retains its bindings while
+	// the owning Workers are made unavailable.
+	ErrSessionRouteClosing = errors.New("external provider session route is closing")
 )
 
 // SessionRouteDirectoryLimits bounds all in-process route state. A route has
@@ -394,7 +399,7 @@ func (d *SessionRouteDirectory) LookupExecutionIdentity(executionIdentity string
 		d.mu.RLock()
 		defer d.mu.RUnlock()
 		indexed, stillPublished := d.executions[executionIdentity]
-		if !stillPublished || indexed.route != candidate.route || indexed.binding != candidate.binding {
+		if !stillPublished || indexed.route != candidate.route || indexed.binding != candidate.binding || routeLiveError(indexed.route) != nil {
 			return
 		}
 		route = indexed.route
@@ -430,6 +435,42 @@ func (d *SessionRouteDirectory) AuthorizesWorker(proof workerSessionRoute, worke
 		authorized = true
 	})
 	return current && authorized
+}
+
+// Close stops an exactly-owned route from authorizing new assignments while
+// retaining its bindings for deterministic cleanup. It is idempotent for the
+// current concrete route. Callers must hold the registration lifecycle gate
+// before closing a route which can own ACTIVE Workers.
+func (d *SessionRouteDirectory) Close(proof workerSessionRoute) bool {
+	route, valid := proof.(*SessionRoute)
+	if d == nil || !valid || route == nil || route.lifecycleLease() == nil {
+		return false
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, exists := d.routes[route.RegistrationUID()]
+	if !exists || entry.route != route || entry.route.Generation() != route.Generation() {
+		return false
+	}
+	entry.cancel(ErrSessionRouteClosing)
+	return true
+}
+
+// routeForLease returns the exact route currently indexed for lease. The
+// returned pointer is only a candidate; callers must recheck it after taking
+// the registration lifecycle gate before mutating durable state.
+func (d *SessionRouteDirectory) routeForLease(lease *sessionLease) *SessionRoute {
+	if d == nil || lease == nil {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	entry, exists := d.routes[lease.registration()]
+	if !exists || entry.route.lifecycleLease() != lease || entry.route.Generation() != lease.sessionGeneration() {
+		return nil
+	}
+	return entry.route
 }
 
 // SessionRouteDirectoryStats is a non-secret point-in-time capacity snapshot.

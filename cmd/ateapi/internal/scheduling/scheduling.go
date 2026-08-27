@@ -78,6 +78,9 @@ type WorkerSource interface {
 
 type scheduler struct {
 	source WorkerSource
+	// eligibility is an optional control-plane-owned predicate evaluated for
+	// both initial placement and recovery validation.
+	eligibility func(*ateapipb.Worker) bool
 	// intn returns a uniformly distributed random value in [0,n).
 	// Defaults to the global math/rand source
 	intn func(n int) int
@@ -92,6 +95,13 @@ type Option func(*scheduler)
 // workers. n is always >= 1.
 func WithIntn(intn func(n int) int) Option {
 	return func(s *scheduler) { s.intn = intn }
+}
+
+// WithEligibility adds a control-plane-owned Worker eligibility predicate.
+// It is intended for dynamic authorities which are not represented by durable
+// Worker fields, such as an OPEN external-provider session route.
+func WithEligibility(eligibility func(*ateapipb.Worker) bool) Option {
+	return func(s *scheduler) { s.eligibility = eligibility }
 }
 
 // New returns a Scheduler placing onto workers reported by source.
@@ -134,12 +144,14 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 }
 
 func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bool {
+	if worker == nil || (s.eligibility != nil && !s.eligibility(worker)) {
+		return false
+	}
 	if worker.GetProvider() == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
 		if constraints.OwnerAtespace == "" || worker.GetExternalSlot().GetOwnerAtespace() != constraints.OwnerAtespace {
 			return false
 		}
 	}
-
 	if worker.GetSandboxClass() != constraints.SandboxClass {
 		return false
 	}

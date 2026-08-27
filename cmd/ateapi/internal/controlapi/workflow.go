@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
@@ -81,8 +82,20 @@ type ActorWorkflow struct {
 	instruments          *Instruments
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
+	externalRouteGuard   externalprovider.RouteAssignmentGuard
 	// workflowDeadline is the maximum duration of a single actor workflow.
 	workflowDeadline time.Duration
+}
+
+// ActorWorkflowOption configures optional workflow authorities.
+type ActorWorkflowOption func(*ActorWorkflow)
+
+// WithExternalRouteAssignmentGuard enables ExternalSlot scheduling and
+// linearizes its final assignment write with provider route lifecycle.
+func WithExternalRouteAssignmentGuard(guard externalprovider.RouteAssignmentGuard) ActorWorkflowOption {
+	return func(workflow *ActorWorkflow) {
+		workflow.externalRouteGuard = guard
+	}
 }
 
 // workerExecutionDialer resolves execution endpoints from the Substrate state
@@ -107,11 +120,11 @@ func NewActorWorkflow(
 	egressGatewayAddress string,
 	pluginRegistry VolumePluginRegistry,
 	workflowDeadline time.Duration,
+	opts ...ActorWorkflowOption,
 ) *ActorWorkflow {
-	return &ActorWorkflow{
+	workflow := &ActorWorkflow{
 		store:                store,
 		workerCache:          workerCache,
-		scheduler:            scheduling.New(workerCache, scheduling.WithMeter(otel.Meter("ateapi"))),
 		dialer:               dialer,
 		actorTemplateLister:  actorTemplateLister,
 		workerPoolLister:     workerPoolLister,
@@ -122,6 +135,24 @@ func NewActorWorkflow(
 		pluginRegistry:       pluginRegistry,
 		workflowDeadline:     workflowDeadline,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(workflow)
+		}
+	}
+	workflow.scheduler = scheduling.New(
+		workerCache,
+		scheduling.WithMeter(otel.Meter("ateapi")),
+		scheduling.WithEligibility(workflow.workerRouteEligible),
+	)
+	return workflow
+}
+
+func (w *ActorWorkflow) workerRouteEligible(worker *ateapipb.Worker) bool {
+	if effectiveWorkerProvider(worker.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		return true
+	}
+	return w.externalRouteGuard != nil && w.externalRouteGuard.AllowsCandidate(worker)
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by

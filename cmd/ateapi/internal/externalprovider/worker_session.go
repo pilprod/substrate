@@ -53,6 +53,7 @@ type workerSessionRoute interface {
 // index and cannot construct a publication proof itself.
 type workerSessionRouteAuthority interface {
 	AuthorizesWorker(workerSessionRoute, string, string, string) bool
+	Close(workerSessionRoute) bool
 	Withdraw(workerSessionRoute) bool
 }
 
@@ -90,12 +91,50 @@ func newWorkerSessionLifecycle(
 	return &workerSessionLifecycle{registry: registry, availability: availability, routes: routes}, nil
 }
 
+// install replaces a provider generation only after the old route has stopped
+// accepting assignments and every conservatively owned Worker is OFFLINE. The
+// old route remains indexed while OFFLINE is in progress, then is withdrawn
+// immediately before the registry fences the old lease.
+func (l *workerSessionLifecycle) install(ctx context.Context, registrationUID string, generation uint64) (*sessionLease, error) {
+	if l == nil || ctx == nil {
+		return nil, errInvalidWorkerSessionLifecycle
+	}
+	return l.registry.installPrepared(registrationUID, generation, func(state *sessionLifecycleState, current sessionEntry) error {
+		route := l.currentRoute(current.lease)
+		if route != nil && !l.routes.Close(route) {
+			return errSessionRouteNotPublished
+		}
+		cleanup, err := l.offline(ctx, state.ownedWorkers)
+		state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
+		if err != nil {
+			return fmt.Errorf("offlining replaced external Workers: %w", err)
+		}
+		if route != nil && !l.routes.Withdraw(route) {
+			return errSessionRouteNotPublished
+		}
+		state.ownedWorkers = nil
+		return nil
+	})
+}
+
+func (l *workerSessionLifecycle) currentRoute(lease *sessionLease) workerSessionRoute {
+	if directory, ok := l.routes.(*SessionRouteDirectory); ok {
+		return directory.routeForLease(lease)
+	}
+	if authority, ok := l.routes.(interface {
+		CurrentRoute(*sessionLease) workerSessionRoute
+	}); ok {
+		return authority.CurrentRoute(lease)
+	}
+	return nil
+}
+
 // activate makes exactly the reconciled plan available for a Ready, published,
 // live route. The per-registration gate first offlines every Worker possibly
 // owned by the previous generation, including slots omitted from this plan,
 // and then preflights the desired set to OFFLINE before any ACTIVE transition.
-// Any activation failure withdraws the route and immediately runs a
-// deterministic OFFLINE rollback.
+// Any activation failure first closes the route, then runs a deterministic
+// OFFLINE rollback, and withdraws/fences only after the rollback succeeds.
 func (l *workerSessionLifecycle) activate(
 	ctx context.Context,
 	route workerSessionRoute,
@@ -107,95 +146,78 @@ func (l *workerSessionLifecycle) activate(
 		route.RegistrationUID() != lease.registration() || route.Generation() != lease.sessionGeneration() ||
 		plan.Registration().UID != lease.registration() {
 		err := fmt.Errorf("%w: route, lease, and plan authority do not match", errInvalidWorkerSessionLifecycle)
-		l.withdrawFailedActivation(route, lease)
+		l.cleanupFailedActivation(ctx, route, lease, nil)
 		return workerCleanupResult{}, err
 	}
 	desired, err := sessionWorkerRefs(plan, reconciled)
 	if err != nil {
-		l.withdrawFailedActivation(route, lease)
+		l.cleanupFailedActivation(ctx, route, lease, nil)
 		return workerCleanupResult{}, err
 	}
 
 	var cleanup workerCleanupResult
 	err = l.registry.withCurrentLease(lease, func(state *sessionLifecycleState, current sessionEntry) error {
-		if cause := lease.cancellationCause(); cause != nil {
-			return cause
-		}
-		if err := ctx.Err(); err != nil {
-			l.withdrawRouteForFailure(route, current)
-			return err
-		}
-		if err := l.validatePublishedRoute(route, desired); err != nil {
-			l.withdrawRouteForFailure(route, current)
-			return err
-		}
-
-		// A replacement inherits the conservative ACTIVE set. Complete this
-		// pass before touching the new plan so omitted slots cannot remain
-		// schedulable and state never grows across failed generations.
-		inherited, inheritedErr := l.offline(ctx, state.ownedWorkers)
-		state.ownedWorkers = cloneSessionWorkerRefs(inherited.pending)
-		if inheritedErr != nil {
-			cleanup = inherited
-			l.withdrawRouteForFailure(route, current)
-			return fmt.Errorf("offlining inherited external Workers: %w", inheritedErr)
-		}
-		state.ownedWorkers = nil
-
-		// Reconciliation preserves status. An explicit OFFLINE preflight makes
-		// this activation fail closed even when a prior process left one of the
-		// desired durable Workers ACTIVE.
-		preflight, preflightErr := l.offline(ctx, desired)
-		if preflightErr != nil {
-			cleanup = preflight
-			state.ownedWorkers = cloneSessionWorkerRefs(preflight.pending)
-			l.withdrawRouteForFailure(route, current)
-			return fmt.Errorf("preflighting external Workers OFFLINE: %w", preflightErr)
-		}
-
-		for index, worker := range desired {
-			if err := l.validatePublishedWorker(route, worker); err != nil {
-				l.withdrawRouteForFailure(route, current)
-				rollback, rollbackErr := l.offline(ctx, desired[:index])
-				cleanup = rollback
-				state.ownedWorkers = cloneSessionWorkerRefs(rollback.pending)
-				if rollbackErr != nil {
-					return errors.Join(err, fmt.Errorf("rolling back external Workers: %w", rollbackErr))
-				}
+		activationErr := func() error {
+			if cause := lease.cancellationCause(); cause != nil {
+				return cause
+			}
+			if err := ctx.Err(); err != nil {
 				return err
 			}
-			updated, transitionErr := l.availability.SetExternalWorkerAvailability(
-				ctx,
-				worker.name(),
-				worker.uid(),
-				ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			)
-			if transitionErr == nil {
-				transitionErr = worker.validateState(updated, ateapipb.WorkerState_WORKER_STATE_ACTIVE)
-			}
-			if transitionErr == nil {
-				transitionErr = l.validatePublishedWorker(route, worker)
-			}
-			if transitionErr == nil {
-				continue
+			if err := l.validatePublishedRoute(route, desired); err != nil {
+				return err
 			}
 
-			// Include the failing call because an error can be ambiguous after a
-			// storage boundary. Unattempted desired Workers passed the OFFLINE
-			// preflight and are not cleanup candidates.
-			l.withdrawRouteForFailure(route, current)
-			rollback, rollbackErr := l.offline(ctx, desired[:index+1])
-			cleanup = rollback
-			state.ownedWorkers = cloneSessionWorkerRefs(rollback.pending)
-			activationErr := fmt.Errorf("activating external Worker %q: %w", worker.name(), transitionErr)
-			if rollbackErr != nil {
-				return errors.Join(activationErr, fmt.Errorf("rolling back external Workers: %w", rollbackErr))
+			// A replacement inherits the conservative ACTIVE set. Complete this
+			// pass before touching the new plan so omitted slots cannot remain
+			// schedulable and state never grows across failed generations.
+			inherited, inheritedErr := l.offline(ctx, state.ownedWorkers)
+			state.ownedWorkers = cloneSessionWorkerRefs(inherited.pending)
+			if inheritedErr != nil {
+				return fmt.Errorf("offlining inherited external Workers: %w", inheritedErr)
 			}
-			return activationErr
+			state.ownedWorkers = nil
+
+			// Reconciliation preserves status. An explicit OFFLINE preflight makes
+			// this activation fail closed even when a prior process left one of the
+			// desired durable Workers ACTIVE.
+			preflight, preflightErr := l.offline(ctx, desired)
+			state.ownedWorkers = cloneSessionWorkerRefs(preflight.pending)
+			if preflightErr != nil {
+				return fmt.Errorf("preflighting external Workers OFFLINE: %w", preflightErr)
+			}
+			state.ownedWorkers = nil
+
+			for _, worker := range desired {
+				if err := l.validatePublishedWorker(route, worker); err != nil {
+					return err
+				}
+				updated, transitionErr := l.availability.SetExternalWorkerAvailability(
+					ctx,
+					worker.name(),
+					worker.uid(),
+					ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+				)
+				if transitionErr == nil {
+					transitionErr = worker.validateState(updated, ateapipb.WorkerState_WORKER_STATE_ACTIVE)
+				}
+				if transitionErr == nil {
+					transitionErr = l.validatePublishedWorker(route, worker)
+				}
+				if transitionErr != nil {
+					return fmt.Errorf("activating external Worker %q: %w", worker.name(), transitionErr)
+				}
+			}
+
+			state.ownedWorkers = cloneSessionWorkerRefs(desired)
+			return nil
+		}()
+		if activationErr == nil {
+			return nil
 		}
-
-		state.ownedWorkers = cloneSessionWorkerRefs(desired)
-		return nil
+		var cleanupErr error
+		cleanup, cleanupErr = l.failActivationLocked(ctx, route, state, current, desired)
+		return errors.Join(activationErr, cleanupErr)
 	})
 	if err != nil {
 		return cleanup, err
@@ -203,22 +225,36 @@ func (l *workerSessionLifecycle) activate(
 	return workerCleanupResult{}, nil
 }
 
-func (l *workerSessionLifecycle) withdrawFailedActivation(route workerSessionRoute, lease *sessionLease) {
-	if route == nil || lease == nil {
+func (l *workerSessionLifecycle) cleanupFailedActivation(ctx context.Context, route workerSessionRoute, lease *sessionLease, workers []sessionWorkerRef) {
+	if ctx == nil || route == nil || lease == nil {
 		return
 	}
-	// Validation happens before any status mutation. If the route was already
-	// published, withdraw it; if it was never current or has been replaced,
-	// withCurrentLease makes this a harmless no-op from the caller's viewpoint.
-	_ = l.registry.withCurrentLease(lease, func(_ *sessionLifecycleState, current sessionEntry) error {
-		l.withdrawRouteForFailure(route, current)
-		return nil
+	_ = l.registry.withCurrentLease(lease, func(state *sessionLifecycleState, current sessionEntry) error {
+		_, err := l.failActivationLocked(ctx, route, state, current, workers)
+		return err
 	})
 }
 
-func (l *workerSessionLifecycle) withdrawRouteForFailure(route workerSessionRoute, current sessionEntry) {
-	_ = l.routes.Withdraw(route)
+func (l *workerSessionLifecycle) failActivationLocked(
+	ctx context.Context,
+	route workerSessionRoute,
+	state *sessionLifecycleState,
+	current sessionEntry,
+	workers []sessionWorkerRef,
+) (workerCleanupResult, error) {
+	closed := l.routes.Close(route)
+	candidates := mergeSessionWorkerRefs(state.ownedWorkers, workers)
+	cleanup, cleanupErr := l.offline(ctx, candidates)
+	state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
+	if cleanupErr != nil {
+		return cleanup, fmt.Errorf("rolling back external Workers OFFLINE: %w", cleanupErr)
+	}
+	if closed && !l.routes.Withdraw(route) {
+		return cleanup, errSessionRouteNotPublished
+	}
+	state.ownedWorkers = nil
 	current.cancel(errSessionActivationFailed)
+	return cleanup, nil
 }
 
 func (l *workerSessionLifecycle) validatePublishedRoute(route workerSessionRoute, workers []sessionWorkerRef) error {
@@ -243,7 +279,8 @@ func (l *workerSessionLifecycle) validatePublishedWorker(route workerSessionRout
 	return nil
 }
 
-// cleanup withdraws the exact current route before changing Worker status.
+// cleanup closes the exact current route, makes every owned Worker OFFLINE,
+// and only then withdraws the route and fences the lease.
 // A fenced generation is already owned by its replacement and therefore
 // returns a successful superseded no-op instead of touching shared Workers.
 // The caller may exact-remove the underlying lease after this method returns.
@@ -252,20 +289,23 @@ func (l *workerSessionLifecycle) cleanup(ctx context.Context, route workerSessio
 	if lease == nil || route.RegistrationUID() != lease.registration() || route.Generation() != lease.sessionGeneration() {
 		return workerCleanupResult{}, errSessionNotCurrent
 	}
-	withdrawn := l.routes.Withdraw(route)
-	if !withdrawn && routeLiveError(route) == nil {
-		return workerCleanupResult{}, errSessionRouteNotPublished
-	}
 	var cleanup workerCleanupResult
 	err := l.registry.withCurrentLease(lease, func(state *sessionLifecycleState, current sessionEntry) error {
-		// Route withdrawal happened before entering this callback. Keep the
-		// exact registry entry until OFFLINE completes so replacement install
-		// cannot race this generation's mutations.
-		current.cancel(errSessionClosing)
+		closed := l.routes.Close(route)
+		if !closed && routeLiveError(route) == nil {
+			return errSessionRouteNotPublished
+		}
 		var cleanupErr error
 		cleanup, cleanupErr = l.offline(ctx, state.ownedWorkers)
 		state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
-		return cleanupErr
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		if closed && !l.routes.Withdraw(route) {
+			return errSessionRouteNotPublished
+		}
+		current.cancel(errSessionClosing)
+		return nil
 	})
 	if errors.Is(err, errSessionFenced) {
 		return workerCleanupResult{superseded: true}, nil
@@ -283,11 +323,14 @@ func (l *workerSessionLifecycle) cleanupUnpublished(ctx context.Context, lease *
 	}
 	var cleanup workerCleanupResult
 	err := l.registry.withCurrentLease(lease, func(state *sessionLifecycleState, current sessionEntry) error {
-		current.cancel(errSessionClosing)
 		var cleanupErr error
 		cleanup, cleanupErr = l.offline(ctx, state.ownedWorkers)
 		state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
-		return cleanupErr
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		current.cancel(errSessionClosing)
+		return nil
 	})
 	if errors.Is(err, errSessionFenced) {
 		return workerCleanupResult{superseded: true}, nil
@@ -436,6 +479,27 @@ func cloneSessionWorkerRefs(workers []sessionWorkerRef) []sessionWorkerRef {
 		cloned[index] = worker.clone()
 	}
 	return cloned
+}
+
+func mergeSessionWorkerRefs(groups ...[]sessionWorkerRef) []sessionWorkerRef {
+	byIdentity := make(map[string]sessionWorkerRef)
+	for _, workers := range groups {
+		for _, worker := range workers {
+			key := worker.name() + "\x00" + worker.uid()
+			if key == "\x00" {
+				continue
+			}
+			byIdentity[key] = worker.clone()
+		}
+	}
+	merged := make([]sessionWorkerRef, 0, len(byIdentity))
+	for _, worker := range byIdentity {
+		merged = append(merged, worker)
+	}
+	slices.SortFunc(merged, func(left, right sessionWorkerRef) int {
+		return compareStrings(left.name()+"\x00"+left.uid(), right.name()+"\x00"+right.uid())
+	})
+	return merged
 }
 
 func compareStrings(left, right string) int {

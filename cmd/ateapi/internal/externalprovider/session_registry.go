@@ -84,6 +84,19 @@ func newSessionRegistry(maxTrackedRegistrations uint32) (*sessionRegistry, error
 // registrationUID. The returned lease is not routable by itself and is owned
 // by the session handler, which must pass it back to remove during cleanup.
 func (r *sessionRegistry) install(registrationUID string, generation uint64) (*sessionLease, error) {
+	return r.installPrepared(registrationUID, generation, nil)
+}
+
+// installPrepared installs a newer generation only after prepare has made the
+// previous generation fail closed. prepare runs under the stable
+// per-registration lifecycle gate and without the registry's global lock, so
+// it may perform bounded persistence I/O. If prepare fails, the previous lease
+// remains current and the generation is not consumed.
+func (r *sessionRegistry) installPrepared(
+	registrationUID string,
+	generation uint64,
+	prepare func(*sessionLifecycleState, sessionEntry) error,
+) (*sessionLease, error) {
 	if !IsValidIdentity(registrationUID) {
 		return nil, errInvalidSessionRegistration
 	}
@@ -108,20 +121,34 @@ func (r *sessionRegistry) install(registrationUID string, generation uint64) (*s
 	lifecycle.mu.Lock()
 	defer lifecycle.mu.Unlock()
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	r.mu.RLock()
 	highest, tracked := r.highestGenerations[registrationUID]
+	previous := r.sessions[registrationUID]
+	r.mu.RUnlock()
 	if tracked && generation <= highest {
 		return nil, errSessionGenerationNotNewer
 	}
+	if previous.lease != nil && prepare != nil {
+		if err := prepare(lifecycle, previous); err != nil {
+			return nil, err
+		}
+	}
 
-	previous := r.sessions[registrationUID]
 	ctx, cancel := context.WithCancelCause(context.Background())
 	lease := &sessionLease{
 		registrationUID: registrationUID,
 		generation:      generation,
 		ctx:             ctx,
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// All same-registration mutators take lifecycle.mu first. Recheck anyway so
+	// this invariant fails closed if a future mutator omits that contract.
+	highest, tracked = r.highestGenerations[registrationUID]
+	current := r.sessions[registrationUID]
+	if (tracked && generation <= highest) || current.lease != previous.lease {
+		cancel(errSessionRemoved)
+		return nil, errSessionGenerationNotNewer
 	}
 	r.highestGenerations[registrationUID] = generation
 	r.sessions[registrationUID] = sessionEntry{lease: lease, cancel: cancel}

@@ -573,8 +573,12 @@ func TestSessionCoordinatorCloseFailureKeepsLeaseForRetry(t *testing.T) {
 	if err := session.close(context.Background()); !errors.Is(err, injected) {
 		t.Fatalf("close(OFFLINE failure) error = %v, want injected error", err)
 	}
-	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
-		t.Fatalf("failed close retained route: %+v", stats)
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{Routes: 1, Bindings: 1}) {
+		t.Fatalf("failed close route stats = %+v, want closed bindings retained for retry", stats)
+	}
+	plan := mustWorkerPlan(t, "registration-a", "slot-a")
+	if _, _, routed := routes.LookupExecutionIdentity(plan.Workers()[0].GetExternalSlot().GetExecutionIdentity()); routed {
+		t.Fatal("failed close retained a schedulable route")
 	}
 	if lease, ok := registry.lookup("registration-a", 1); !ok || lease != session.lease {
 		t.Fatalf("failed close lease = (%p, %v), want retryable current lease", lease, ok)
@@ -586,7 +590,6 @@ func TestSessionCoordinatorCloseFailureKeepsLeaseForRetry(t *testing.T) {
 	if _, ok := registry.lookup("registration-a", 1); ok {
 		t.Fatal("successful retry retained lease")
 	}
-	plan := mustWorkerPlan(t, "registration-a", "slot-a")
 	if got := runtime.workerSnapshot(plan.Workers()[0].GetMetadata().GetName()).GetStatus().GetState(); got != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
 		t.Fatalf("Worker state after close retry = %s, want OFFLINE", got)
 	}

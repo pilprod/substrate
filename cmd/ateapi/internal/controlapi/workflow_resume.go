@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
@@ -542,10 +543,32 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// Workers() returns pointers directly from the cache, so the claim is written
 	// by mutating the store's own copy; the cached one is only read, for the
 	// version this claim is conditioned on.
-	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = assignment
-		return nil
-	})
+	var stored *ateapipb.Worker
+	claim := func(validateCurrent func(*ateapipb.Worker) error) error {
+		var claimErr error
+		stored, claimErr = w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
+			if validateCurrent != nil {
+				if err := validateCurrent(toUpdate); err != nil {
+					return err
+				}
+			}
+			toUpdate.Status.Assignment = assignment
+			return nil
+		})
+		return claimErr
+	}
+	if effectiveWorkerProvider(assignedWorker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if w.externalRouteGuard == nil {
+			err = externalprovider.ErrExternalRouteAssignmentUnavailable
+		} else {
+			err = w.externalRouteGuard.GuardAssignment(ctx, actorRef.Atespace, assignedWorker, claim)
+		}
+		if errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
+			err = errors.Join(store.ErrVersionConflict, err)
+		}
+	} else {
+		err = claim(nil)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())

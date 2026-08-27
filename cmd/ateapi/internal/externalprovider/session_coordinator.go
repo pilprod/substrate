@@ -97,7 +97,7 @@ func (c *sessionCoordinator) establish(
 		return nil, err
 	}
 
-	lease, err := c.registry.install(admission.Registration().UID, admission.Generation())
+	lease, err := c.lifecycle.install(ctx, admission.Registration().UID, admission.Generation())
 	if err != nil {
 		return nil, fmt.Errorf("installing external provider session: %w", err)
 	}
