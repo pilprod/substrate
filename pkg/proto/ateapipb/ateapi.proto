@@ -425,6 +425,19 @@ message WorkerAssignment {
   //
   // +k8s:optional
   ExternalSlotIdentity external_slot = 8;
+
+  // worker_resource_uid is the server-assigned UID of the exact Worker
+  // resource incarnation referenced by worker. It is independent of
+  // worker_pod_uid and applies to every provider.
+  //
+  // The field is optional only so assignments persisted before incarnation
+  // pinning can still be decoded. The control plane sets it on every new
+  // assignment. Execution paths which resolve ExternalSlot workers must reject
+  // an absent UID or one that does not match the resolved Worker.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-uuid
+  string worker_resource_uid = 9;
 }
 
 // ActorSnapshot is an independently addressable durable Actor snapshot. Its

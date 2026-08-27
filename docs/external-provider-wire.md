@@ -211,6 +211,17 @@ not build a second route directory or binding index. It does not register a
 listener, implement `Connect`, receive or send stream frames, route channels,
 or send `ConnectReady`.
 
+Every newly materialized `WorkerAssignment` also snapshots the selected
+Worker's server-assigned resource UID in `worker_resource_uid`. This is a
+general durable-resource incarnation pin and is separate from both the
+Kubernetes-only `worker_pod_uid` and the provider's stable
+`external_slot.execution_identity`. The schema accepts an absent pin only to
+decode assignments persisted before this field existed. A new external
+execution route must resolve the Worker by name and call the strict
+`workerassignment.ValidateIncarnation` helper before using provider identity;
+missing pins, deleted-and-recreated Workers with the same name, and all UID
+mismatches fail closed.
+
 ## Post-Ready channel state
 
 The ateapi-private channel state machine begins only after a valid admission and

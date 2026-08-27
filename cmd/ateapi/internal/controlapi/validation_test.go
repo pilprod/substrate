@@ -105,12 +105,13 @@ func TestValidateResourceMetadataCreate(t *testing.T) {
 func TestValidateWorkerAssignmentCreate(t *testing.T) {
 	validKubernetes := func() *ateapipb.WorkerAssignment {
 		return &ateapipb.WorkerAssignment{
-			Worker:          &ateapipb.ObjectRef{Name: "worker-1"},
-			WorkerNamespace: "ate-system",
-			WorkerPool:      "pool-1",
-			WorkerPod:       "worker-pod-1",
-			WorkerPodUid:    "12345678-1234-1234-1234-123456789abc",
-			WorkerPodIp:     "10.1.2.3",
+			Worker:            &ateapipb.ObjectRef{Name: "worker-1"},
+			WorkerResourceUid: "01234567-89ab-cdef-0123-456789abcdef",
+			WorkerNamespace:   "ate-system",
+			WorkerPool:        "pool-1",
+			WorkerPod:         "worker-pod-1",
+			WorkerPodUid:      "12345678-1234-1234-1234-123456789abc",
+			WorkerPodIp:       "10.1.2.3",
 		}
 	}
 	validExternal := func() *ateapipb.WorkerAssignment {
@@ -134,6 +135,21 @@ func TestValidateWorkerAssignmentCreate(t *testing.T) {
 	}{{
 		name: "legacy unspecified provider is KubernetesPod",
 		obj:  validKubernetes(),
+	}, {
+		name: "legacy missing Worker resource UID remains readable",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validKubernetes()
+			assignment.WorkerResourceUid = ""
+			return assignment
+		}(),
+	}, {
+		name: "invalid Worker resource UID",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validKubernetes()
+			assignment.WorkerResourceUid = "not-a-uid"
+			return assignment
+		}(),
+		want: field.ErrorList{field.Invalid(root.Child("worker_resource_uid"), nil, "").WithOrigin("format=k8s-uuid")},
 	}, {
 		name: "explicit KubernetesPod",
 		obj: func() *ateapipb.WorkerAssignment {

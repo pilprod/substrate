@@ -1285,9 +1285,21 @@ type WorkerAssignment struct {
 	// absent for KubernetesPod workers.
 	//
 	// +k8s:optional
-	ExternalSlot  *ExternalSlotIdentity `protobuf:"bytes,8,opt,name=external_slot,json=externalSlot,proto3" json:"external_slot,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ExternalSlot *ExternalSlotIdentity `protobuf:"bytes,8,opt,name=external_slot,json=externalSlot,proto3" json:"external_slot,omitempty"`
+	// worker_resource_uid is the server-assigned UID of the exact Worker
+	// resource incarnation referenced by worker. It is independent of
+	// worker_pod_uid and applies to every provider.
+	//
+	// The field is optional only so assignments persisted before incarnation
+	// pinning can still be decoded. The control plane sets it on every new
+	// assignment. Execution paths which resolve ExternalSlot workers must reject
+	// an absent UID or one that does not match the resolved Worker.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-uuid
+	WorkerResourceUid string `protobuf:"bytes,9,opt,name=worker_resource_uid,json=workerResourceUid,proto3" json:"worker_resource_uid,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *WorkerAssignment) Reset() {
@@ -1374,6 +1386,13 @@ func (x *WorkerAssignment) GetExternalSlot() *ExternalSlotIdentity {
 		return x.ExternalSlot
 	}
 	return nil
+}
+
+func (x *WorkerAssignment) GetWorkerResourceUid() string {
+	if x != nil {
+		return x.WorkerResourceUid
+	}
+	return ""
 }
 
 // ActorSnapshot is an independently addressable durable Actor snapshot. Its
@@ -5588,7 +5607,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0fsource_snapshot\x18\t \x01(\v2!.ateapi.ActorSourceSnapshotStatusR\x0esourceSnapshot\"m\n" +
 	"\x19ActorSourceSnapshotStatus\x12-\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\bsnapshot\x12!\n" +
-	"\fsnapshot_uid\x18\x02 \x01(\tR\vsnapshotUid\"\xe9\x02\n" +
+	"\fsnapshot_uid\x18\x02 \x01(\tR\vsnapshotUid\"\x99\x03\n" +
 	"\x10WorkerAssignment\x12)\n" +
 	"\x06worker\x18\x06 \x01(\v2\x11.ateapi.ObjectRefR\x06worker\x12)\n" +
 	"\x10worker_namespace\x18\x01 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
@@ -5599,7 +5618,8 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0eworker_pod_uid\x18\x04 \x01(\tR\fworkerPodUid\x12\"\n" +
 	"\rworker_pod_ip\x18\x05 \x01(\tR\vworkerPodIp\x122\n" +
 	"\bprovider\x18\a \x01(\x0e2\x16.ateapi.WorkerProviderR\bprovider\x12A\n" +
-	"\rexternal_slot\x18\b \x01(\v2\x1c.ateapi.ExternalSlotIdentityR\fexternalSlot\"z\n" +
+	"\rexternal_slot\x18\b \x01(\v2\x1c.ateapi.ExternalSlotIdentityR\fexternalSlot\x12.\n" +
+	"\x13worker_resource_uid\x18\t \x01(\tR\x11workerResourceUid\"z\n" +
 	"\rActorSnapshot\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x123\n" +
 	"\x06status\x18\x02 \x01(\v2\x1b.ateapi.ActorSnapshotStatusR\x06status\"\xdf\x03\n" +

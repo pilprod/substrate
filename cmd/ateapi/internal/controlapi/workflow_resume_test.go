@@ -63,8 +63,9 @@ func TestSchedulerRecordable(t *testing.T) {
 }
 
 func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
+	const workerUID = "11111111-1111-4111-8111-111111111111"
 	worker := &ateapipb.Worker{
-		Metadata:        &ateapipb.ResourceMetadata{Name: "worker-1"},
+		Metadata:        &ateapipb.ResourceMetadata{Name: "worker-1", Uid: workerUID},
 		WorkerNamespace: "ate-system",
 		WorkerPool:      "pool-1",
 		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
@@ -74,12 +75,16 @@ func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
 		},
 	}
 
-	got := workerAssignmentFrom(worker)
+	got, err := workerAssignmentFrom(worker)
+	if err != nil {
+		t.Fatalf("workerAssignmentFrom() error = %v", err)
+	}
 	want := &ateapipb.WorkerAssignment{
-		Worker:          &ateapipb.ObjectRef{Name: "worker-1"},
-		WorkerNamespace: "ate-system",
-		WorkerPool:      "pool-1",
-		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		Worker:            &ateapipb.ObjectRef{Name: "worker-1"},
+		WorkerResourceUid: workerUID,
+		WorkerNamespace:   "ate-system",
+		WorkerPool:        "pool-1",
+		Provider:          ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
 		ExternalSlot: &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-2",
 			LocalityIdentity:  "device-1.workspace-2",
@@ -95,6 +100,13 @@ func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
 	worker.ExternalSlot.ExecutionIdentity = "mutated-after-assignment"
 	if got.GetExternalSlot().GetExecutionIdentity() != "host-1.slot-2" {
 		t.Fatalf("assignment external identity changed with Worker: %q", got.GetExternalSlot().GetExecutionIdentity())
+	}
+}
+
+func TestWorkerAssignmentFromRejectsMissingServerResourceUID(t *testing.T) {
+	worker := &ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: "worker-1"}}
+	if assignment, err := workerAssignmentFrom(worker); err == nil || assignment != nil {
+		t.Fatalf("workerAssignmentFrom() = (%v, %v), want (nil, error)", assignment, err)
 	}
 }
 

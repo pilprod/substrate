@@ -24,6 +24,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateerrors"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/workerassignment"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -134,6 +135,18 @@ func releaseWorker(ctx context.Context, st crashActorStore, actor *ateapipb.Acto
 	}
 
 	sandboxClass := worker.GetSandboxClass()
+	// A pinned assignment cannot authorize a mutation of a different Worker
+	// resource incarnation which later reused the same global name. Missing pins
+	// retain the legacy release behavior for assignments persisted before the
+	// field existed.
+	if assignment.GetWorkerResourceUid() != "" {
+		if err := workerassignment.ValidateIncarnation(assignment, worker); err != nil {
+			slog.WarnContext(ctx, "Worker resource incarnation changed, skipping release",
+				slog.String("worker", workerName),
+				slog.Any("err", err))
+			return sandboxClass, nil
+		}
+	}
 	wass := worker.GetStatus().GetAssignment()
 	if wass == nil {
 		slog.WarnContext(ctx, "Worker's assignment is already nil, skipping release", slog.String("worker", workerName))
