@@ -179,7 +179,7 @@ func TestRecoverExternalWorkersOfflineFailsClosedOnTransitionMismatch(t *testing
 }
 
 func TestRecoverExternalWorkersOfflineValidatesArgumentsAndContext(t *testing.T) {
-	//nolint:staticcheck // The nil context is the invalid input this test verifies.
+	//nolint:staticcheck // This deliberately verifies the public nil-context guard.
 	if _, err := RecoverExternalWorkersOffline(nil, &fakeStartupRecoveryStore{}, StartupSweepConfig{}); !errors.Is(err, errInvalidStartupSweep) {
 		t.Fatalf("nil context error = %v, want errInvalidStartupSweep", err)
 	}

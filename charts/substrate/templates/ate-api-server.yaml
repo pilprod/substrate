@@ -83,6 +83,11 @@ spec:
         args:
         - "--grpc-listen-addr=0.0.0.0:443"
         - "--grpc-server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+{{- if .Values.externalProviderBroker.enabled }}
+        - {{ printf "--external-provider-broker-listen-addr=0.0.0.0:%v" .Values.externalProviderBroker.containerPort | quote }}
+        - "--external-provider-broker-server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+        - {{ printf "--external-provider-session-token-ttl=%v" .Values.externalProviderBroker.sessionTokenTTL | quote }}
+{{- end }}
         - "--authentication-config=/etc/ateapi/authentication/authentication.yaml"
         - "--postgres-connection-string=@env"
         - "--actor-id-jwt-pool=/run/actor-id-jwt-pool/pool.json"
@@ -123,6 +128,11 @@ spec:
         - { name: authentication-config, mountPath: /etc/ateapi/authentication, readOnly: true }
         ports:
         - containerPort: 443
+{{- if .Values.externalProviderBroker.enabled }}
+        - name: provider-grpc
+          containerPort: {{ .Values.externalProviderBroker.containerPort }}
+          protocol: TCP
+{{- end }}
         - name: prometheus
           containerPort: 9090
         readinessProbe:
@@ -208,3 +218,9 @@ spec:
     protocol: TCP
     port: 443
     targetPort: 443
+{{- if .Values.externalProviderBroker.enabled }}
+  - name: provider-grpc
+    protocol: TCP
+    port: {{ .Values.externalProviderBroker.containerPort }}
+    targetPort: provider-grpc
+{{- end }}

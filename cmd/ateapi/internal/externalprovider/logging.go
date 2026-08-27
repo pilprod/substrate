@@ -41,3 +41,22 @@ func MetadataOnlyUnaryLoggingInterceptor(logger *slog.Logger) grpc.UnaryServerIn
 		return response, err
 	}
 }
+
+// MetadataOnlyStreamLoggingInterceptor is the streaming counterpart to
+// MetadataOnlyUnaryLoggingInterceptor. In particular, it does not inspect the
+// stream context because that contains the external provider credential.
+func MetadataOnlyStreamLoggingInterceptor(logger *slog.Logger) grpc.StreamServerInterceptor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return func(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		started := time.Now()
+		err := handler(server, stream)
+		logger.InfoContext(stream.Context(), "external provider RPC",
+			slog.String("method", info.FullMethod),
+			slog.String("code", status.Code(err).String()),
+			slog.Duration("elapsed", time.Since(started)),
+		)
+		return err
+	}
+}

@@ -57,6 +57,15 @@ atelet:
 # Mounted via envFrom with optional=true. Created by the chart from these values.
 ateApiServerEnvVarsConfigMap: ate-api-server-envvars
 
+# Dedicated, server-authenticated TLS endpoint for external provider
+# enrollment/session credentials. It is an additional port on the internal API
+# Service and is disabled unless explicitly enabled. A separate ingress or
+# tunnel is required for clients outside the cluster.
+externalProviderBroker:
+  enabled: false
+  containerPort: 8443
+  sessionTokenTTL: 5m
+
 otel:
   endpoint: ""
 

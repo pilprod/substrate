@@ -29,6 +29,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoridentity"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/debugapi"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/oidcjwt"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
@@ -60,9 +61,24 @@ import (
 const maxRPCDeadline = 10 * time.Minute
 
 var (
-	listenAddr           = pflag.String("grpc-listen-addr", ":443", "Address and port the gRPC server should listen on.")
-	metricsListenAddr    = pflag.String("metrics-listen-addr", ":9090", "Address and port the prometheus metrics server should listen on.")
-	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
+	listenAddr                       = pflag.String("grpc-listen-addr", ":443", "Address and port the gRPC server should listen on.")
+	metricsListenAddr                = pflag.String("metrics-listen-addr", ":9090", "Address and port the prometheus metrics server should listen on.")
+	grpcServerCredBundle             = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
+	externalProviderBrokerListenAddr = pflag.String(
+		"external-provider-broker-listen-addr",
+		"",
+		"Dedicated TLS listener for the external provider Broker. Empty disables the Broker network surface.",
+	)
+	externalProviderBrokerServerCredBundle = pflag.String(
+		"external-provider-broker-server-cred-bundle",
+		"",
+		"File with the server TLS credential bundle for the dedicated external provider Broker listener.",
+	)
+	externalProviderSessionTokenTTL = pflag.Duration(
+		"external-provider-session-token-ttl",
+		5*time.Minute,
+		"Lifetime of a one-time external provider Connect session token.",
+	)
 
 	authenticationConfigFile = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
 	postgresConnectionString = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
@@ -241,6 +257,24 @@ func main() {
 	ateapipb.RegisterActorIdentityServer(mux, actorIdentitySrv)
 	ateapipb.RegisterDebugServer(mux, debugSrv)
 
+	brokerConfig := externalProviderBrokerConfig{
+		ListenAddress:          *externalProviderBrokerListenAddr,
+		ServerCredentialBundle: *externalProviderBrokerServerCredBundle,
+		SessionTokenTTL:        *externalProviderSessionTokenTTL,
+	}
+	var brokerRuntime *externalProviderBrokerRuntime
+	if brokerConfig.enabled() {
+		brokerStore, ok := persistence.(externalprovider.ExternalProviderStore)
+		if !ok {
+			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
+		}
+		brokerRuntime, err = startExternalProviderBroker(ctx, brokerStore, brokerConfig, slog.Default())
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to start external provider Broker", err)
+		}
+		slog.InfoContext(ctx, "External provider Broker listener configured", slog.String("address", brokerRuntime.listener.Addr().String()))
+	}
+
 	readiness := &serverboot.Readiness{}
 	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{
 		Addr:          *metricsListenAddr,
@@ -248,7 +282,20 @@ func main() {
 		EnableHealthz: true,
 	})
 
-	drainDone := drainOnShutdown(shutdownCtx, mux, readiness)
+	serversToDrain := []*grpc.Server{mux}
+	if brokerRuntime != nil {
+		serversToDrain = append(serversToDrain, brokerRuntime.server)
+		go func() {
+			err := brokerRuntime.Serve()
+			if shutdownCtx.Err() == nil {
+				if err == nil {
+					err = fmt.Errorf("external provider Broker stopped unexpectedly")
+				}
+				serverboot.Fatal(ctx, "Failed to serve external provider Broker", err)
+			}
+		}()
+	}
+	drainDone := drainOnShutdown(shutdownCtx, readiness, serversToDrain...)
 
 	if err := mux.Serve(lis); err != nil {
 		serverboot.Fatal(ctx, "Failed to serve", err)
@@ -257,7 +304,7 @@ func main() {
 	slog.InfoContext(ctx, "Shutdown complete")
 }
 
-func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
+func drainOnShutdown(ctx context.Context, readiness *serverboot.Readiness, servers ...*grpc.Server) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -266,18 +313,27 @@ func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboo
 		readiness.MarkNotReady()
 		time.Sleep(*drainDelay)
 		slog.InfoContext(ctx, "Starting gRPC drain")
-		drainComplete := make(chan struct{})
-		go func() {
-			srv.GracefulStop()
-			close(drainComplete)
-		}()
-		select {
-		case <-drainComplete:
-			slog.InfoContext(ctx, "Drain completed within deadline")
-		case <-time.After(*drainTimeout):
-			slog.WarnContext(ctx, "Drain deadline exceeded; forcing stop")
-			srv.Stop()
+		drainComplete := make(chan struct{}, len(servers))
+		for _, server := range servers {
+			go func(server *grpc.Server) {
+				server.GracefulStop()
+				drainComplete <- struct{}{}
+			}(server)
 		}
+		timer := time.NewTimer(*drainTimeout)
+		defer timer.Stop()
+		for range servers {
+			select {
+			case <-drainComplete:
+			case <-timer.C:
+				slog.WarnContext(ctx, "Drain deadline exceeded; forcing stop")
+				for _, server := range servers {
+					server.Stop()
+				}
+				return
+			}
+		}
+		slog.InfoContext(ctx, "Drain completed within deadline")
 	}()
 	return done
 }
@@ -304,6 +360,9 @@ func logFlagValues(ctx context.Context) {
 	slog.InfoContext(ctx, "Final flag values",
 		slog.String("grpc-listen-addr", *listenAddr),
 		slog.String("grpc-server-cred-bundle", *grpcServerCredBundle),
+		slog.String("external-provider-broker-listen-addr", *externalProviderBrokerListenAddr),
+		slog.String("external-provider-broker-server-cred-bundle", *externalProviderBrokerServerCredBundle),
+		slog.Duration("external-provider-session-token-ttl", *externalProviderSessionTokenTTL),
 		slog.String("authentication-config", *authenticationConfigFile),
 		slog.String("postgres-connection-string", *postgresConnectionString),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),

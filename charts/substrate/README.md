@@ -40,4 +40,16 @@ See `values.yaml` for the full set; the important keys:
 | `rustfs.enabled` | `true` | Deploy an in-cluster S3-compatible RustFS bucket for snapshots |
 | `atelet.storageBackend` | `s3` | Default snapshot backend, wired to RustFS when `rustfs.enabled=true` |
 | `atelet.gcpAuthForImagePulls` | `false` | Enable only when using GCP registry auth |
+| `externalProviderBroker.enabled` | `false` | Add a dedicated internal TLS Broker listener and API Service port |
+| `externalProviderBroker.containerPort` | `8443` | Broker listener port inside the ate-api-server Pod |
+| `externalProviderBroker.sessionTokenTTL` | `5m` | Lifetime of a one-time external provider Connect token |
 | `otel.endpoint` | `""` | Set to an OTLP endpoint to export traces/metrics |
+
+Enabling `externalProviderBroker` adds a second port to the existing internal
+`api` Service. It does not create an Ingress, Gateway, tunnel, or public load
+balancer. External clients need a separately governed path to that port and
+must trust the `servicedns.podcert.ate.dev` CA.
+
+`Connect` remains disabled until its live route authority is safe for the
+deployment topology. Before enabling it, use one authoritative Broker replica
+or replace the in-memory route directory with distributed ownership.

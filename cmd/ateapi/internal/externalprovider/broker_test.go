@@ -348,6 +348,96 @@ func TestMetadataOnlyLoggingOmitsPayloadAndError(t *testing.T) {
 	}
 }
 
+func TestMetadataOnlyStreamLoggingOmitsCredentialAndError(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	interceptor := MetadataOnlyStreamLoggingInterceptor(logger)
+	secret := string(testCredential(0x72))
+	stream := &testServerStream{ctx: bearerContext("authorization", "Bearer "+secret)}
+	err := interceptor(
+		nil,
+		stream,
+		&grpc.StreamServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Connect_FullMethodName},
+		func(_ any, got grpc.ServerStream) error {
+			if got != stream {
+				t.Errorf("handler stream = %T, want original stream", got)
+			}
+			return status.Error(codes.PermissionDenied, secret)
+		},
+	)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("interceptor error = %v", err)
+	}
+	logLine := output.String()
+	if strings.Contains(logLine, secret) || strings.Contains(logLine, "authorization") || strings.Contains(logLine, "error") {
+		t.Fatalf("metadata-only stream log contains sensitive data: %s", logLine)
+	}
+	if !strings.Contains(logLine, "PermissionDenied") || !strings.Contains(logLine, externalproviderpb.ExternalProviderBroker_Connect_FullMethodName) {
+		t.Errorf("metadata-only stream log is missing method/code: %s", logLine)
+	}
+}
+
+func TestOpaqueBearerInterceptorsRejectMalformedCredentials(t *testing.T) {
+	unaryCalled := false
+	_, err := OpaqueBearerUnaryInterceptor()(
+		context.Background(),
+		&externalproviderpb.EnrollRequest{},
+		&grpc.UnaryServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Enroll_FullMethodName},
+		func(context.Context, any) (any, error) {
+			unaryCalled = true
+			return &externalproviderpb.EnrollResponse{}, nil
+		},
+	)
+	if status.Code(err) != codes.Unauthenticated || unaryCalled {
+		t.Fatalf("unary malformed credential result = called %v, error %v", unaryCalled, err)
+	}
+
+	streamCalled := false
+	err = OpaqueBearerStreamInterceptor()(
+		nil,
+		&testServerStream{ctx: bearerContext("authorization", "Bearer not-an-opaque-credential")},
+		&grpc.StreamServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Connect_FullMethodName},
+		func(any, grpc.ServerStream) error {
+			streamCalled = true
+			return nil
+		},
+	)
+	if status.Code(err) != codes.Unauthenticated || streamCalled {
+		t.Fatalf("stream malformed credential result = called %v, error %v", streamCalled, err)
+	}
+}
+
+func TestOpaqueBearerInterceptorsPassValidCredentialEnvelope(t *testing.T) {
+	ctx := bearerContext("authorization", "Bearer "+string(testCredential(0x73)))
+	unaryCalled := false
+	_, err := OpaqueBearerUnaryInterceptor()(
+		ctx,
+		&externalproviderpb.EnrollRequest{},
+		&grpc.UnaryServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Enroll_FullMethodName},
+		func(context.Context, any) (any, error) {
+			unaryCalled = true
+			return &externalproviderpb.EnrollResponse{}, nil
+		},
+	)
+	if err != nil || !unaryCalled {
+		t.Fatalf("unary valid credential result = called %v, error %v", unaryCalled, err)
+	}
+
+	streamCalled := false
+	err = OpaqueBearerStreamInterceptor()(
+		nil,
+		&testServerStream{ctx: ctx},
+		&grpc.StreamServerInfo{FullMethod: externalproviderpb.ExternalProviderBroker_Connect_FullMethodName},
+		func(any, grpc.ServerStream) error {
+			streamCalled = true
+			return nil
+		},
+	)
+	if err != nil || !streamCalled {
+		t.Fatalf("stream valid credential result = called %v, error %v", streamCalled, err)
+	}
+}
+
 func TestBrokerMapsStoreAuthenticationFailure(t *testing.T) {
 	store := &fakeStore{
 		consume: func(context.Context, CredentialDigest, string, CredentialDigest) (Registration, error) {
@@ -363,3 +453,10 @@ func TestBrokerMapsStoreAuthenticationFailure(t *testing.T) {
 		t.Fatalf("Enroll() code = %v, want Unauthenticated", status.Code(err))
 	}
 }
+
+type testServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *testServerStream) Context() context.Context { return s.ctx }
