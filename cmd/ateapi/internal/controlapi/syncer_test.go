@@ -388,6 +388,9 @@ func TestSyncer_OmittedFields(t *testing.T) {
 		if len(w.Labels) != 0 {
 			return false, fmt.Errorf("expected labels to be empty, got %v", w.Labels)
 		}
+		if w.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD {
+			return false, fmt.Errorf("expected KubernetesPod provider, got %v", w.GetProvider())
+		}
 		return true, nil
 	})
 	if err != nil {
@@ -417,6 +420,102 @@ func setupReconcileTest(t *testing.T, persistence store.Interface, initPools ...
 	ateInformerFactory.WaitForCacheSync(stopCh)
 
 	return NewWorkerPoolSyncer(persistence, workerInformer, workerPoolLister)
+}
+
+func TestSyncer_NeverReconcilesExternalWorker(t *testing.T) {
+	ctx := context.Background()
+	persistence, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+
+	ns, poolName, podName := "ns-external", "pool1", "worker-collision"
+	pool := &atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: ns}}
+	s := setupReconcileTest(t, persistence, pool)
+
+	created, err := persistence.CreateWorker(ctx, &ateapipb.Worker{
+		Metadata:        &ateapipb.ResourceMetadata{Name: testPodUID},
+		WorkerNamespace: ns,
+		WorkerPool:      poolName,
+		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-1",
+			LocalityIdentity:  "device-1",
+		},
+		Status: &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+	})
+	if err != nil {
+		t.Fatalf("create external worker: %v", err)
+	}
+
+	assertPreserved := func(stage string) {
+		t.Helper()
+		got, err := persistence.GetWorker(ctx, testPodUID)
+		if err != nil {
+			t.Fatalf("%s: external worker missing: %v", stage, err)
+		}
+		if got.GetMetadata().GetVersion() != created.GetMetadata().GetVersion() {
+			t.Errorf("%s: version = %d, want unchanged %d", stage, got.GetMetadata().GetVersion(), created.GetMetadata().GetVersion())
+		}
+		if got.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+			t.Errorf("%s: provider = %v, want ExternalSlot", stage, got.GetProvider())
+		}
+		if got.GetExternalSlot().GetExecutionIdentity() != "host-1.slot-1" || got.GetExternalSlot().GetLocalityIdentity() != "device-1" {
+			t.Errorf("%s: external identity changed: %v", stage, got.GetExternalSlot())
+		}
+		if got.GetWorkerPod() != "" || got.GetWorkerPodUid() != "" || got.GetNodeName() != "" || got.GetIp() != "" {
+			t.Errorf("%s: Kubernetes identity was written to external worker: %v", stage, got)
+		}
+		if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
+			t.Errorf("%s: state = %v, want ACTIVE", stage, got.GetStatus().GetState())
+		}
+	}
+
+	// Startup garbage collection is scoped to Kubernetes workers.
+	s.enqueueStoredWorkers(ctx)
+	if got := s.queue.Len(); got != 0 {
+		t.Fatalf("startup queue length = %d, want 0 for an external-only store", got)
+	}
+	assertPreserved("startup scan")
+
+	livePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: ns,
+			UID:       types.UID(testPodUID),
+			Labels:    map[string]string{workerPodLabel: poolName},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: ateomContainerName, Image: "worker"}}},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIP:  "10.0.0.9",
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.9"}},
+		},
+	}
+	if err := s.workerInformer.GetIndexer().Add(livePod); err != nil {
+		t.Fatalf("seed live pod: %v", err)
+	}
+	key := workerKey{namespace: ns, name: podName, uid: testPodUID}
+	if err := s.reconcile(ctx, key); err != nil {
+		t.Fatalf("reconcile live colliding pod: %v", err)
+	}
+	assertPreserved("live pod")
+
+	terminatingPod := livePod.DeepCopy()
+	terminatingPod.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	if err := s.workerInformer.GetIndexer().Update(terminatingPod); err != nil {
+		t.Fatalf("seed terminating pod: %v", err)
+	}
+	if err := s.reconcile(ctx, key); err != nil {
+		t.Fatalf("reconcile terminating colliding pod: %v", err)
+	}
+	assertPreserved("terminating pod")
+
+	if err := s.workerInformer.GetIndexer().Delete(terminatingPod); err != nil {
+		t.Fatalf("remove colliding pod: %v", err)
+	}
+	if err := s.reconcile(ctx, key); err != nil {
+		t.Fatalf("reconcile deleted colliding pod: %v", err)
+	}
+	assertPreserved("deleted pod")
 }
 
 // TestSyncer_SoftDelete_MarksDraining verifies that a pod entering Terminating

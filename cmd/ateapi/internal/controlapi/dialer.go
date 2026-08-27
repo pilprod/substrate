@@ -42,6 +42,10 @@ import (
 
 var ErrWorkerPodNotFound = errors.New("worker pod not found")
 
+// ErrAteletUnsupportedWorkerProvider reports that a worker cannot be reached
+// through the Kubernetes atelet data plane.
+var ErrAteletUnsupportedWorkerProvider = errors.New("worker provider is not supported by the Kubernetes atelet dialer")
+
 // ErrNoAteletOnNode reports that the informer cache holds no atelet pod for
 // the requested node — e.g. the atelet is restarting, or the node is gone.
 // Distinct from ErrWorkerPodNotFound, which callers treat as crash-worthy;
@@ -107,9 +111,13 @@ func NewAteletDialer(workerIndexer cache.Indexer, ateletIndexer cache.Indexer, c
 
 // DialForWorker returns a gRPC connection to the Atelet running on the same
 // node as the assigned Kubernetes worker pod. It returns ErrWorkerPodNotFound
-// when the assignment is incomplete or the pod is absent from the informer
-// cache.
+// when a Kubernetes assignment is incomplete or the pod is absent from the
+// informer cache. Non-Kubernetes providers return
+// ErrAteletUnsupportedWorkerProvider without consulting that cache.
 func (d *AteletDialer) DialForWorker(assignment *ateapipb.WorkerAssignment) (*grpc.ClientConn, error) {
+	if provider := effectiveWorkerProvider(assignment.GetProvider()); provider != ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD {
+		return nil, fmt.Errorf("%w: %s", ErrAteletUnsupportedWorkerProvider, provider)
+	}
 	workerPodNamespace := assignment.GetWorkerNamespace()
 	workerPodName := assignment.GetWorkerPod()
 	if workerPodNamespace == "" || workerPodName == "" {

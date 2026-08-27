@@ -568,6 +568,10 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 }
 
 func workerAssignmentFrom(w *ateapipb.Worker) *ateapipb.WorkerAssignment {
+	var externalSlot *ateapipb.ExternalSlotIdentity
+	if w.GetExternalSlot() != nil {
+		externalSlot = proto.Clone(w.GetExternalSlot()).(*ateapipb.ExternalSlotIdentity)
+	}
 	return &ateapipb.WorkerAssignment{
 		Worker:          &ateapipb.ObjectRef{Name: w.GetMetadata().GetName()},
 		WorkerNamespace: w.GetWorkerNamespace(),
@@ -575,6 +579,8 @@ func workerAssignmentFrom(w *ateapipb.Worker) *ateapipb.WorkerAssignment {
 		WorkerPod:       w.GetWorkerPod(),
 		WorkerPodUid:    w.GetWorkerPodUid(),
 		WorkerPodIp:     w.GetIp(),
+		Provider:        w.GetProvider(),
+		ExternalSlot:    externalSlot,
 	}
 }
 

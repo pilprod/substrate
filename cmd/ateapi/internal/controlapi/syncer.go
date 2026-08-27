@@ -259,6 +259,7 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
 			Capacity:        workerCapacity(pod),
+			Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD,
 			Status: &ateapipb.WorkerStatus{
 				State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 			},
@@ -276,6 +277,10 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		// via the update path.
 		_, err := s.persistence.CreateWorker(ctx, worker)
 		return err
+	}
+	if !isKubernetesWorker(w) {
+		slog.WarnContext(ctx, "Syncer: refusing to reconcile external worker with colliding pod UID", key.logAttrs()...)
+		return nil
 	}
 
 	changed := false
@@ -359,6 +364,10 @@ func (s *WorkerPoolSyncer) markWorkerDraining(ctx context.Context, key workerKey
 		}
 		return err
 	}
+	if !isKubernetesWorker(worker) {
+		slog.WarnContext(ctx, "Syncer: refusing to drain external worker with colliding pod UID", key.logAttrs()...)
+		return nil
+	}
 	if worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_DRAINING {
 		return nil
 	}
@@ -370,20 +379,36 @@ func (s *WorkerPoolSyncer) markWorkerDraining(ctx context.Context, key workerKey
 	return err
 }
 
-// reconcileDeadWorker cleans up a worker whose pod is gone. It releases the
-// bound actor first and only deletes the worker record if that succeeds:
+// reconcileDeadWorker cleans up a Kubernetes worker whose pod is gone. An
+// external worker with a colliding name is left to its provider. For a
+// Kubernetes worker it releases the bound actor first and only deletes the
+// worker record if that succeeds:
 // deleting the record is what erases the actor->pod pointer, so on a release
 // failure we intentionally leave the record in place (and return the error) so a
 // later reconcile can retry. Returns nil once the actor is released and the
 // worker record deleted.
 func (s *WorkerPoolSyncer) reconcileDeadWorker(ctx context.Context, name string) error {
+	worker, err := s.persistence.GetWorker(ctx, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !isKubernetesWorker(worker) {
+		slog.WarnContext(ctx, "Syncer: refusing to garbage-collect external worker", slog.String("worker", name))
+		return nil
+	}
 	if err := s.releaseActorOnDeadWorker(ctx, name); err != nil {
 		return err
 	}
 	// The delete now reports absence rather than succeeding silently, but a
 	// worker already gone is exactly the state this is driving towards.
 	// Idempotency lives here, at the caller, so re-driving a reconcile is safe.
-	_, err := s.persistence.DeleteWorker(ctx, name, store.DeletePreconditions{})
+	_, err = s.persistence.DeleteWorker(ctx, name, store.DeletePreconditions{
+		UID:     worker.GetMetadata().GetUid(),
+		Version: worker.GetMetadata().GetVersion(),
+	})
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
@@ -398,9 +423,10 @@ var (
 	storedWorkerListCap     = 30 * time.Second
 )
 
-// enqueueStoredWorkers enqueues a key for every worker record in the store.
-// Records whose pods are live and unchanged reconcile to a no-op; orphaned
-// records (pod gone, or its name reused by a new pod UID) get cleaned up.
+// enqueueStoredWorkers enqueues a key for every Kubernetes-backed worker in
+// the store. Records whose pods are live and unchanged reconcile to a no-op;
+// orphaned records (pod gone, or its name reused by a new pod UID) get cleaned
+// up. External workers are owned by their provider and are never enqueued.
 //
 // Each page's ListWorkers call is retried with capped backoff until it succeeds
 // or ctx is cancelled, so a transient store error does not abandon the scan and
@@ -420,6 +446,9 @@ func (s *WorkerPoolSyncer) enqueueStoredWorkers(ctx context.Context) {
 			return
 		}
 		for _, w := range page.Items {
+			if !isKubernetesWorker(w) {
+				continue
+			}
 			// The key is a pod identity, so it is rebuilt from the stored pod
 			// fields rather than from the Worker's name.
 			s.queue.Add(workerKey{
@@ -483,6 +512,9 @@ func (s *WorkerPoolSyncer) releaseActorOnDeadWorker(ctx context.Context, name st
 			return nil
 		}
 		return err
+	}
+	if !isKubernetesWorker(worker) {
+		return nil
 	}
 	if worker.GetStatus().GetAssignment().GetActor() == nil {
 		return nil

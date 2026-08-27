@@ -82,8 +82,8 @@ CREATE TABLE IF NOT EXISTS actor_snapshot_tags (
 CREATE INDEX IF NOT EXISTS actor_snapshot_tags_snapshot_idx
     ON actor_snapshot_tags (snapshot_atespace, snapshot_name);
 
--- Workers are global-scoped and named by their Kubernetes pod UID, so name
--- alone is the primary key.
+-- Workers are global-scoped and their opaque resource name alone is the
+-- primary key. Provider-specific identity remains authoritative in the proto.
 CREATE TABLE IF NOT EXISTS workers (
     name     text PRIMARY KEY,
     uid      text NOT NULL UNIQUE,

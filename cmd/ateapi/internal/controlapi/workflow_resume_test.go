@@ -62,6 +62,42 @@ func TestSchedulerRecordable(t *testing.T) {
 	}
 }
 
+func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
+	worker := &ateapipb.Worker{
+		Metadata:        &ateapipb.ResourceMetadata{Name: "worker-1"},
+		WorkerNamespace: "ate-system",
+		WorkerPool:      "pool-1",
+		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+		},
+	}
+
+	got := workerAssignmentFrom(worker)
+	want := &ateapipb.WorkerAssignment{
+		Worker:          &ateapipb.ObjectRef{Name: "worker-1"},
+		WorkerNamespace: "ate-system",
+		WorkerPool:      "pool-1",
+		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+		},
+	}
+	if !proto.Equal(got, want) {
+		t.Fatalf("workerAssignmentFrom() = %v, want %v", got, want)
+	}
+	if got.GetExternalSlot() == worker.GetExternalSlot() {
+		t.Fatal("workerAssignmentFrom() retained the Worker's external_slot pointer")
+	}
+
+	worker.ExternalSlot.ExecutionIdentity = "mutated-after-assignment"
+	if got.GetExternalSlot().GetExecutionIdentity() != "host-1.slot-2" {
+		t.Fatalf("assignment external identity changed with Worker: %q", got.GetExternalSlot().GetExecutionIdentity())
+	}
+}
+
 type leaseCountingStore struct {
 	store.Interface
 	acquireCalls int

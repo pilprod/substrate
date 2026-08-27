@@ -362,16 +362,18 @@ message ActorSourceSnapshotStatus {
 
 // WorkerAssignment points at the Worker currently hosting an Actor.
 //
-// This is a denormalized snapshot, not merely a reference: atenet reads
-// worker_pod_ip on the request-routing path and must not need a second lookup,
-// and kubectl-ate displays the pod name. The copies stay valid for the life of
-// the assignment because a Worker's identity fields are immutable.
+// This is a denormalized snapshot, not merely a reference. Kubernetes consumers
+// use the copied pod coordinates, while provider-specific consumers use the
+// stable provider identity. The copies stay valid for the life of the assignment
+// because a Worker's identity fields are immutable.
 //
 // Pass `worker` to GetWorker; none of the denormalized fields identify the
 // Worker to the API.
+//
+// +k8s:customValidation
 message WorkerAssignment {
   // worker references the assigned Worker. This is the field to look the Worker
-  // up by; the worker_* fields below are a denormalized copy kept so that
+  // up by; the remaining identity fields are a denormalized copy kept so that
   // readers on a hot path do not have to fetch the Worker at all.
   //
   // Workers are global-scoped, so this carries no atespace.
@@ -380,7 +382,8 @@ message WorkerAssignment {
   // +k8s:required
   ObjectRef worker = 6;
 
-  // worker_namespace is the Kubernetes namespace of the WorkerPool and worker Pod.
+  // worker_namespace is the Kubernetes namespace of the WorkerPool. For a
+  // KubernetesPod worker this is also the worker Pod namespace.
   //
   // +k8s:required
   // +k8s:format=k8s-short-name
@@ -392,23 +395,36 @@ message WorkerAssignment {
   // +k8s:format=k8s-long-name
   string worker_pool = 2;
 
-  // worker_pod is the name of the Kubernetes pod hosting the Actor.
+  // worker_pod is the name of the Kubernetes pod hosting the Actor. Set only
+  // for KubernetesPod workers.
   //
-  // +k8s:required
+  // +k8s:optional
   // +k8s:format=k8s-long-name
   string worker_pod = 3;
 
-  // worker_pod_uid is the Kubernetes UID of worker_pod.
+  // worker_pod_uid is the Kubernetes UID of worker_pod. Set only for
+  // KubernetesPod workers.
   //
-  // +k8s:required
+  // +k8s:optional
   // +k8s:format=k8s-uuid
   string worker_pod_uid = 4;
 
-  // worker_pod_ip is the IP of worker_pod.
+  // worker_pod_ip is the IP of worker_pod. Set only for KubernetesPod workers.
   //
-  // +k8s:required
+  // +k8s:optional
   // +k8s:customValidation # until `format=k8s-ip` is supported
   string worker_pod_ip = 5;
+
+  // provider identifies the kind of execution capacity assigned. An
+  // unspecified value means KubernetesPod for compatibility with assignments
+  // persisted before providers were explicit.
+  WorkerProvider provider = 7;
+
+  // external_slot is a snapshot of the assigned ExternalSlot identity. It is
+  // absent for KubernetesPod workers.
+  //
+  // +k8s:optional
+  ExternalSlotIdentity external_slot = 8;
 }
 
 // ActorSnapshot is an independently addressable durable Actor snapshot. Its
@@ -958,6 +974,7 @@ message GetWorkerRequest {
 
 message CreateWorkerRequest {
   // The Worker to register.
+  // +k8s:opaqueType
   Worker worker = 1;
 }
 
@@ -973,6 +990,7 @@ message UpdateWorkerRequest {
   // send the whole thing back. A request that alters an immutable field, by
   // changing it or by omitting it, returns INVALID_ARGUMENT naming the field.
   // status is output-only and whatever it carries is ignored.
+  // +k8s:opaqueType
   Worker worker = 1;
 }
 
@@ -1015,11 +1033,11 @@ message ListActorsResponse {
   string next_page_token = 2;
 }
 
-// Worker is a schedulable worker pod.
+// Worker is a schedulable execution slot.
 //
 // Global-scoped: metadata.atespace is always empty. metadata.name is assigned
 // by the control plane and is opaque to clients — never parse it or derive it
-// from anything else; read pod identity from the named fields below.
+// from anything else.
 //
 // sandbox_class and labels are the only mutable fields; every other field is
 // either immutable after creation or output-only. UpdateWorker replaces the
@@ -1031,7 +1049,9 @@ message Worker {
   // +k8s:opaqueType
   ResourceMetadata metadata = 1;
 
-  // Kubernetes coordinates. Immutable, set at creation.
+  // Pool coordinates. worker_namespace and worker_pool apply to every
+  // provider. The remaining Kubernetes coordinates are set only for
+  // KubernetesPod workers. All are immutable, set at creation.
   string worker_namespace = 2;
   string worker_pool = 3;
   string worker_pod = 4;
@@ -1044,20 +1064,59 @@ message Worker {
   map<string, string> labels = 9;
 
   // The compute capacity this worker can give an actor sandbox. Immutable, set
-  // at creation: a worker pod's limits are fixed for its lifetime.
+  // at creation by the provider that registers the Worker.
   WorkerCapacity capacity = 10;
 
   // Output-only server-managed state. Absent from Create/Update request
   // payloads; whatever a request carries here is ignored. DrainWorker is the
   // only way a client moves state, and assignment is the scheduler's.
   WorkerStatus status = 11;
+
+  // provider identifies the kind of execution capacity. An unspecified value
+  // means KubernetesPod for compatibility with workers persisted before
+  // providers were explicit. Immutable, set at creation.
+  WorkerProvider provider = 12;
+
+  // external_slot identifies an ExternalSlot. It is absent for KubernetesPod
+  // workers. Immutable, set at creation.
+  //
+  // +k8s:optional
+  ExternalSlotIdentity external_slot = 13;
+}
+
+// WorkerProvider identifies how a Worker is hosted.
+enum WorkerProvider {
+  // Legacy workers omitted provider and are interpreted as KubernetesPod.
+  WORKER_PROVIDER_UNSPECIFIED = 0;
+  WORKER_PROVIDER_KUBERNETES_POD = 1;
+  WORKER_PROVIDER_EXTERNAL_SLOT = 2;
+}
+
+// ExternalSlotIdentity contains stable provider lookup identities. Both
+// values are opaque, non-secret identifiers: they are never a URL, token,
+// socket path, or live endpoint. The external provider resolves them to an
+// authenticated live session.
+message ExternalSlotIdentity {
+  // Stable identity used to resolve the execution slot.
+  //
+  // +k8s:required
+  // +k8s:maxLength=253
+  // +k8s:customValidation
+  string execution_identity = 1;
+
+  // Stable identity of the provider locality domain associated with the slot.
+  //
+  // +k8s:required
+  // +k8s:maxLength=253
+  // +k8s:customValidation
+  string locality_identity = 2;
 }
 
 enum WorkerState {
   WORKER_STATE_UNSPECIFIED = 0;
   // Ready; schedulable.
   WORKER_STATE_ACTIVE = 1;
-  // Pod terminating. Not schedulable.
+  // Execution slot draining or terminating. Not schedulable.
   WORKER_STATE_DRAINING = 2;
 }
 
@@ -1068,12 +1127,11 @@ message WorkerStatus {
   ActorAssignment assignment = 2;
 }
 
-// WorkerCapacity is the worker pod's compute capacity available to host an
-// actor sandbox, taken from the ateom container's resource limits. The
-// scheduler only places an actor on a worker whose capacity is >= the actor's
-// declared resource limits. An unset message, or a zero field within it, means
-// "unknown/unset" for that dimension: treated as unconstrained so placement is
-// not blocked (matching the pre-capacity behavior).
+// WorkerCapacity is a Worker's compute capacity available to host an actor
+// sandbox. The scheduler only places an actor on a worker whose capacity is >=
+// the actor's declared resource limits. An unset message, or a zero field within
+// it, means "unknown/unset" for that dimension: treated as unconstrained so
+// placement is not blocked (matching the pre-capacity behavior).
 message WorkerCapacity {
   int64 cpu_milli = 1;    // CPU capacity in millicores (1000 = one core).
   int64 memory_bytes = 2; // Memory capacity in bytes.

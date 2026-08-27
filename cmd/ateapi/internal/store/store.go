@@ -284,10 +284,17 @@ func (p DeletePreconditions) Check(md *ateapipb.ResourceMetadata) error {
 // capacity is checked along with the rest because UpdateWorker replaces the
 // worker rather than patching it: a request that omits capacity is asking to
 // clear it, and silently losing a worker's compute capacity is worse than
-// rejecting the write. A future pod resize has to relax this rule first.
+// rejecting the write. A future capacity resize has to relax this rule first.
 //
 // A rejection wraps ErrImmutableField, so a backend can return it as-is and
 // callers still get the sentinel they map to INVALID_ARGUMENT.
+func effectiveWorkerProvider(provider ateapipb.WorkerProvider) ateapipb.WorkerProvider {
+	if provider == ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED {
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+	}
+	return provider
+}
+
 func CheckWorkerMutation(stored, mutated *ateapipb.Worker) error {
 	for _, f := range []struct {
 		name    string
@@ -304,6 +311,12 @@ func CheckWorkerMutation(stored, mutated *ateapipb.Worker) error {
 		if f.stored != f.mutated {
 			return fmt.Errorf("%w: %s changed from %q to %q", ErrImmutableField, f.name, f.stored, f.mutated)
 		}
+	}
+	if effectiveWorkerProvider(stored.GetProvider()) != effectiveWorkerProvider(mutated.GetProvider()) {
+		return fmt.Errorf("%w: provider changed from %s to %s", ErrImmutableField, stored.GetProvider(), mutated.GetProvider())
+	}
+	if !proto.Equal(stored.GetExternalSlot(), mutated.GetExternalSlot()) {
+		return fmt.Errorf("%w: external_slot changed from %v to %v", ErrImmutableField, stored.GetExternalSlot(), mutated.GetExternalSlot())
 	}
 	if !proto.Equal(stored.GetCapacity(), mutated.GetCapacity()) {
 		return fmt.Errorf("%w: capacity changed from %v to %v", ErrImmutableField, stored.GetCapacity(), mutated.GetCapacity())

@@ -102,6 +102,115 @@ func TestValidateResourceMetadataCreate(t *testing.T) {
 	}
 }
 
+func TestValidateWorkerAssignmentCreate(t *testing.T) {
+	validKubernetes := func() *ateapipb.WorkerAssignment {
+		return &ateapipb.WorkerAssignment{
+			Worker:          &ateapipb.ObjectRef{Name: "worker-1"},
+			WorkerNamespace: "ate-system",
+			WorkerPool:      "pool-1",
+			WorkerPod:       "worker-pod-1",
+			WorkerPodUid:    "12345678-1234-1234-1234-123456789abc",
+			WorkerPodIp:     "10.1.2.3",
+		}
+	}
+	validExternal := func() *ateapipb.WorkerAssignment {
+		assignment := validKubernetes()
+		assignment.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+		assignment.WorkerPod = ""
+		assignment.WorkerPodUid = ""
+		assignment.WorkerPodIp = ""
+		assignment.ExternalSlot = &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-01.slot_02",
+			LocalityIdentity:  "device-01~workspace",
+		}
+		return assignment
+	}
+
+	root := field.NewPath("assignment")
+	tests := []struct {
+		name string
+		obj  *ateapipb.WorkerAssignment
+		want field.ErrorList
+	}{{
+		name: "legacy unspecified provider is KubernetesPod",
+		obj:  validKubernetes(),
+	}, {
+		name: "explicit KubernetesPod",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validKubernetes()
+			assignment.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+			return assignment
+		}(),
+	}, {
+		name: "ExternalSlot",
+		obj:  validExternal(),
+	}, {
+		name: "ExternalSlot maximum identity length",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot.ExecutionIdentity = strings.Repeat("a", maxExternalSlotIdentityLength)
+			assignment.ExternalSlot.LocalityIdentity = strings.Repeat("z", maxExternalSlotIdentityLength)
+			return assignment
+		}(),
+	}, {
+		name: "ExternalSlot missing identity",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot = nil
+			return assignment
+		}(),
+		want: field.ErrorList{field.Required(root.Child("external_slot"), "")},
+	}, {
+		name: "ExternalSlot carries pod identity",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.WorkerPod = "worker-pod-1"
+			return assignment
+		}(),
+		want: field.ErrorList{field.Forbidden(root.Child("worker_pod"), "")},
+	}, {
+		name: "KubernetesPod carries external identity",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validKubernetes()
+			assignment.ExternalSlot = validExternal().ExternalSlot
+			return assignment
+		}(),
+		want: field.ErrorList{field.Forbidden(root.Child("external_slot"), "")},
+	}, {
+		name: "unsafe execution identity",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot.ExecutionIdentity = "host 01"
+			return assignment
+		}(),
+		want: field.ErrorList{field.Invalid(root.Child("external_slot", "execution_identity"), nil, "")},
+	}, {
+		name: "overlong execution identity",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot.ExecutionIdentity = strings.Repeat("a", maxExternalSlotIdentityLength+1)
+			return assignment
+		}(),
+		want: field.ErrorList{field.TooLongCharacters(root.Child("external_slot", "execution_identity"), "", maxExternalSlotIdentityLength).WithOrigin("maxLength")},
+	}, {
+		name: "unknown provider",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validKubernetes()
+			assignment.Provider = ateapipb.WorkerProvider(99)
+			return assignment
+		}(),
+		want: field.ErrorList{field.NotSupported(root.Child("provider"), nil, []string(nil))},
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := operation.Operation{Type: operation.Create}
+			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin()
+			matcher.Test(t, tt.want, Validate_WorkerAssignment(context.Background(), op, root, tt.obj, nil))
+		})
+	}
+}
+
 func TestValidateResourceMetadataUpdate(t *testing.T) {
 	valid := validResourceMetadata
 

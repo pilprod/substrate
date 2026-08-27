@@ -222,7 +222,11 @@ func TestDialForWorkerTarget(t *testing.T) {
 			}
 
 			d := newDialerForPods(t, workerPod, ateletPod)
-			conn, err := d.DialForWorker(&ateapipb.WorkerAssignment{WorkerNamespace: "team-a", WorkerPod: "worker-1"})
+			conn, err := d.DialForWorker(&ateapipb.WorkerAssignment{
+				WorkerNamespace: "team-a",
+				WorkerPod:       "worker-1",
+				Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD,
+			})
 			if err != nil {
 				t.Fatalf("DialForWorker returned error: %v", err)
 			}
@@ -268,6 +272,24 @@ func TestDialForWorkerErrors(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("ExternalSlot is not a Kubernetes atelet target", func(t *testing.T) {
+		d := NewAteletDialer(nil, nil, "", "")
+		assignment := &ateapipb.WorkerAssignment{
+			Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+			ExternalSlot: &ateapipb.ExternalSlotIdentity{
+				ExecutionIdentity: "host-1.slot-1",
+				LocalityIdentity:  "device-1",
+			},
+		}
+		_, err := d.DialForWorker(assignment)
+		if !errors.Is(err, ErrAteletUnsupportedWorkerProvider) {
+			t.Fatalf("DialForWorker error = %v, want ErrAteletUnsupportedWorkerProvider", err)
+		}
+		if errors.Is(err, ErrWorkerPodNotFound) {
+			t.Fatalf("DialForWorker error = %v, must not report a missing Kubernetes pod", err)
+		}
+	})
 
 	t.Run("atelet without assigned IPs", func(t *testing.T) {
 		ateletPod := &corev1.Pod{
