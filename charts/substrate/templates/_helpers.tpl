@@ -84,7 +84,8 @@ Build an image reference for a substrate component binary.
 Usage:
   {{ include "substrate.componentImage" (list "ateapi" .) }}
 
-Produces  {image.registry}/{name}:{tag}  where tag is resolved as:
+Produces  {image.registry}/{name}@{digest} when image.digests[name] is set.
+Otherwise produces {image.registry}/{name}:{tag}, where tag is resolved as:
   1. image.tag value, if set and not the sentinel "<none>"
   2. .Chart.AppVersion, if image.tag is empty
   3. no tag (no colon) when image.tag is the sentinel "<none>"
@@ -96,8 +97,15 @@ are emitted without a tag, letting `ko resolve` supply the digest at build time.
 {{- $name := index . 0 -}}
 {{- $ctx := index . 1 -}}
 {{- $registry := $ctx.Values.image.registry -}}
+{{- $digests := $ctx.Values.image.digests | default dict -}}
+{{- $digest := get $digests $name | default "" -}}
 {{- $tag := $ctx.Values.image.tag | default $ctx.Chart.AppVersion -}}
-{{- if ne $tag "<none>" -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail (printf "image.digests.%s must be a sha256 OCI digest" $name) -}}
+{{- end -}}
+{{- printf "%s/%s@%s" $registry $name $digest -}}
+{{- else if ne $tag "<none>" -}}
 {{- printf "%s/%s:%s" $registry $name $tag -}}
 {{- else -}}
 {{- printf "%s/%s" $registry $name -}}

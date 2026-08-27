@@ -19,7 +19,9 @@ helm upgrade --install substrate ./charts/substrate
 
 By default, component images are pulled from `ghcr.io/kagent-dev/substrate`
 using the chart `appVersion` as the tag. Override `image.registry` and
-`image.tag` to install from a different image repository or tag.
+`image.tag` to install from a different image repository or tag. Immutable
+deployments should set `image.digests.<component>` to a `sha256:` digest; a
+component digest takes precedence over the shared tag.
 
 ## Render manifests without applying
 
@@ -108,9 +110,10 @@ route must be installed separately.
 This profile requires binaries from the same source revision as the chart:
 ate-api-server must support `--postgres-connection-string-file`, and
 ate-controller must support `--controller-mode=external-templates-only`. Set
-`image.registry` and `image.tag` to a matching published build during release.
-An older image fails startup; the chart deliberately has no fallback to a raw
-DSN value, environment variable, or the full local-worker controller set.
+`image.registry`, `image.digests.ateapi`, and
+`image.digests.atecontroller` to a matching published build during release. An
+older image fails startup; the chart deliberately has no fallback to a raw DSN
+value, environment variable, or the full local-worker controller set.
 
 ### Required existing objects
 

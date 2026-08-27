@@ -32,6 +32,13 @@ helm lint --strict "${CHART}" --values "${VALUES}"
 helm template substrate "${CHART}" > "${TMP_DIR}/default.yaml"
 helm template substrate "${CHART}" --set profile=standard > "${TMP_DIR}/explicit-standard.yaml"
 helm template substrate "${CHART}" --namespace ate-system --values "${VALUES}" > "${TMP_DIR}/external.yaml"
+ateapi_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+atecontroller_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+helm template substrate "${CHART}" --namespace ate-system --values "${VALUES}" \
+  --set-string image.registry=ghcr.io/example/substrate \
+  --set-string image.digests.ateapi="${ateapi_digest}" \
+  --set-string image.digests.atecontroller="${atecontroller_digest}" \
+  > "${TMP_DIR}/external-digests.yaml"
 
 if ! cmp -s "${TMP_DIR}/default.yaml" "${TMP_DIR}/explicit-standard.yaml"; then
   echo "default chart output differs from explicit profile=standard" >&2
@@ -104,6 +111,17 @@ expect_failure \
 expect_failure \
   "profile must be one of" \
   helm template substrate "${CHART}" --set profile=unknown
+expect_failure \
+  "image.digests.ateapi must be a sha256 OCI digest" \
+  helm template substrate "${CHART}" --namespace ate-system --values "${VALUES}" \
+    --set-string image.digests.ateapi=latest
+
+grep -Fq \
+  "image: ghcr.io/example/substrate/ateapi@${ateapi_digest}" \
+  "${TMP_DIR}/external-digests.yaml"
+grep -Fq \
+  "image: ghcr.io/example/substrate/atecontroller@${atecontroller_digest}" \
+  "${TMP_DIR}/external-digests.yaml"
 
 python3 - "${TMP_DIR}/external.yaml" <<'PY'
 import re
