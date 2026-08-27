@@ -235,6 +235,9 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			}
 			slog.Warn("Worker already gone during finalize pause, skipping release", "worker", assignment.GetWorkerPod())
 		} else {
+			if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+				return nil, fmt.Errorf("refusing to release unpinned or stale Worker during pause: %w", err)
+			}
 			nodeName = worker.GetNodeName()
 			// Only free it if it still belongs to us
 

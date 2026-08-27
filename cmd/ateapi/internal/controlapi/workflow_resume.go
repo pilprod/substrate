@@ -26,7 +26,6 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/resources"
-	"github.com/agent-substrate/substrate/internal/workerassignment"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
@@ -379,22 +378,15 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, fmt.Errorf("failed to get already assigned worker for actor %w", err)
 	}
-	// Assignments written before Worker resource incarnation pinning have no
-	// worker_resource_uid. Keep that legacy resume path readable, but verify all
-	// newly pinned assignments before trusting a Worker which reused the name.
-	// New ExternalSlot execution routing must call ValidateIncarnation without
-	// this compatibility bypass.
-	if assignment.GetWorkerResourceUid() != "" {
-		if err := workerassignment.ValidateIncarnation(assignment, worker); err != nil {
-			slog.ErrorContext(ctx, "crashing actor because its Worker resource incarnation changed",
-				slog.String("actor", actorRef.String()),
-				slog.String("worker", assignment.GetWorker().GetName()),
-				slog.Any("err", err))
-			if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
-				return nil, fmt.Errorf("while crashing actor: %w", cerr)
-			}
-			return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
+	if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+		slog.ErrorContext(ctx, "crashing actor because its Worker resource incarnation cannot be proven",
+			slog.String("actor", actorRef.String()),
+			slog.String("worker", assignment.GetWorker().GetName()),
+			slog.Any("err", err))
+		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
+			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
+		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
 	}
 	if worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_DRAINING {
 		slog.InfoContext(ctx, "Assigned worker is draining; crashing actor",

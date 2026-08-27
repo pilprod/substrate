@@ -128,6 +128,9 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 			}
 			return fmt.Errorf("while checking worker assignment: %w", err)
 		}
+		if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+			return fmt.Errorf("refusing to terminate an unpinned or stale Worker assignment: %w", err)
+		}
 		wass := worker.GetStatus().GetAssignment()
 		if wass == nil || wass.GetActorUid() != actor.GetMetadata().GetUid() {
 			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",

@@ -559,11 +559,15 @@ func TestReleaseWorkerRespectsResourceIncarnationPin(t *testing.T) {
 	tests := []struct {
 		name          string
 		assignmentUID string
+		provider      ateapipb.WorkerProvider
 		wantReleased  bool
+		wantErr       bool
 	}{
 		{name: "legacy unpinned assignment keeps compatibility", wantReleased: true},
 		{name: "matching resource incarnation releases", assignmentUID: currentUID, wantReleased: true},
 		{name: "recreated Worker with same name is untouched", assignmentUID: originalUID, wantReleased: false},
+		{name: "ExternalSlot without resource UID fails closed", provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, wantErr: true},
+		{name: "pinned ExternalSlot releases", provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, assignmentUID: currentUID, wantReleased: true},
 	}
 
 	for _, tt := range tests {
@@ -573,6 +577,7 @@ func TestReleaseWorkerRespectsResourceIncarnationPin(t *testing.T) {
 				Status: &ateapipb.ActorStatus{WorkerAssignment: &ateapipb.WorkerAssignment{
 					Worker:            &ateapipb.ObjectRef{Name: workerName},
 					WorkerResourceUid: tt.assignmentUID,
+					Provider:          tt.provider,
 				}},
 			}
 			st := &releaseWorkerTestStore{worker: &ateapipb.Worker{
@@ -584,8 +589,8 @@ func TestReleaseWorkerRespectsResourceIncarnationPin(t *testing.T) {
 			}}
 
 			gotClass, err := releaseWorker(context.Background(), st, actor)
-			if err != nil {
-				t.Fatalf("releaseWorker() error = %v", err)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("releaseWorker() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if gotClass != "gvisor" {
 				t.Errorf("releaseWorker() sandbox class = %q, want gvisor", gotClass)

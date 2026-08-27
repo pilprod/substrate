@@ -162,6 +162,14 @@ func TestValidateWorkerAssignmentCreate(t *testing.T) {
 		name: "ExternalSlot",
 		obj:  validExternal(),
 	}, {
+		name: "ExternalSlot missing Worker resource UID",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.WorkerResourceUid = ""
+			return assignment
+		}(),
+		want: field.ErrorList{field.Required(root.Child("worker_resource_uid"), "")},
+	}, {
 		name: "ExternalSlot maximum identity length",
 		obj: func() *ateapipb.WorkerAssignment {
 			assignment := validExternal()

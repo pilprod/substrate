@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/workerassignment"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -43,6 +44,17 @@ func effectiveWorkerProvider(provider ateapipb.WorkerProvider) ateapipb.WorkerPr
 
 func isKubernetesWorker(worker *ateapipb.Worker) bool {
 	return effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+}
+
+// validateAssignmentWorkerIncarnation preserves the legacy unpinned
+// KubernetesPod read path, while every ExternalSlot resolution requires an
+// exact server Worker UID. New assignments of either provider are pinned.
+func validateAssignmentWorkerIncarnation(assignment *ateapipb.WorkerAssignment, worker *ateapipb.Worker) error {
+	if effectiveWorkerProvider(assignment.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT ||
+		assignment.GetWorkerResourceUid() != "" {
+		return workerassignment.ValidateIncarnation(assignment, worker)
+	}
+	return nil
 }
 
 func validateExternalSlotIdentityCharacters(value string, fldPath *field.Path) field.ErrorList {

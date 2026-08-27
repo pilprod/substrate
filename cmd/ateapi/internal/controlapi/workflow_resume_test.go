@@ -924,6 +924,61 @@ func TestResumeActor_CrashesOnMissingWorkerAssignment(t *testing.T) {
 	}
 }
 
+func TestValidateAssignedWorkerRejectsUnpinnedExternalAssignmentWithoutClearingReferences(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "external-actor"}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		Status: &ateapipb.ActorStatus{
+			State: ateapipb.ActorState_ACTOR_STATE_RESUMING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{
+				Worker:   &ateapipb.ObjectRef{Name: testWorkerUID("external-resume")},
+				Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+				ExternalSlot: &ateapipb.ExternalSlotIdentity{
+					ExecutionIdentity: "registration-a.slot-a",
+					LocalityIdentity:  "device-a",
+				},
+			},
+		},
+	})
+	worker, err := persistence.CreateWorker(ctx, &ateapipb.Worker{
+		Metadata:     &ateapipb.ResourceMetadata{Name: testWorkerUID("external-resume")},
+		Provider:     ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: proto.Clone(actor.GetStatus().GetWorkerAssignment().GetExternalSlot()).(*ateapipb.ExternalSlotIdentity),
+		SandboxClass: "gvisor",
+		Status: &ateapipb.WorkerStatus{
+			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Assignment: &ateapipb.ActorAssignment{
+				Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+				ActorUid: actor.GetMetadata().GetUid(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	w := &ActorWorkflow{store: persistence, scheduler: scheduling.New(nil)}
+	if _, err := w.validateAssignedWorker(ctx, actorRef, actor, &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}}); err == nil {
+		t.Fatal("validateAssignedWorker() error = nil, want fail-closed error")
+	}
+	storedActor, err := persistence.GetActor(ctx, actorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedActor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RESUMING || storedActor.GetStatus().GetWorkerAssignment() == nil {
+		t.Fatalf("actor was destructively cleared: %v", storedActor.GetStatus())
+	}
+	storedWorker, err := persistence.GetWorker(ctx, worker.GetMetadata().GetName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedWorker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+		t.Fatalf("Worker assignment changed: %v", storedWorker.GetStatus().GetAssignment())
+	}
+}
+
 // TestValidateAssignedWorker_WorkerOwnership verifies that RESUMING recovery
 // only proceeds on a worker whose assignment still names this actor: the
 // recovery path loads the worker by pod name only, so the assignment may have

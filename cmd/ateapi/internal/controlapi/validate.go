@@ -173,6 +173,9 @@ func ValidateCustom_WorkerAssignment(_ context.Context, _ operation.Operation, f
 			}
 		}
 	case ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+		if assignment.GetWorkerResourceUid() == "" {
+			errs = append(errs, field.Required(fldPath.Child("worker_resource_uid"), "required for an ExternalSlot assignment"))
+		}
 		if assignment.GetExternalSlot() == nil {
 			errs = append(errs, field.Required(fldPath.Child("external_slot"), ""))
 		}
