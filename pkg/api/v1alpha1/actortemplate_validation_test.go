@@ -96,6 +96,29 @@ func TestActorTemplateValidation(t *testing.T) {
 		name:    "base template",
 		mutate:  func(at *ActorTemplate) {},
 		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.WorkerProvider != WorkerProviderKubernetesPod {
+				t.Errorf("workerProvider = %q, want %q", at.Spec.WorkerProvider, WorkerProviderKubernetesPod)
+			}
+		},
+	}, {
+		name: "external worker provider is explicit and valid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+		},
+		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.WorkerProvider != WorkerProviderExternalSlot {
+				t.Errorf("workerProvider = %q, want %q", at.Spec.WorkerProvider, WorkerProviderExternalSlot)
+			}
+		},
+	}, {
+		name: "unknown worker provider is rejected",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProvider("NativeProcess")
+		},
+		wantErr: true,
+		errMsg:  "spec.workerProvider: Unsupported value: \"NativeProcess\": supported values: \"KubernetesPod\", \"ExternalSlot\"",
 	}, {
 		name: "container resources on a micro-VM template",
 		mutate: func(at *ActorTemplate) {
@@ -1835,6 +1858,12 @@ func TestActorTemplateSpecImmutability(t *testing.T) {
 		name   string
 		mutate func(*ActorTemplate)
 	}{
+		{
+			name: "update-worker-provider",
+			mutate: func(at *ActorTemplate) {
+				at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			},
+		},
 		{
 			name: "update-container-image",
 			mutate: func(at *ActorTemplate) {

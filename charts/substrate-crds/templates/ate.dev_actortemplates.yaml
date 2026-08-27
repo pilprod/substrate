@@ -686,6 +686,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              workerProvider:
+                default: KubernetesPod
+                description: |-
+                  WorkerProvider selects the kind of execution capacity actors from this
+                  template may use. ExternalSlot is an explicit opt-in: worker selectors,
+                  sandbox class, and labels cannot select external capacity by themselves.
+                  An absent value is interpreted as KubernetesPod for compatibility with
+                  ActorTemplates persisted before this field was introduced.
+                enum:
+                - KubernetesPod
+                - ExternalSlot
+                type: string
               workerSelector:
                 description: |-
                   WorkerSelector restricts which worker pools actors from this template may

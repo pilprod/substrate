@@ -279,27 +279,57 @@ func TestApplies(t *testing.T) {
 			want:        false,
 		},
 		{
+			name:        "explicit KubernetesPod accepts a legacy unspecified worker",
+			worker:      worker("w", "gvisor", "node-a", nil),
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, SandboxClass: "gvisor"},
+			want:        true,
+		},
+		{
+			name:        "default KubernetesPod constraint rejects external slot despite matching class and labels",
+			worker:      worker("", "gvisor", "", map[string]string{"tier": "1"}, withExternalSlot("team-a")),
+			constraints: Constraints{OwnerAtespace: "team-a", SandboxClass: "gvisor", TemplateSelector: tierSel},
+			want:        false,
+		},
+		{
+			name:        "explicit ExternalSlot rejects KubernetesPod worker",
+			worker:      worker("w", "gvisor", "node-a", nil),
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, OwnerAtespace: "team-a", SandboxClass: "gvisor"},
+			want:        false,
+		},
+		{
+			name:        "unknown provider constraint fails closed",
+			worker:      worker("w", "gvisor", "node-a", nil),
+			constraints: Constraints{Provider: ateapipb.WorkerProvider(99), SandboxClass: "gvisor"},
+			want:        false,
+		},
+		{
+			name:        "unknown worker provider fails closed",
+			worker:      worker("w", "gvisor", "node-a", nil, withProvider(ateapipb.WorkerProvider(99))),
+			constraints: Constraints{SandboxClass: "gvisor"},
+			want:        false,
+		},
+		{
 			name:        "external slot matches its owner atespace",
 			worker:      worker("", "gvisor", "", nil, withExternalSlot("team-a")),
-			constraints: Constraints{OwnerAtespace: "team-a", SandboxClass: "gvisor"},
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, OwnerAtespace: "team-a", SandboxClass: "gvisor"},
 			want:        true,
 		},
 		{
 			name:        "external slot rejects another atespace",
 			worker:      worker("", "gvisor", "", nil, withExternalSlot("team-a")),
-			constraints: Constraints{OwnerAtespace: "team-b", SandboxClass: "gvisor"},
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, OwnerAtespace: "team-b", SandboxClass: "gvisor"},
 			want:        false,
 		},
 		{
 			name:        "external slot without server owner fails closed",
 			worker:      worker("", "gvisor", "", nil, withExternalSlot("")),
-			constraints: Constraints{OwnerAtespace: "team-a", SandboxClass: "gvisor"},
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, OwnerAtespace: "team-a", SandboxClass: "gvisor"},
 			want:        false,
 		},
 		{
 			name:        "external slot without actor atespace fails closed",
 			worker:      worker("", "gvisor", "", nil, withExternalSlot("team-a")),
-			constraints: Constraints{SandboxClass: "gvisor"},
+			constraints: Constraints{Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, SandboxClass: "gvisor"},
 			want:        false,
 		},
 	}
@@ -352,6 +382,12 @@ func assigned(atespace, name string) func(*ateapipb.Worker) {
 func withCapacity(cpuMilli, memBytes int64) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
 		w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: cpuMilli, MemoryBytes: memBytes}
+	}
+}
+
+func withProvider(provider ateapipb.WorkerProvider) func(*ateapipb.Worker) {
+	return func(w *ateapipb.Worker) {
+		w.Provider = provider
 	}
 }
 

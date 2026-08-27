@@ -647,7 +647,12 @@ func actorResourceLimits(tmpl *atev1alpha1.ActorTemplate) (cpuMilli, memBytes in
 
 func schedulingConstraints(actor *ateapipb.Actor, tmpl *atev1alpha1.ActorTemplate) (scheduling.Constraints, error) {
 	cpuMilli, memBytes := actorResourceLimits(tmpl)
+	provider, err := actorTemplateWorkerProvider(tmpl.Spec.WorkerProvider)
+	if err != nil {
+		return scheduling.Constraints{}, err
+	}
 	c := scheduling.Constraints{
+		Provider:      provider,
 		OwnerAtespace: actor.GetMetadata().GetAtespace(),
 		SandboxClass:  string(tmpl.Spec.SandboxClass),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
@@ -663,6 +668,17 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *atev1alpha1.ActorTemplat
 		c.TemplateSelector = sel
 	}
 	return c, nil
+}
+
+func actorTemplateWorkerProvider(provider atev1alpha1.WorkerProvider) (ateapipb.WorkerProvider, error) {
+	switch provider {
+	case "", atev1alpha1.WorkerProviderKubernetesPod:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, nil
+	case atev1alpha1.WorkerProviderExternalSlot:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, nil
+	default:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED, fmt.Errorf("invalid ActorTemplate worker provider %q", provider)
+	}
 }
 
 // ensureVolumesAttached attaches the actor's mounted external volumes to the

@@ -535,6 +535,13 @@ message ActorTemplate {
   Resources resources = 7;
 
   ActorTemplateStatus status = 8;
+
+  // worker_provider selects the kind of execution capacity actors from this
+  // template may use. UNSPECIFIED is interpreted as KUBERNETES_POD for
+  // compatibility with templates created before providers were explicit.
+  // EXTERNAL_SLOT is an explicit opt-in and never follows from selectors,
+  // sandbox class, or worker labels.
+  WorkerProvider worker_provider = 9;
 }
 
 message Resources {

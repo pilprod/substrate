@@ -22,6 +22,18 @@ import (
 
 type PhaseType string
 
+// WorkerProvider selects how ActorTemplate workloads are hosted.
+type WorkerProvider string
+
+const (
+	// WorkerProviderKubernetesPod uses Kubernetes-managed worker pods. It is
+	// the default for compatibility with ActorTemplates created before the
+	// provider constraint was introduced.
+	WorkerProviderKubernetesPod WorkerProvider = "KubernetesPod"
+	// WorkerProviderExternalSlot uses an explicitly enrolled external slot.
+	WorkerProviderExternalSlot WorkerProvider = "ExternalSlot"
+)
+
 // Define your phases as constants
 const (
 	PhaseInitial           PhaseType = ""
@@ -566,6 +578,17 @@ type SnapshotsConfig struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(vm, has(self.volumes) && self.volumes.exists(v, v.name == vm.name)))",message="All volume mounts must refer to a volume defined in spec.volumes"
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || !self.containers.exists(c, has(c.resources)) || (has(self.sandboxClass) && self.sandboxClass == 'microvm')",message="container resources are only supported when sandboxClass is 'microvm'"
 type ActorTemplateSpec struct {
+	// WorkerProvider selects the kind of execution capacity actors from this
+	// template may use. ExternalSlot is an explicit opt-in: worker selectors,
+	// sandbox class, and labels cannot select external capacity by themselves.
+	// An absent value is interpreted as KubernetesPod for compatibility with
+	// ActorTemplates persisted before this field was introduced.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=KubernetesPod;ExternalSlot
+	// +kubebuilder:default=KubernetesPod
+	WorkerProvider WorkerProvider `json:"workerProvider,omitempty"`
+
 	// Containers is the workload definition.
 	//
 	// +optional

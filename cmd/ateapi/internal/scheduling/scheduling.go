@@ -29,6 +29,11 @@ import (
 
 // Constraints describes what a worker must satisfy to host an actor.
 type Constraints struct {
+	// Provider must exactly match the worker's effective provider. An
+	// unspecified value means KubernetesPod for compatibility; it never means
+	// "any provider". ExternalSlot therefore always requires explicit opt-in.
+	Provider ateapipb.WorkerProvider
+
 	// OwnerAtespace identifies the Actor's Atespace. ExternalSlot workers are
 	// eligible only when their server-issued owner Atespace matches exactly.
 	// KubernetesPod workers are shared and ignore this constraint.
@@ -147,7 +152,15 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 	if worker == nil || (s.eligibility != nil && !s.eligibility(worker)) {
 		return false
 	}
-	if worker.GetProvider() == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+	requiredProvider, ok := effectiveProvider(constraints.Provider)
+	if !ok {
+		return false
+	}
+	workerProvider, ok := effectiveProvider(worker.GetProvider())
+	if !ok || workerProvider != requiredProvider {
+		return false
+	}
+	if workerProvider == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
 		if constraints.OwnerAtespace == "" || worker.GetExternalSlot().GetOwnerAtespace() != constraints.OwnerAtespace {
 			return false
 		}
@@ -181,4 +194,16 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 	}
 
 	return len(constraints.RequiredNodes) == 0 || slices.Contains(constraints.RequiredNodes, worker.GetNodeName())
+}
+
+func effectiveProvider(provider ateapipb.WorkerProvider) (ateapipb.WorkerProvider, bool) {
+	switch provider {
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED,
+		ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, true
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, true
+	default:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED, false
+	}
 }

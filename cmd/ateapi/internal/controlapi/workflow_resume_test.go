@@ -63,6 +63,34 @@ func TestSchedulerRecordable(t *testing.T) {
 	}
 }
 
+func TestSchedulingConstraintsWorkerProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider atev1alpha1.WorkerProvider
+		want     ateapipb.WorkerProvider
+		wantErr  bool
+	}{
+		{name: "absent defaults to KubernetesPod", want: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD},
+		{name: "explicit KubernetesPod", provider: atev1alpha1.WorkerProviderKubernetesPod, want: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD},
+		{name: "explicit ExternalSlot", provider: atev1alpha1.WorkerProviderExternalSlot, want: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT},
+		{name: "unknown fails closed", provider: atev1alpha1.WorkerProvider("NativeProcess"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			constraints, err := schedulingConstraints(
+				&ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a"}},
+				&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{WorkerProvider: tt.provider}},
+			)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("schedulingConstraints(workerProvider=%q) error = %v, wantErr %v", tt.provider, err, tt.wantErr)
+			}
+			if constraints.Provider != tt.want {
+				t.Errorf("schedulingConstraints(workerProvider=%q).Provider = %v, want %v", tt.provider, constraints.Provider, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
 	const workerUID = "11111111-1111-4111-8111-111111111111"
 	worker := &ateapipb.Worker{
@@ -186,6 +214,7 @@ func seedExternalAssignmentFixture(
 		ExternalSlot: &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "registration-a.slot-a",
 			LocalityIdentity:  "device-a",
+			OwnerAtespace:     "team-a",
 		},
 		Status: &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
 	})
@@ -216,7 +245,10 @@ func TestAssignWorkerAttemptGuardsExternalStoreMutation(t *testing.T) {
 			return effectiveWorkerProvider(candidate.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT || guard.AllowsCandidate(candidate)
 		})),
 	}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
 
 	_, assigned, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
 	if err != nil {
@@ -239,7 +271,10 @@ func TestAssignWorkerAttemptRejectsExternalRouteClosedBeforeMutation(t *testing.
 		store: persistence, workerCache: wc, externalRouteGuard: guard,
 		scheduler: scheduling.New(wc, scheduling.WithEligibility(guard.AllowsCandidate)),
 	}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
 
 	_, _, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
 	if !errors.Is(err, store.ErrVersionConflict) || !errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
@@ -266,7 +301,10 @@ func TestAssignWorkerAttemptRechecksExternalActiveStateInsideStoreMutation(t *te
 		store: wrapped, workerCache: wc, externalRouteGuard: guard,
 		scheduler: scheduling.New(wc, scheduling.WithEligibility(guard.AllowsCandidate)),
 	}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
 
 	_, _, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
 	if !errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
@@ -960,7 +998,10 @@ func TestValidateAssignedWorkerRejectsUnpinnedExternalAssignmentWithoutClearingR
 	}
 
 	w := &ActorWorkflow{store: persistence, scheduler: scheduling.New(nil)}
-	if _, err := w.validateAssignedWorker(ctx, actorRef, actor, &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor}}); err == nil {
+	if _, err := w.validateAssignedWorker(ctx, actorRef, actor, &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}); err == nil {
 		t.Fatal("validateAssignedWorker() error = nil, want fail-closed error")
 	}
 	storedActor, err := persistence.GetActor(ctx, actorRef)
