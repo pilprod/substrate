@@ -187,21 +187,21 @@ must coordinate overlap in old/new trust roots and roll out the affected
 Deployment after changing either CA key. This chart does not watch Secret
 rotation or trigger restarts.
 
-### Remaining GKE authentication gate
+### GKE authentication routing
 
 Removing the beta certificate APIs is necessary but not sufficient for a GKE
-release. The authentication ConfigMap must retain the exact KSA issuer and
-audience from the cluster. Current ate-api OIDC verification performs discovery
-and JWKS retrieval from that configured issuer, which for GKE can be a public
-`container.googleapis.com` URL. Do not replace the issuer with
-`kubernetes.default.svc`; that changes token identity semantics.
+release. The authentication ConfigMap must retain the exact cluster-specific KSA
+issuer and audience. Do not replace the issuer with `kubernetes.default.svc`;
+that changes token identity semantics. Instead, configure the paired
+`discoveryURL` and `jwksURL` overrides to the in-cluster Kubernetes API URLs, as
+shown in `docs/authentication.md`. ate-api still verifies the discovery
+document's issuer exactly, but it retrieves metadata and signing keys through
+the governed cluster network path. No public Google API egress is required for
+that verification.
 
-Until an explicit in-cluster JWKS endpoint override is available, the
-default-deny egress policy must include the real discovery/JWKS destination
-through an environment-governed egress path. The example does not invent a
-stable `ipBlock` for that hostname. A release test must authenticate a request
-with a real KSA token; Pod readiness alone does not exercise discovery or JWKS
-retrieval.
+A release test must authenticate a request with a freshly minted KSA token for
+the configured audience. Pod readiness alone does not exercise discovery, JWKS
+retrieval, or audience verification.
 
 ### Cloud SQL values
 
@@ -238,10 +238,10 @@ The example also assumes:
   5432, and kube-dns on TCP/UDP 53.
 
 Change the namespace and pod selectors to the labels actually enforced in the
-target cluster. Add explicit egress rules for the configured OIDC issuer and
-OTLP endpoint when those are outside the allowed destinations. With no matching
-allow rule, the default-deny profile intentionally remains unreachable rather
-than silently broadening access.
+target cluster. Add explicit egress rules for an OTLP endpoint or any OIDC
+endpoint intentionally configured outside the in-cluster overrides. With no
+matching allow rule, the default-deny profile intentionally remains unreachable
+rather than silently broadening access.
 
 Run `make verify-external-control-plane-chart` to lint this profile and verify
 its fail-closed Secret, topology, Broker, and NetworkPolicy contracts.

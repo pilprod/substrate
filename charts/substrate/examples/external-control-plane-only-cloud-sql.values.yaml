@@ -55,9 +55,10 @@ externalControlPlane:
       podSelector:
         matchLabels:
           app.kubernetes.io/name: client-gateway
-    # These rules intentionally do not fake an ipBlock for the public GKE KSA
-    # issuer/JWKS hostname. Add its real, governed egress path until ate-api
-    # supports an explicit in-cluster JWKS endpoint override.
+    # Configure ate-api's paired discoveryURL/jwksURL overrides to the in-cluster
+    # Kubernetes API. The TCP/443 rules below must cover the exact Service and
+    # endpoint destinations enforced by the cluster CNI; no public Google API
+    # egress is required.
     egress:
     # Replace these documentation-only addresses with the exact private GKE
     # API endpoint and private Cloud SQL endpoint assigned to the environment.
