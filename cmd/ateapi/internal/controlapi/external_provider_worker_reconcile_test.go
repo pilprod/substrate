@@ -19,14 +19,19 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"google.golang.org/protobuf/proto"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 type reconcileWorkerStore struct {
@@ -152,6 +157,35 @@ func reconcileSlot(id, sandbox string, labels map[string]string) *externalprovid
 	}
 }
 
+func reconcileWorkerPoolLister(t *testing.T, labels map[string]string) listersv1alpha1.WorkerPoolLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	pool := &atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "workers",
+		Name:      "pool-a",
+		Labels:    maps.Clone(labels),
+	}}
+	if err := indexer.Add(pool); err != nil {
+		t.Fatalf("adding WorkerPool to indexer: %v", err)
+	}
+	return listersv1alpha1.NewWorkerPoolLister(indexer)
+}
+
+func emptyReconcileWorkerPoolLister() listersv1alpha1.WorkerPoolLister {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	return listersv1alpha1.NewWorkerPoolLister(indexer)
+}
+
+func reconcileWorkers(
+	t *testing.T,
+	ctx context.Context,
+	persistence externalWorkerPlanStore,
+	plan *externalprovider.WorkerPlan,
+) ([]*ateapipb.Worker, error) {
+	t.Helper()
+	return reconcileExternalWorkers(ctx, persistence, reconcileWorkerPoolLister(t, nil), plan)
+}
+
 func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
@@ -160,7 +194,7 @@ func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 		reconcileSlot("slot-b", "docker", map[string]string{"runtime": "claude"}),
 	)
 
-	first, err := reconcileExternalWorkers(ctx, persistence, plan)
+	first, err := reconcileWorkers(t, ctx, persistence, plan)
 	if err != nil {
 		t.Fatalf("reconcileExternalWorkers() error = %v", err)
 	}
@@ -174,7 +208,7 @@ func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 		}
 	}
 
-	second, err := reconcileExternalWorkers(ctx, persistence, plan)
+	second, err := reconcileWorkers(t, ctx, persistence, plan)
 	if err != nil {
 		t.Fatalf("second reconcileExternalWorkers() error = %v", err)
 	}
@@ -188,11 +222,160 @@ func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestReconcileExternalWorkersPropagatesPinnedPoolLabels(t *testing.T) {
+	ctx := context.Background()
+	persistence := newReconcileWorkerStore()
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{
+		"runtime": "codex",
+	}))
+	poolLister := reconcileWorkerPoolLister(t, map[string]string{
+		"kagent.dev/worker-pool": "coding-local",
+		"placement":              "external",
+	})
+
+	workers, err := reconcileExternalWorkers(ctx, persistence, poolLister, plan)
+	if err != nil {
+		t.Fatalf("reconcileExternalWorkers() error = %v", err)
+	}
+	want := map[string]string{
+		"runtime":                "codex",
+		"kagent.dev/worker-pool": "coding-local",
+		"placement":              "external",
+	}
+	if len(workers) != 1 || !maps.Equal(workers[0].GetLabels(), want) {
+		t.Fatalf("effective Worker labels = %v, want %v", workers[0].GetLabels(), want)
+	}
+}
+
+func TestReconcileExternalWorkersRejectsPoolLabelSpoofBeforeWrites(t *testing.T) {
+	ctx := context.Background()
+	persistence := newReconcileWorkerStore()
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{
+		"kagent.dev/worker-pool": "coding-local",
+	}))
+	poolLister := reconcileWorkerPoolLister(t, map[string]string{
+		"kagent.dev/worker-pool": "coding-local",
+	})
+
+	_, err := reconcileExternalWorkers(ctx, persistence, poolLister, plan)
+	if !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) || !strings.Contains(err.Error(), "collides with server-owned WorkerPool label") {
+		t.Fatalf("reconcileExternalWorkers() error = %v, want explicit server-label collision", err)
+	}
+	if persistence.createCalls != 0 || persistence.updateCalls != 0 {
+		t.Fatalf("spoof rejection wrote Workers: %d creates/%d updates", persistence.createCalls, persistence.updateCalls)
+	}
+}
+
+func TestReconcileExternalWorkersRejectsUnavailableOrInvalidPoolBeforeWrites(t *testing.T) {
+	ctx := context.Background()
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+
+	t.Run("missing", func(t *testing.T) {
+		persistence := newReconcileWorkerStore()
+		_, err := reconcileExternalWorkers(ctx, persistence, emptyReconcileWorkerPoolLister(), plan)
+		if !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) || !strings.Contains(err.Error(), "resolving pinned WorkerPool") {
+			t.Fatalf("reconcileExternalWorkers() error = %v, want missing pinned pool", err)
+		}
+		if persistence.createCalls != 0 || persistence.updateCalls != 0 {
+			t.Fatalf("missing-pool rejection wrote Workers: %d creates/%d updates", persistence.createCalls, persistence.updateCalls)
+		}
+	})
+
+	t.Run("invalid labels", func(t *testing.T) {
+		persistence := newReconcileWorkerStore()
+		poolLister := reconcileWorkerPoolLister(t, map[string]string{"not a label": "value"})
+		_, err := reconcileExternalWorkers(ctx, persistence, poolLister, plan)
+		if !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) || !strings.Contains(err.Error(), "label key") {
+			t.Fatalf("reconcileExternalWorkers() error = %v, want invalid pool labels", err)
+		}
+		if persistence.createCalls != 0 || persistence.updateCalls != 0 {
+			t.Fatalf("invalid-pool rejection wrote Workers: %d creates/%d updates", persistence.createCalls, persistence.updateCalls)
+		}
+	})
+
+	t.Run("lister unavailable", func(t *testing.T) {
+		persistence := newReconcileWorkerStore()
+		_, err := reconcileExternalWorkers(ctx, persistence, nil, plan)
+		if !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) {
+			t.Fatalf("reconcileExternalWorkers() error = %v, want unavailable lister rejection", err)
+		}
+		if persistence.createCalls != 0 || persistence.updateCalls != 0 {
+			t.Fatalf("unavailable-lister rejection wrote Workers: %d creates/%d updates", persistence.createCalls, persistence.updateCalls)
+		}
+	})
+}
+
+func TestReconcileExternalWorkersRefreshesPoolLabelsAndPreservesServerState(t *testing.T) {
+	ctx := context.Background()
+	persistence := newReconcileWorkerStore()
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}))
+
+	created, err := reconcileExternalWorkers(ctx, persistence, reconcileWorkerPoolLister(t, map[string]string{
+		"kagent.dev/worker-pool": "coding-local",
+		"policy":                 "v1",
+	}), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := created[0].GetMetadata().GetName()
+	persistence.mutate(name, func(worker *ateapipb.Worker) {
+		worker.Status.State = ateapipb.WorkerState_WORKER_STATE_ACTIVE
+		worker.Status.Assignment = newAPIAssignment("actor-uid-1")
+	})
+
+	updated, err := reconcileExternalWorkers(ctx, persistence, reconcileWorkerPoolLister(t, map[string]string{
+		"kagent.dev/worker-pool": "coding-local",
+		"policy":                 "v2",
+	}), plan)
+	if err != nil {
+		t.Fatalf("reconcileExternalWorkers(updated pool) error = %v", err)
+	}
+	worker := updated[0]
+	wantLabels := map[string]string{
+		"runtime":                "codex",
+		"kagent.dev/worker-pool": "coding-local",
+		"policy":                 "v2",
+	}
+	if !maps.Equal(worker.GetLabels(), wantLabels) {
+		t.Errorf("refreshed labels = %v, want %v", worker.GetLabels(), wantLabels)
+	}
+	if worker.GetMetadata().GetUid() != created[0].GetMetadata().GetUid() || worker.GetMetadata().GetVersion() != 2 ||
+		worker.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE ||
+		worker.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
+		t.Errorf("pool label refresh disturbed Worker incarnation or server state: %+v", worker)
+	}
+	if persistence.createCalls != 1 || persistence.updateCalls != 1 {
+		t.Errorf("pool label refresh used %d creates/%d updates, want 1/1", persistence.createCalls, persistence.updateCalls)
+	}
+}
+
+func TestReconcileExternalWorkersPreflightsAllMergedLabelsBeforeWrites(t *testing.T) {
+	ctx := context.Background()
+	persistence := newReconcileWorkerStore()
+	tooMany := make(map[string]string, maxExternalWorkerLabels)
+	for index := range maxExternalWorkerLabels {
+		tooMany[fmt.Sprintf("capacity.example/label-%02d", index)] = "available"
+	}
+	plan := reconcileWorkerPlan(t, "registration-a",
+		reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}),
+		reconcileSlot("slot-b", "native", tooMany),
+	)
+	poolLister := reconcileWorkerPoolLister(t, map[string]string{"placement": "external"})
+
+	_, err := reconcileExternalWorkers(ctx, persistence, poolLister, plan)
+	if !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) || !strings.Contains(err.Error(), "merged labels exceed") {
+		t.Fatalf("reconcileExternalWorkers() error = %v, want merged label bound", err)
+	}
+	if persistence.createCalls != 0 || persistence.updateCalls != 0 {
+		t.Fatalf("multi-slot preflight left partial writes: %d creates/%d updates", persistence.createCalls, persistence.updateCalls)
+	}
+}
+
 func TestReconcileExternalWorkersRefreshesOnlyMutableProviderFields(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
 	originalPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}))
-	created, err := reconcileExternalWorkers(ctx, persistence, originalPlan)
+	created, err := reconcileWorkers(t, ctx, persistence, originalPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +386,7 @@ func TestReconcileExternalWorkersRefreshesOnlyMutableProviderFields(t *testing.T
 	})
 
 	changedPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", map[string]string{"runtime": "codex", "accelerator": "none"}))
-	updated, err := reconcileExternalWorkers(ctx, persistence, changedPlan)
+	updated, err := reconcileWorkers(t, ctx, persistence, changedPlan)
 	if err != nil {
 		t.Fatalf("reconcileExternalWorkers(changed) error = %v", err)
 	}
@@ -230,7 +413,7 @@ func TestReconcileExternalWorkersRejectsIdentityCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := reconcileExternalWorkers(ctx, persistence, plan); !errors.Is(err, externalprovider.ErrWorkerIdentityCollision) {
+	if _, err := reconcileWorkers(t, ctx, persistence, plan); !errors.Is(err, externalprovider.ErrWorkerIdentityCollision) {
 		t.Fatalf("reconcileExternalWorkers() error = %v, want ErrWorkerIdentityCollision", err)
 	}
 }
@@ -241,7 +424,7 @@ func TestReconcileExternalWorkersRetriesCreateAndUpdateRaces(t *testing.T) {
 		persistence := newReconcileWorkerStore()
 		persistence.createRace = true
 		plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
-		workers, err := reconcileExternalWorkers(ctx, persistence, plan)
+		workers, err := reconcileWorkers(t, ctx, persistence, plan)
 		if err != nil {
 			t.Fatalf("reconcileExternalWorkers() error = %v", err)
 		}
@@ -253,12 +436,12 @@ func TestReconcileExternalWorkersRetriesCreateAndUpdateRaces(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
 		persistence := newReconcileWorkerStore()
 		original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
-		if _, err := reconcileExternalWorkers(ctx, persistence, original); err != nil {
+		if _, err := reconcileWorkers(t, ctx, persistence, original); err != nil {
 			t.Fatal(err)
 		}
 		persistence.updateConflicts = 2
 		changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", nil))
-		workers, err := reconcileExternalWorkers(ctx, persistence, changed)
+		workers, err := reconcileWorkers(t, ctx, persistence, changed)
 		if err != nil {
 			t.Fatalf("reconcileExternalWorkers() error = %v", err)
 		}
@@ -275,7 +458,7 @@ func TestReconcileExternalWorkersDoesNotOwnOmittedSlots(t *testing.T) {
 		reconcileSlot("slot-a", "native", nil),
 		reconcileSlot("slot-b", "native", nil),
 	)
-	created, err := reconcileExternalWorkers(ctx, persistence, fullPlan)
+	created, err := reconcileWorkers(t, ctx, persistence, fullPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +468,7 @@ func TestReconcileExternalWorkersDoesNotOwnOmittedSlots(t *testing.T) {
 	})
 
 	narrowPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
-	if _, err := reconcileExternalWorkers(ctx, persistence, narrowPlan); err != nil {
+	if _, err := reconcileWorkers(t, ctx, persistence, narrowPlan); err != nil {
 		t.Fatal(err)
 	}
 	stillThere, err := persistence.GetWorker(ctx, omitted.GetMetadata().GetName())
@@ -298,12 +481,12 @@ func TestReconcileExternalWorkersBoundsRetriesAndHonorsContext(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
 	original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
-	if _, err := reconcileExternalWorkers(ctx, persistence, original); err != nil {
+	if _, err := reconcileWorkers(t, ctx, persistence, original); err != nil {
 		t.Fatal(err)
 	}
 	persistence.updateConflicts = maxExternalWorkerReconcileAttempts + 1
 	changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", nil))
-	if _, err := reconcileExternalWorkers(ctx, persistence, changed); !errors.Is(err, store.ErrVersionConflict) {
+	if _, err := reconcileWorkers(t, ctx, persistence, changed); !errors.Is(err, store.ErrVersionConflict) {
 		t.Fatalf("reconcileExternalWorkers() error = %v, want ErrVersionConflict", err)
 	}
 	if persistence.updateCalls != maxExternalWorkerReconcileAttempts {
@@ -312,10 +495,10 @@ func TestReconcileExternalWorkersBoundsRetriesAndHonorsContext(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := reconcileExternalWorkers(cancelled, persistence, changed); !errors.Is(err, context.Canceled) {
+	if _, err := reconcileWorkers(t, cancelled, persistence, changed); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled reconcile error = %v, want context.Canceled", err)
 	}
-	if _, err := reconcileExternalWorkers(context.Background(), persistence, nil); !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) {
+	if _, err := reconcileExternalWorkers(context.Background(), persistence, reconcileWorkerPoolLister(t, nil), nil); !errors.Is(err, externalprovider.ErrInvalidWorkerPlan) {
 		t.Fatalf("nil plan error = %v, want ErrInvalidWorkerPlan", err)
 	}
 }

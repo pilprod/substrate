@@ -19,14 +19,20 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
+	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/proto"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
-const maxExternalWorkerReconcileAttempts = 5
+const (
+	maxExternalWorkerLabels            = 64
+	maxExternalWorkerReconcileAttempts = 5
+)
 
 type externalWorkerPlanStore interface {
 	GetWorker(context.Context, string) (*ateapipb.Worker, error)
@@ -34,25 +40,65 @@ type externalWorkerPlanStore interface {
 	UpdateWorker(context.Context, string, store.Precondition, func(*ateapipb.Worker) error) (*ateapipb.Worker, error)
 }
 
+type externalWorkerPoolLister interface {
+	WorkerPools(namespace string) listersv1alpha1.WorkerPoolNamespaceLister
+}
+
 var _ externalprovider.WorkerPlanReconciler = (*RPCService)(nil)
 
 // ReconcileExternalWorkers idempotently creates or refreshes the durable
 // ExternalSlot Workers in plan. New Workers start OFFLINE. Existing status,
 // assignment, and server metadata are preserved; only the provider-owned
-// sandbox class and labels are refreshed after immutable identity validation.
+// sandbox class and effective client-plus-pool labels are refreshed after
+// immutable identity validation.
 //
 // Slots missing from plan are deliberately untouched. Session teardown owns
 // the OFFLINE transition, while operator drain and deletion remain separate
 // control-plane actions.
 func (s *RPCService) ReconcileExternalWorkers(ctx context.Context, plan *externalprovider.WorkerPlan) ([]*ateapipb.Worker, error) {
-	return reconcileExternalWorkers(ctx, s.impl, plan)
+	return reconcileExternalWorkers(ctx, s.impl, s.workerPoolLister, plan)
 }
 
-func reconcileExternalWorkers(ctx context.Context, persistence externalWorkerPlanStore, plan *externalprovider.WorkerPlan) ([]*ateapipb.Worker, error) {
-	if persistence == nil || plan == nil {
-		return nil, fmt.Errorf("%w: reconciler store and plan are required", externalprovider.ErrInvalidWorkerPlan)
+func reconcileExternalWorkers(
+	ctx context.Context,
+	persistence externalWorkerPlanStore,
+	poolLister externalWorkerPoolLister,
+	plan *externalprovider.WorkerPlan,
+) ([]*ateapipb.Worker, error) {
+	if persistence == nil || poolLister == nil || plan == nil {
+		return nil, fmt.Errorf("%w: reconciler store, WorkerPool lister, and plan are required", externalprovider.ErrInvalidWorkerPlan)
 	}
-	desiredWorkers := plan.Workers()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	registration := plan.Registration()
+	if err := registration.Scope.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: plan scope is invalid", externalprovider.ErrInvalidWorkerPlan)
+	}
+	pool, err := poolLister.WorkerPools(registration.Scope.WorkerNamespace).Get(registration.Scope.WorkerPool)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: resolving pinned WorkerPool %s/%s: %v",
+			externalprovider.ErrInvalidWorkerPlan,
+			registration.Scope.WorkerNamespace,
+			registration.Scope.WorkerPool,
+			err,
+		)
+	}
+	if pool == nil || pool.GetNamespace() != registration.Scope.WorkerNamespace || pool.GetName() != registration.Scope.WorkerPool {
+		return nil, fmt.Errorf(
+			"%w: lister returned an invalid pinned WorkerPool for %s/%s",
+			externalprovider.ErrInvalidWorkerPlan,
+			registration.Scope.WorkerNamespace,
+			registration.Scope.WorkerPool,
+		)
+	}
+
+	desiredWorkers, err := effectiveExternalWorkers(plan.Workers(), pool.GetLabels())
+	if err != nil {
+		return nil, err
+	}
 	if len(desiredWorkers) == 0 {
 		return nil, fmt.Errorf("%w: plan contains no Workers", externalprovider.ErrInvalidWorkerPlan)
 	}
@@ -68,6 +114,78 @@ func reconcileExternalWorkers(ctx context.Context, persistence externalWorkerPla
 	return reconciled, nil
 }
 
+// effectiveExternalWorkers overlays the authenticated pool's server-owned
+// labels on client capacity labels. Every candidate is validated before the
+// caller performs a Worker read or write, so one malformed slot cannot leave a
+// partially reconciled plan.
+func effectiveExternalWorkers(planned []*ateapipb.Worker, poolLabels map[string]string) ([]*ateapipb.Worker, error) {
+	if len(planned) == 0 {
+		return nil, fmt.Errorf("%w: plan contains no Workers", externalprovider.ErrInvalidWorkerPlan)
+	}
+
+	effective := make([]*ateapipb.Worker, 0, len(planned))
+	for _, worker := range planned {
+		if worker == nil {
+			return nil, fmt.Errorf("%w: plan contains a nil Worker", externalprovider.ErrInvalidWorkerPlan)
+		}
+		labels, err := mergeExternalWorkerLabels(worker.GetLabels(), poolLabels)
+		if err != nil {
+			return nil, fmt.Errorf("%w: planned Worker %q labels: %v", externalprovider.ErrInvalidWorkerPlan, worker.GetMetadata().GetName(), err)
+		}
+		candidate := proto.Clone(worker).(*ateapipb.Worker)
+		candidate.Labels = labels
+		if errs := validateCreateWorkerRequest(&ateapipb.CreateWorkerRequest{Worker: candidate}); len(errs) != 0 {
+			return nil, fmt.Errorf(
+				"%w: planned Worker %q violates the control API contract: %v",
+				externalprovider.ErrInvalidWorkerPlan,
+				candidate.GetMetadata().GetName(),
+				errs,
+			)
+		}
+		effective = append(effective, candidate)
+	}
+	return effective, nil
+}
+
+func mergeExternalWorkerLabels(clientLabels, poolLabels map[string]string) (map[string]string, error) {
+	poolKeys := make([]string, 0, len(poolLabels))
+	for key := range poolLabels {
+		poolKeys = append(poolKeys, key)
+	}
+	slices.Sort(poolKeys)
+	for _, key := range poolKeys {
+		if _, collision := clientLabels[key]; collision {
+			return nil, fmt.Errorf("client label collides with server-owned WorkerPool label %q", key)
+		}
+	}
+	if len(clientLabels)+len(poolLabels) > maxExternalWorkerLabels {
+		return nil, fmt.Errorf("merged labels exceed %d entries", maxExternalWorkerLabels)
+	}
+
+	labels := maps.Clone(clientLabels)
+	if labels == nil && len(poolLabels) != 0 {
+		labels = make(map[string]string, len(poolLabels))
+	}
+	for _, key := range poolKeys {
+		labels[key] = poolLabels[key]
+	}
+
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		if len(k8svalidation.IsQualifiedName(key)) != 0 {
+			return nil, fmt.Errorf("label key %q is invalid", key)
+		}
+		if len(k8svalidation.IsValidLabelValue(labels[key])) != 0 {
+			return nil, fmt.Errorf("label %q has an invalid value", key)
+		}
+	}
+	return labels, nil
+}
+
 func reconcileExternalWorker(
 	ctx context.Context,
 	persistence externalWorkerPlanStore,
@@ -75,9 +193,6 @@ func reconcileExternalWorker(
 	desired *ateapipb.Worker,
 ) (*ateapipb.Worker, error) {
 	name := desired.GetMetadata().GetName()
-	if errs := validateCreateWorkerRequest(&ateapipb.CreateWorkerRequest{Worker: desired}); len(errs) != 0 {
-		return nil, fmt.Errorf("%w: planned Worker %q violates the control API contract: %v", externalprovider.ErrInvalidWorkerPlan, name, errs)
-	}
 
 	for attempt := 0; attempt < maxExternalWorkerReconcileAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {

@@ -127,25 +127,35 @@ lowercase base32 values satisfy the existing Worker validators and do not
 contain or concatenate caller-provided registration or slot strings.
 
 The plan copies the authenticated namespace and pool plus the admitted sandbox
-class, labels, and capacity, sets provider `ExternalSlot`, and leaves status
-unset so the authoritative CreateWorker path can initialize the Worker
-`OFFLINE`. Session generation and live routing are deliberately absent from the
-durable identity, so a reconnect resolves the same Worker incarnation. A name
-collision with different immutable provider, scope, capacity, execution, or
-locality fields fails closed; only sandbox class and labels remain mutable under
-the existing Worker contract.
+class, client capacity labels, and capacity, sets provider `ExternalSlot`, and
+leaves status unset so the authoritative CreateWorker path can initialize the
+Worker `OFFLINE`. Client labels are capacity hints only within that pinned pool.
+Session generation and live routing are deliberately absent from the durable
+identity, so a reconnect resolves the same Worker incarnation. A name collision
+with different immutable provider, scope, capacity, execution, or locality
+fields fails closed; only sandbox class and labels remain mutable under the
+existing Worker contract.
 
 Planning is still side-effect free. It does not list, create, update, activate,
 drain, or delete Workers, and it does not make `Connect` available.
 
-The in-process control API reconciler consumes that plan idempotently. It
-creates missing Workers as `OFFLINE` and, after checking every immutable
-identity field, may refresh only `sandbox_class` and labels. Reconnect keeps the
-same Worker UID and emits no write when those mutable fields are unchanged.
-Concurrent creates and updates are retried with the store's UID/version guards.
-The reconciler neither activates current slots nor modifies slots omitted by a
-new plan: route installation and session teardown own `ACTIVE`/`OFFLINE`, while
-drain and deletion remain operator actions.
+The in-process control API reconciler consumes that plan idempotently. Before
+any Worker write, it resolves the exact WorkerPool pinned by the authenticated
+scope and merges its metadata labels into every planned Worker. WorkerPool
+labels are server-owned: a client key collision is rejected even when both
+values match. The complete merged set is bounded to 64 valid Kubernetes labels,
+and every candidate is preflighted before reconciliation starts. Missing or
+invalid pools and listers fail closed.
+
+The reconciler creates missing Workers as `OFFLINE` and, after checking every
+immutable identity field, may refresh only `sandbox_class` and effective labels.
+A WorkerPool label change therefore converges existing external Workers without
+changing their UID, status, or assignment. Reconnect emits no write when those
+mutable fields are unchanged. Concurrent creates and updates are retried with
+the store's UID/version guards. The reconciler neither activates current slots
+nor modifies slots omitted by a new plan: route installation and session
+teardown own `ACTIVE`/`OFFLINE`, while drain and deletion remain operator
+actions.
 
 ## Generation-safe Worker availability
 
