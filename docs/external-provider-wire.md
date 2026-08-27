@@ -95,6 +95,15 @@ the existing Worker contract.
 Planning is still side-effect free. It does not list, create, update, activate,
 drain, or delete Workers, and it does not make `Connect` available.
 
+The in-process control API reconciler consumes that plan idempotently. It
+creates missing Workers as `OFFLINE` and, after checking every immutable
+identity field, may refresh only `sandbox_class` and labels. Reconnect keeps the
+same Worker UID and emits no write when those mutable fields are unchanged.
+Concurrent creates and updates are retried with the store's UID/version guards.
+The reconciler neither activates current slots nor modifies slots omitted by a
+new plan: route installation and session teardown own `ACTIVE`/`OFFLINE`, while
+drain and deletion remain operator actions.
+
 ## Authentication implementation boundary
 
 The first broker-auth slice is private to the `ateapi` binary and is not

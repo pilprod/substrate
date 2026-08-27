@@ -15,6 +15,7 @@
 package externalprovider
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
@@ -48,6 +49,13 @@ var (
 type WorkerPlan struct {
 	registration Registration
 	workers      []*ateapipb.Worker
+}
+
+// WorkerPlanReconciler persists the durable Worker resources for an admitted
+// provider session. Reconciliation does not make the Workers available: the
+// live session owner activates them only after its route is installed.
+type WorkerPlanReconciler interface {
+	ReconcileExternalWorkers(context.Context, *WorkerPlan) ([]*ateapipb.Worker, error)
 }
 
 // Registration returns the immutable authenticated registration and scope.
