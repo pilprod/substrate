@@ -43,11 +43,11 @@ func (p *Persistence) CreateExternalProviderEnrollment(ctx context.Context, enro
 	err := p.pool.QueryRow(ctx, `
 		INSERT INTO external_provider_enrollments (
 			enrollment_uid, credential_digest, owner_atespace, worker_namespace, worker_pool,
-			max_slots, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp() + $7::bigint * interval '1 microsecond')
+			max_slots, slot_policy_canonical, slot_policy_digest, expires_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp() + $9::bigint * interval '1 microsecond')
 		RETURNING expires_at`,
 		enrollmentUID, digest[:], scope.OwnerAtespace, scope.WorkerNamespace, scope.WorkerPool,
-		scope.MaxSlots, ttlMicros,
+		scope.MaxSlots, scope.SlotPolicy.CanonicalBytes(), scope.SlotPolicy.DigestBytes(), ttlMicros,
 	).Scan(&enrollment.ExpiresAt)
 	if isUniqueViolation(err) {
 		return externalprovider.Enrollment{}, externalprovider.ErrCredentialCollision
@@ -72,9 +72,11 @@ func (p *Persistence) ConsumeExternalProviderEnrollment(ctx context.Context, enr
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
 	var registration externalprovider.Registration
+	var policyCanonical, policyDigest []byte
 	var usable bool
 	err = tx.QueryRow(ctx, `
 		SELECT enrollment_uid, owner_atespace, worker_namespace, worker_pool, max_slots,
+		       slot_policy_canonical, slot_policy_digest,
 		       consumed_at IS NULL AND revoked_at IS NULL AND expires_at > clock_timestamp()
 		FROM external_provider_enrollments
 		WHERE credential_digest = $1
@@ -85,6 +87,8 @@ func (p *Persistence) ConsumeExternalProviderEnrollment(ctx context.Context, enr
 		&registration.Scope.WorkerNamespace,
 		&registration.Scope.WorkerPool,
 		&registration.Scope.MaxSlots,
+		&policyCanonical,
+		&policyDigest,
 		&usable,
 	)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !usable) {
@@ -93,13 +97,18 @@ func (p *Persistence) ConsumeExternalProviderEnrollment(ctx context.Context, enr
 	if err != nil {
 		return externalprovider.Registration{}, fmt.Errorf("locking external provider enrollment: %w", err)
 	}
+	policy, err := externalprovider.RestoreSlotCapabilityPolicy(policyCanonical, policyDigest)
+	if err != nil {
+		return externalprovider.Registration{}, fmt.Errorf("loading external provider enrollment slot policy: %w", err)
+	}
+	registration.Scope.SlotPolicy = policy
 
 	registration.UID = registrationUID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO external_provider_registrations (
 			registration_uid, enrollment_uid, owner_atespace, worker_namespace, worker_pool,
-			max_slots, refresh_digest
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			max_slots, slot_policy_canonical, slot_policy_digest, refresh_digest
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING created_at`,
 		registration.UID,
 		registration.EnrollmentUID,
@@ -107,6 +116,8 @@ func (p *Persistence) ConsumeExternalProviderEnrollment(ctx context.Context, enr
 		registration.Scope.WorkerNamespace,
 		registration.Scope.WorkerPool,
 		registration.Scope.MaxSlots,
+		registration.Scope.SlotPolicy.CanonicalBytes(),
+		registration.Scope.SlotPolicy.DigestBytes(),
 		refreshDigest[:],
 	).Scan(&registration.CreatedAt)
 	if isUniqueViolation(err) {
@@ -156,10 +167,12 @@ func (p *Persistence) RotateExternalProviderSession(ctx context.Context, registr
 
 	var authorization externalprovider.SessionAuthorization
 	var currentSessionDigest []byte
+	var policyCanonical, policyDigest []byte
 	err = tx.QueryRow(ctx, `
 		SELECT registration.registration_uid, registration.enrollment_uid,
 		       registration.owner_atespace, registration.worker_namespace,
 		       registration.worker_pool, registration.max_slots,
+		       registration.slot_policy_canonical, registration.slot_policy_digest,
 		       registration.created_at, registration.current_session_digest
 		FROM external_provider_registrations AS registration
 		JOIN external_provider_enrollments AS enrollment
@@ -176,6 +189,8 @@ func (p *Persistence) RotateExternalProviderSession(ctx context.Context, registr
 		&authorization.Registration.Scope.WorkerNamespace,
 		&authorization.Registration.Scope.WorkerPool,
 		&authorization.Registration.Scope.MaxSlots,
+		&policyCanonical,
+		&policyDigest,
 		&authorization.Registration.CreatedAt,
 		&currentSessionDigest,
 	)
@@ -185,6 +200,11 @@ func (p *Persistence) RotateExternalProviderSession(ctx context.Context, registr
 	if err != nil {
 		return externalprovider.SessionAuthorization{}, fmt.Errorf("authenticating external provider refresh credential: %w", err)
 	}
+	policy, err := externalprovider.RestoreSlotCapabilityPolicy(policyCanonical, policyDigest)
+	if err != nil {
+		return externalprovider.SessionAuthorization{}, fmt.Errorf("loading external provider registration slot policy: %w", err)
+	}
+	authorization.Registration.Scope.SlotPolicy = policy
 	if bytes.Equal(currentSessionDigest, sessionDigest[:]) {
 		return externalprovider.SessionAuthorization{}, externalprovider.ErrCredentialCollision
 	}
@@ -222,6 +242,7 @@ func (p *Persistence) ClaimExternalProviderSession(ctx context.Context, registra
 
 	var claim externalprovider.SessionClaim
 	var generation int64
+	var policyCanonical, policyDigest []byte
 	err := p.pool.QueryRow(ctx, `
 		UPDATE external_provider_registrations AS registration
 		SET session_consumed_at = clock_timestamp(),
@@ -239,6 +260,7 @@ func (p *Persistence) ClaimExternalProviderSession(ctx context.Context, registra
 		RETURNING registration.registration_uid, registration.enrollment_uid,
 		          registration.owner_atespace, registration.worker_namespace,
 		          registration.worker_pool, registration.max_slots,
+		          registration.slot_policy_canonical, registration.slot_policy_digest,
 		          registration.created_at, registration.session_generation`,
 		registrationUID, sessionDigest[:],
 	).Scan(
@@ -248,6 +270,8 @@ func (p *Persistence) ClaimExternalProviderSession(ctx context.Context, registra
 		&claim.Registration.Scope.WorkerNamespace,
 		&claim.Registration.Scope.WorkerPool,
 		&claim.Registration.Scope.MaxSlots,
+		&policyCanonical,
+		&policyDigest,
 		&claim.Registration.CreatedAt,
 		&generation,
 	)
@@ -257,6 +281,11 @@ func (p *Persistence) ClaimExternalProviderSession(ctx context.Context, registra
 	if err != nil {
 		return externalprovider.SessionClaim{}, fmt.Errorf("claiming external provider session: %w", err)
 	}
+	policy, err := externalprovider.RestoreSlotCapabilityPolicy(policyCanonical, policyDigest)
+	if err != nil {
+		return externalprovider.SessionClaim{}, fmt.Errorf("loading external provider registration slot policy: %w", err)
+	}
+	claim.Registration.Scope.SlotPolicy = policy
 	if generation <= 0 {
 		return externalprovider.SessionClaim{}, errors.New("claimed external provider session has a nonpositive generation")
 	}

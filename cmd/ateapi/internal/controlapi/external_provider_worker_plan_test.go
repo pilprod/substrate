@@ -26,6 +26,13 @@ import (
 // CreateWorker validator without making the planning package depend on the RPC
 // implementation.
 func TestExternalProviderWorkerPlanSatisfiesCreateWorkerContract(t *testing.T) {
+	policy, err := externalprovider.NewSlotCapabilityPolicy(externalprovider.SlotCapabilityPolicyVersion, []externalprovider.SlotProfile{{
+		ProfileID: "standard", SandboxClass: "gvisor", Labels: map[string]string{"region": "south"},
+		MaxSlots: 2, CPUMilli: 2_000, MemoryBytes: 2 << 30,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	claim := externalprovider.SessionClaim{
 		Registration: externalprovider.Registration{
 			UID:           "registration-a",
@@ -35,16 +42,18 @@ func TestExternalProviderWorkerPlanSatisfiesCreateWorkerContract(t *testing.T) {
 				WorkerNamespace: "workers",
 				WorkerPool:      "pool-a",
 				MaxSlots:        2,
+				SlotPolicy:      policy,
 			},
 		},
 		Generation: 1,
 	}
 	frame := &externalproviderpb.ClientFrame{Frame: &externalproviderpb.ClientFrame_Hello{Hello: &externalproviderpb.ConnectHello{
-		RegistrationUid: claim.Registration.UID,
-		ProtocolVersion: 1,
+		RegistrationUid:  claim.Registration.UID,
+		ProtocolVersion:  2,
+		SlotPolicyDigest: policy.DigestHex(),
 		Slots: []*externalproviderpb.ExternalSlot{
-			{SlotId: "slot-a", SandboxClass: "gvisor", Labels: map[string]string{"region": "south"}, Capacity: &ateapipb.WorkerCapacity{CpuMilli: 1_000}},
-			{SlotId: "slot-b", SandboxClass: "gvisor", Capacity: &ateapipb.WorkerCapacity{MemoryBytes: 1 << 30}},
+			{SlotId: "slot-a", ProfileId: "standard"},
+			{SlotId: "slot-b", ProfileId: "standard"},
 		},
 	}}}
 	admission, err := externalprovider.ValidateConnectAdmission(claim, frame)

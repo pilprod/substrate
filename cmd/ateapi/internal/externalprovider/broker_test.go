@@ -47,6 +47,10 @@ type fakeStore struct {
 	revokeRegistration      func(context.Context, string) error
 }
 
+func testExternalProviderScope(maxSlots uint32) Scope {
+	return validSessionClaim(maxSlots).Registration.Scope
+}
+
 func (f *fakeStore) CreateExternalProviderEnrollment(ctx context.Context, uid string, digest CredentialDigest, scope Scope, ttl time.Duration) (Enrollment, error) {
 	f.mu.Lock()
 	f.createCalls++
@@ -90,7 +94,7 @@ func (f *fakeStore) RevokeExternalProviderRegistration(ctx context.Context, uid 
 }
 
 func TestIssuerStoresOnlyEnrollmentDigest(t *testing.T) {
-	scope := Scope{OwnerAtespace: "tenant-a", WorkerNamespace: "workers", WorkerPool: "pool-a", MaxSlots: 4}
+	scope := testExternalProviderScope(4)
 	expiresAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	credential := testCredential(0x21)
 	store := &fakeStore{
@@ -130,7 +134,7 @@ func TestIssuedEnrollmentRedactsCredential(t *testing.T) {
 		UID:        "enrollment-a",
 		Credential: SecretCredential{value: credential},
 		ExpiresAt:  time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC),
-		Scope:      Scope{OwnerAtespace: "tenant-a", WorkerNamespace: "workers", WorkerPool: "pool-a", MaxSlots: 1},
+		Scope:      testExternalProviderScope(1),
 	}
 	encoded, err := json.Marshal(issued)
 	if err != nil {
@@ -156,9 +160,7 @@ func TestIssuedEnrollmentRedactsCredential(t *testing.T) {
 
 func TestCredentialTTLsAreBounded(t *testing.T) {
 	issuer := newIssuer(&fakeStore{}, bytes.NewReader(make([]byte, 64)))
-	_, err := issuer.IssueEnrollment(context.Background(), Scope{
-		OwnerAtespace: "tenant-a", WorkerNamespace: "workers", WorkerPool: "pool-a", MaxSlots: 1,
-	}, MaxEnrollmentTTL+time.Microsecond)
+	_, err := issuer.IssueEnrollment(context.Background(), testExternalProviderScope(1), MaxEnrollmentTTL+time.Microsecond)
 	if err == nil {
 		t.Fatal("IssueEnrollment() accepted TTL above MaxEnrollmentTTL")
 	}
@@ -196,6 +198,7 @@ func TestBrokerEnrollAndMint(t *testing.T) {
 	refresh := testCredential(0x41)
 	session := testCredential(0x51)
 	expiresAt := time.Date(2026, 8, 26, 12, 5, 0, 0, time.UTC)
+	scope := testExternalProviderScope(4)
 	store := &fakeStore{
 		consume: func(_ context.Context, digest CredentialDigest, uid string, refreshDigest CredentialDigest) (Registration, error) {
 			if got, want := digest, digestCredential(enrollmentDigestDomain, enrollment); got != want {
@@ -204,7 +207,7 @@ func TestBrokerEnrollAndMint(t *testing.T) {
 			if got, want := refreshDigest, digestCredential(refreshDigestDomain, refresh); got != want {
 				t.Errorf("refresh digest = %x, want %x", got, want)
 			}
-			return Registration{UID: uid}, nil
+			return Registration{UID: uid, Scope: scope}, nil
 		},
 		rotate: func(_ context.Context, uid string, refreshDigest, sessionDigest CredentialDigest, ttl time.Duration) (SessionAuthorization, error) {
 			if got, want := refreshDigest, digestCredential(refreshDigestDomain, refresh); got != want {
@@ -216,7 +219,7 @@ func TestBrokerEnrollAndMint(t *testing.T) {
 			if ttl != 5*time.Minute {
 				t.Errorf("session TTL = %v, want 5m", ttl)
 			}
-			return SessionAuthorization{Registration: Registration{UID: uid}, ExpiresAt: expiresAt}, nil
+			return SessionAuthorization{Registration: Registration{UID: uid, Scope: scope}, ExpiresAt: expiresAt}, nil
 		},
 	}
 	// Enroll consumes 32 bytes for refresh and 16 for the UUID. Mint consumes
@@ -236,6 +239,9 @@ func TestBrokerEnrollAndMint(t *testing.T) {
 	if enrollResponse.GetRegistrationUid() == "" {
 		t.Fatal("registration UID is empty")
 	}
+	if enrollResponse.GetSlotPolicy().GetDigest() != scope.SlotPolicy.DigestHex() {
+		t.Fatalf("enrollment slot policy digest = %q, want %q", enrollResponse.GetSlotPolicy().GetDigest(), scope.SlotPolicy.DigestHex())
+	}
 
 	mintResponse, err := broker.MintSessionToken(
 		bearerContext("authorization", "Bearer "+string(refresh)),
@@ -249,6 +255,9 @@ func TestBrokerEnrollAndMint(t *testing.T) {
 	}
 	if got := mintResponse.GetExpiresAt().AsTime(); !got.Equal(expiresAt) {
 		t.Errorf("expires_at = %v, want %v", got, expiresAt)
+	}
+	if mintResponse.GetSlotPolicy().GetDigest() != scope.SlotPolicy.DigestHex() {
+		t.Fatalf("mint slot policy digest = %q, want %q", mintResponse.GetSlotPolicy().GetDigest(), scope.SlotPolicy.DigestHex())
 	}
 }
 
@@ -295,7 +304,7 @@ func TestFakeStoreSessionClaimReturnsOnlyAuthority(t *testing.T) {
 		Registration: Registration{
 			UID:           "registration-a",
 			EnrollmentUID: "enrollment-a",
-			Scope:         Scope{OwnerAtespace: "tenant-a", WorkerNamespace: "workers", WorkerPool: "pool-a", MaxSlots: 4},
+			Scope:         testExternalProviderScope(4),
 		},
 		Generation: 7,
 	}

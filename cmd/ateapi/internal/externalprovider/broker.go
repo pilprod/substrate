@@ -89,6 +89,7 @@ func (b *Broker) Enroll(ctx context.Context, req *externalproviderpb.EnrollReque
 			return &externalproviderpb.EnrollResponse{
 				RegistrationUid:   registration.UID,
 				RefreshCredential: refreshCredential,
+				SlotPolicy:        registration.Scope.SlotPolicy.Proto(),
 			}, nil
 		}
 		clear(refreshCredential)
@@ -131,6 +132,7 @@ func (b *Broker) MintSessionToken(ctx context.Context, req *externalproviderpb.M
 			return &externalproviderpb.MintSessionTokenResponse{
 				SessionToken: sessionCredential,
 				ExpiresAt:    timestamppb.New(authorization.ExpiresAt),
+				SlotPolicy:   authorization.Registration.Scope.SlotPolicy.Proto(),
 			}, nil
 		}
 		clear(sessionCredential)

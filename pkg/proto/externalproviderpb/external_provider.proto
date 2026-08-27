@@ -63,6 +63,12 @@ message EnrollResponse {
   // 1..4096 unpadded base64url bytes as a secret and sends them as the Bearer
   // token.
   bytes refresh_credential = 2 [ debug_redact = true ];
+
+  // slot_policy is the immutable, server-owned capability policy bound to the
+  // new registration. Clients may reference its profile IDs but cannot extend
+  // the sandbox classes, scheduling labels, slot counts, or exact capacities
+  // granted by it.
+  SlotCapabilityPolicy slot_policy = 3;
 }
 
 message MintSessionTokenRequest {
@@ -82,6 +88,10 @@ message MintSessionTokenResponse {
   // checked only during the Connect handshake and does not terminate an
   // already accepted stream.
   google.protobuf.Timestamp expires_at = 2;
+
+  // slot_policy repeats the immutable registration policy so a client can
+  // recover its non-secret profile configuration without re-enrollment.
+  SlotCapabilityPolicy slot_policy = 3;
 }
 
 // ClientFrame is one frame sent by the external provider.
@@ -149,9 +159,14 @@ message ConnectHello {
   string registration_uid = 1;
   repeated ExternalSlot slots = 2;
 
-  // protocol_version MUST equal 1. Unsupported versions reject the whole
+  // protocol_version MUST equal 2. Unsupported versions reject the whole
   // Connect handshake before any Worker or channel state is changed.
   uint32 protocol_version = 3;
+
+  // slot_policy_digest MUST equal the lowercase SHA-256 digest issued for the
+  // authenticated registration. It prevents a client from silently using a
+  // stale profile interpretation.
+  string slot_policy_digest = 4;
 }
 
 // ExternalSlot is provider-neutral scheduling information for one stable slot.
@@ -163,18 +178,41 @@ message ExternalSlot {
   // letters, digits, '.', '_', '~', or '-'.
   string slot_id = 1;
 
-  // sandbox_class is an opaque scheduling class, not a runtime/product enum.
-  // It is at most 253 UTF-8 bytes.
+  // sandbox_class is reserved for the pre-policy wire shape and MUST be empty.
+  // The broker derives the trusted sandbox class from profile_id.
   string sandbox_class = 2;
 
-  // labels are provider-neutral scheduling attributes. At most 64 entries are
-  // allowed. Keys and values MUST satisfy Kubernetes label key and label value
-  // syntax so existing ateapi equality selectors can match them.
+  // labels is reserved for the pre-policy wire shape and MUST be empty. The
+  // broker derives trusted scheduling labels from profile_id and the pinned
+  // WorkerPool.
   map<string, string> labels = 3;
 
-  // capacity is the compute capacity exposed by this one slot. CPU and memory
-  // values MUST be nonnegative and have the ateapi.WorkerCapacity semantics.
+  // capacity is reserved for the pre-policy wire shape and MUST be absent. The
+  // broker derives exact trusted capacity from profile_id.
   ateapi.WorkerCapacity capacity = 4;
+
+  // profile_id selects one profile from the registration's immutable
+  // server-owned slot policy.
+  string profile_id = 5;
+}
+
+// SlotCapabilityPolicy is immutable authority issued by the server at
+// enrollment. Profiles are sorted by profile_id and digest is the lowercase
+// SHA-256 of the server's versioned canonical encoding.
+message SlotCapabilityPolicy {
+  uint32 version = 1;
+  string digest = 2;
+  repeated SlotProfile profiles = 3;
+}
+
+// SlotProfile grants a bounded, provider-neutral scheduling capability. A
+// launcher or product name is not a sandbox class.
+message SlotProfile {
+  string profile_id = 1;
+  string sandbox_class = 2;
+  map<string, string> labels = 3;
+  uint32 max_slots = 4;
+  ateapi.WorkerCapacity capacity = 5;
 }
 
 // ConnectReady accepts a valid hello and publishes limits for this generation.

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -31,7 +30,18 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func validSessionClaim(maxSlots uint32) SessionClaim {
+func validSessionClaim(scopeMaxSlots uint32) SessionClaim {
+	policy, err := NewSlotCapabilityPolicy(SlotCapabilityPolicyVersion, []SlotProfile{{
+		ProfileID:    "standard",
+		SandboxClass: "gvisor",
+		Labels:       map[string]string{"region": "south", "topology.example/zone": "zone-a"},
+		MaxSlots:     maxSlots,
+		CPUMilli:     2_000,
+		MemoryBytes:  4 << 30,
+	}})
+	if err != nil {
+		panic(err)
+	}
 	return SessionClaim{
 		Registration: Registration{
 			UID:           "registration-a",
@@ -40,7 +50,8 @@ func validSessionClaim(maxSlots uint32) SessionClaim {
 				OwnerAtespace:   "tenant-a",
 				WorkerNamespace: "workers",
 				WorkerPool:      "pool-a",
-				MaxSlots:        maxSlots,
+				MaxSlots:        scopeMaxSlots,
+				SlotPolicy:      policy,
 			},
 		},
 		Generation: 7,
@@ -49,22 +60,19 @@ func validSessionClaim(maxSlots uint32) SessionClaim {
 
 func validExternalSlot(id string) *externalproviderpb.ExternalSlot {
 	return &externalproviderpb.ExternalSlot{
-		SlotId:       id,
-		SandboxClass: "gvisor",
-		Labels: map[string]string{
-			"region":                "south",
-			"topology.example/zone": "zone-a",
-		},
-		Capacity: &ateapipb.WorkerCapacity{CpuMilli: 2_000, MemoryBytes: 4 << 30},
+		SlotId:    id,
+		ProfileId: "standard",
 	}
 }
 
 func validClientFrame() *externalproviderpb.ClientFrame {
+	claim := validSessionClaim(1)
 	return &externalproviderpb.ClientFrame{
 		Frame: &externalproviderpb.ClientFrame_Hello{Hello: &externalproviderpb.ConnectHello{
-			RegistrationUid: "registration-a",
-			ProtocolVersion: connectProtocolVersion,
-			Slots:           []*externalproviderpb.ExternalSlot{validExternalSlot("slot-a")},
+			RegistrationUid:  "registration-a",
+			ProtocolVersion:  connectProtocolVersion,
+			SlotPolicyDigest: claim.Registration.Scope.SlotPolicy.DigestHex(),
+			Slots:            []*externalproviderpb.ExternalSlot{validExternalSlot("slot-a")},
 		}},
 	}
 }
@@ -87,11 +95,6 @@ func requireInvalidAdmission(t *testing.T, claim SessionClaim, frame *externalpr
 func TestValidateConnectAdmissionNormalizesHello(t *testing.T) {
 	claim := validSessionClaim(4)
 	frame := validClientFrame()
-	frame.GetHello().Slots[0].Labels = map[string]string{
-		"z.example/key": "last",
-		"a":             "",
-	}
-
 	admission, err := ValidateConnectAdmission(claim, frame)
 	if err != nil {
 		t.Fatalf("ValidateConnectAdmission() error = %v", err)
@@ -109,18 +112,21 @@ func TestValidateConnectAdmissionNormalizesHello(t *testing.T) {
 	if got := slots[0].SlotID(); got != "slot-a" {
 		t.Errorf("SlotID() = %q, want slot-a", got)
 	}
+	if got := slots[0].ProfileID(); got != "standard" {
+		t.Errorf("ProfileID() = %q, want standard", got)
+	}
 	if got := slots[0].SandboxClass(); got != "gvisor" {
 		t.Errorf("SandboxClass() = %q, want gvisor", got)
 	}
-	wantLabels := map[string]string{"a": "", "z.example/key": "last"}
+	wantLabels := map[string]string{"region": "south", "topology.example/zone": "zone-a"}
 	if got := slots[0].Labels(); !maps.Equal(got, wantLabels) {
 		t.Errorf("Labels() = %v, want %v", got, wantLabels)
 	}
 	if got, want := slots[0].Capacity(), (&ateapipb.WorkerCapacity{CpuMilli: 2_000, MemoryBytes: 4 << 30}); !proto.Equal(got, want) {
 		t.Errorf("Capacity() = %v, want %v", got, want)
 	}
-	if got := []string{slots[0].labels[0].key, slots[0].labels[1].key}; !slices.Equal(got, []string{"a", "z.example/key"}) {
-		t.Errorf("normalized label order = %v, want [a z.example/key]", got)
+	if got := []string{slots[0].labels[0].key, slots[0].labels[1].key}; !slices.Equal(got, []string{"region", "topology.example/zone"}) {
+		t.Errorf("normalized label order = %v, want [region topology.example/zone]", got)
 	}
 }
 
@@ -136,7 +142,7 @@ func TestPrevalidateConnectHelloSeparatesCredentialFreeChecks(t *testing.T) {
 	// while Connect performs the one-time credential claim.
 	frame.GetHello().RegistrationUid = "registration-mutated"
 	frame.GetHello().Slots[0].SlotId = "slot-mutated"
-	frame.GetHello().Slots[0].Labels["region"] = "mutated"
+	frame.GetHello().Slots[0].ProfileId = "mutated"
 	claim := validSessionClaim(2)
 	admission, err := validatePrevalidatedConnectAdmission(claim, prevalidated)
 	if err != nil {
@@ -212,7 +218,7 @@ func TestValidateConnectAdmissionRejectsInvalidClaimAndFirstFrame(t *testing.T) 
 		{name: "missing frame member", path: "frame", edit: func(frame *externalproviderpb.ClientFrame) { frame.Frame = nil }},
 		{name: "nil hello", path: "frame", edit: func(frame *externalproviderpb.ClientFrame) { frame.Frame = &externalproviderpb.ClientFrame_Hello{} }},
 		{name: "protocol zero", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 0 }},
-		{name: "unsupported protocol", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 2 }},
+		{name: "unsupported protocol", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 3 }},
 		{name: "registration mismatch", path: "registration_uid", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().RegistrationUid = "registration-b" }},
 		{name: "no slots", path: "frame.hello.slots", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().Slots = nil }},
 		{name: "over authenticated slot limit", path: "frame.hello.slots", edit: func(frame *externalproviderpb.ClientFrame) {
@@ -335,8 +341,13 @@ func TestValidateConnectAdmissionSlotRules(t *testing.T) {
 		{name: "invalid label value", path: "labels", edit: func(hello *externalproviderpb.ConnectHello) {
 			hello.Slots[0].Labels = map[string]string{"key": "bad value"}
 		}},
-		{name: "negative CPU", path: "cpu_milli", edit: func(hello *externalproviderpb.ConnectHello) { hello.Slots[0].Capacity.CpuMilli = -1 }},
-		{name: "negative memory", path: "memory_bytes", edit: func(hello *externalproviderpb.ConnectHello) { hello.Slots[0].Capacity.MemoryBytes = -1 }},
+		{name: "empty profile", path: "profile_id", edit: func(hello *externalproviderpb.ConnectHello) { hello.Slots[0].ProfileId = "" }},
+		{name: "uppercase policy digest", path: "slot_policy_digest", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.SlotPolicyDigest = strings.ToUpper(hello.SlotPolicyDigest)
+		}},
+		{name: "capacity spoof", path: "capacity", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.Slots[0].Capacity = &ateapipb.WorkerCapacity{CpuMilli: 1, MemoryBytes: 1}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -347,36 +358,49 @@ func TestValidateConnectAdmissionSlotRules(t *testing.T) {
 	}
 }
 
-func TestValidateConnectAdmissionPublishedPermissiveBoundaries(t *testing.T) {
-	frame := validClientFrame()
-	slot := frame.GetHello().Slots[0]
-	slot.SlotId = strings.Repeat("a", 253)
-	if !IsValidIdentity(slot.SlotId) {
-		t.Fatalf("test slot ID is invalid: %q", slot.SlotId)
+func TestValidateConnectAdmissionEnforcesAuthenticatedProfile(t *testing.T) {
+	claim := validSessionClaim(2)
+	tests := []struct {
+		name string
+		path string
+		edit func(*externalproviderpb.ConnectHello)
+	}{
+		{name: "stale policy digest", path: "slot_policy_digest", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.SlotPolicyDigest = strings.Repeat("0", capabilityPolicyDigestHex)
+		}},
+		{name: "unknown profile", path: "profile_id", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.Slots[0].ProfileId = "admin"
+		}},
+		{name: "sandbox spoof", path: "sandbox_class", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.Slots[0].SandboxClass = "privileged"
+		}},
+		{name: "label spoof", path: "labels", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.Slots[0].Labels = map[string]string{"security.example/tier": "trusted"}
+		}},
+		{name: "capacity spoof", path: "capacity", edit: func(hello *externalproviderpb.ConnectHello) {
+			hello.Slots[0].Capacity = &ateapipb.WorkerCapacity{CpuMilli: 8_001, MemoryBytes: 16<<30 + 1}
+		}},
 	}
-	// Empty is not forbidden by the published opaque sandbox_class contract or
-	// by ateapi.Worker semantics.
-	slot.SandboxClass = ""
-	slot.Labels = map[string]string{"example.com/key": "", "key": strings.Repeat("a", 63)}
-	slot.Capacity = &ateapipb.WorkerCapacity{CpuMilli: math.MaxInt64, MemoryBytes: math.MaxInt64}
-	if _, err := ValidateConnectAdmission(validSessionClaim(1), frame); err != nil {
-		t.Fatalf("ValidateConnectAdmission(permissive boundaries) error = %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			frame := validClientFrame()
+			test.edit(frame.GetHello())
+			requireInvalidAdmission(t, claim, frame, test.path)
+		})
 	}
 
-	frame = validClientFrame()
-	frame.GetHello().Slots[0].SandboxClass = strings.Repeat("é", 126) + "a"
-	frame.GetHello().Slots[0].Labels = make(map[string]string, maxSlotLabels)
-	for index := range maxSlotLabels {
-		frame.GetHello().Slots[0].Labels[fmt.Sprintf("label-%02d", index)] = "value"
-	}
-	frame.GetHello().Slots[0].Capacity = nil
-	admission, err := ValidateConnectAdmission(validSessionClaim(1), frame)
+	limitedPolicy, err := NewSlotCapabilityPolicy(SlotCapabilityPolicyVersion, []SlotProfile{
+		{ProfileID: "standard", SandboxClass: "gvisor", MaxSlots: 1, CPUMilli: 8_000, MemoryBytes: 16 << 30},
+		{ProfileID: "unused", SandboxClass: "gvisor", MaxSlots: 1, CPUMilli: 8_000, MemoryBytes: 16 << 30},
+	})
 	if err != nil {
-		t.Fatalf("ValidateConnectAdmission(max labels/UTF-8 sandbox/nil capacity) error = %v", err)
+		t.Fatal(err)
 	}
-	if got := admission.Slots()[0].Capacity(); got.GetCpuMilli() != 0 || got.GetMemoryBytes() != 0 {
-		t.Errorf("nil capacity normalized to %v, want zero capacity", got)
-	}
+	claim.Registration.Scope.SlotPolicy = limitedPolicy
+	frame := validClientFrame()
+	frame.GetHello().SlotPolicyDigest = limitedPolicy.DigestHex()
+	frame.GetHello().Slots = []*externalproviderpb.ExternalSlot{validExternalSlot("slot-a"), validExternalSlot("slot-b")}
+	requireInvalidAdmission(t, claim, frame, "profile_id")
 }
 
 func TestConnectAdmissionDoesNotAliasInputOrAccessors(t *testing.T) {
@@ -392,11 +416,9 @@ func TestConnectAdmissionDoesNotAliasInputOrAccessors(t *testing.T) {
 	sourceSlot := frame.GetHello().Slots[0]
 	frame.GetHello().RegistrationUid = "registration-mutated"
 	sourceSlot.SlotId = "slot-mutated"
-	sourceSlot.SandboxClass = "sandbox-mutated"
-	sourceSlot.Labels["region"] = "mutated"
-	sourceSlot.Labels["new"] = "value"
-	sourceSlot.Capacity.CpuMilli = 1
-	sourceSlot.Capacity.MemoryBytes = 2
+	sourceSlot.ProfileId = "profile-mutated"
+	sourceSlot.Labels = map[string]string{"region": "mutated"}
+	sourceSlot.Capacity = &ateapipb.WorkerCapacity{CpuMilli: 1, MemoryBytes: 2}
 
 	first := admission.Slots()
 	first[0].slotID = "returned-slot-mutated"

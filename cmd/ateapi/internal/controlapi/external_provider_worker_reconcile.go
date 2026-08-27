@@ -49,7 +49,7 @@ var _ externalprovider.WorkerPlanReconciler = (*RPCService)(nil)
 // ReconcileExternalWorkers idempotently creates or refreshes the durable
 // ExternalSlot Workers in plan. New Workers start OFFLINE. Existing status,
 // assignment, and server metadata are preserved; only the provider-owned
-// sandbox class and effective client-plus-pool labels are refreshed after
+// sandbox class and effective policy-plus-pool labels are refreshed after
 // immutable identity validation.
 //
 // Slots missing from plan are deliberately untouched. Session teardown owns
@@ -115,7 +115,7 @@ func reconcileExternalWorkers(
 }
 
 // effectiveExternalWorkers overlays the authenticated pool's server-owned
-// labels on client capacity labels. Every candidate is validated before the
+// labels on registration-policy labels. Every candidate is validated before the
 // caller performs a Worker read or write, so one malformed slot cannot leave a
 // partially reconciled plan.
 func effectiveExternalWorkers(planned []*ateapipb.Worker, poolLabels map[string]string) ([]*ateapipb.Worker, error) {
@@ -147,22 +147,22 @@ func effectiveExternalWorkers(planned []*ateapipb.Worker, poolLabels map[string]
 	return effective, nil
 }
 
-func mergeExternalWorkerLabels(clientLabels, poolLabels map[string]string) (map[string]string, error) {
+func mergeExternalWorkerLabels(profileLabels, poolLabels map[string]string) (map[string]string, error) {
 	poolKeys := make([]string, 0, len(poolLabels))
 	for key := range poolLabels {
 		poolKeys = append(poolKeys, key)
 	}
 	slices.Sort(poolKeys)
 	for _, key := range poolKeys {
-		if _, collision := clientLabels[key]; collision {
-			return nil, fmt.Errorf("client label collides with server-owned WorkerPool label %q", key)
+		if _, collision := profileLabels[key]; collision {
+			return nil, fmt.Errorf("slot profile label collides with server-owned WorkerPool label %q", key)
 		}
 	}
-	if len(clientLabels)+len(poolLabels) > maxExternalWorkerLabels {
+	if len(profileLabels)+len(poolLabels) > maxExternalWorkerLabels {
 		return nil, fmt.Errorf("merged labels exceed %d entries", maxExternalWorkerLabels)
 	}
 
-	labels := maps.Clone(clientLabels)
+	labels := maps.Clone(profileLabels)
 	if labels == nil && len(poolLabels) != 0 {
 		labels = make(map[string]string, len(poolLabels))
 	}

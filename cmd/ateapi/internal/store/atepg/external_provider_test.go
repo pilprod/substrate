@@ -35,11 +35,23 @@ func externalProviderDigest(fill byte) externalprovider.CredentialDigest {
 }
 
 func externalProviderScope() externalprovider.Scope {
+	policy, err := externalprovider.NewSlotCapabilityPolicy(externalprovider.SlotCapabilityPolicyVersion, []externalprovider.SlotProfile{{
+		ProfileID:    "standard",
+		SandboxClass: "gvisor",
+		Labels:       map[string]string{"security.example/tier": "managed"},
+		MaxSlots:     4,
+		CPUMilli:     4_000,
+		MemoryBytes:  16 << 30,
+	}})
+	if err != nil {
+		panic(err)
+	}
 	return externalprovider.Scope{
 		OwnerAtespace:   "tenant-a",
 		WorkerNamespace: "workers",
 		WorkerPool:      "pool-a",
 		MaxSlots:        4,
+		SlotPolicy:      policy,
 	}
 }
 
@@ -68,6 +80,16 @@ func TestExternalProviderStoreLifecycle(t *testing.T) {
 	}
 	if !enrollment.ExpiresAt.After(time.Now()) {
 		t.Errorf("enrollment expiry = %v, want future DB-clock expiry", enrollment.ExpiresAt)
+	}
+	var storedPolicy, storedPolicyDigest []byte
+	if err := persistence.pool.QueryRow(ctx, `
+		SELECT slot_policy_canonical, slot_policy_digest
+		FROM external_provider_enrollments
+		WHERE enrollment_uid = $1`, enrollment.UID).Scan(&storedPolicy, &storedPolicyDigest); err != nil {
+		t.Fatalf("reading enrollment slot policy: %v", err)
+	}
+	if !bytes.Equal(storedPolicy, scope.SlotPolicy.CanonicalBytes()) || !bytes.Equal(storedPolicyDigest, scope.SlotPolicy.DigestBytes()) {
+		t.Fatalf("stored slot policy/digest = %s/%x, want %s/%x", storedPolicy, storedPolicyDigest, scope.SlotPolicy.CanonicalBytes(), scope.SlotPolicy.DigestBytes())
 	}
 
 	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-a", refreshDigest)
@@ -137,6 +159,29 @@ func TestExternalProviderStoreLifecycle(t *testing.T) {
 	}
 	if revokedDigest != nil || revokedSessionExpiry != nil || revokedSessionConsumed != nil {
 		t.Errorf("direct revoke retained session state: digest=%x expiry=%v consumed=%v", revokedDigest, revokedSessionExpiry, revokedSessionConsumed)
+	}
+}
+
+func TestExternalProviderStoreRejectsCorruptPersistedSlotPolicy(t *testing.T) {
+	persistence := setupExternalProviderPersistence(t)
+	ctx := context.Background()
+	enrollmentDigest := externalProviderDigest(101)
+	refreshDigest := externalProviderDigest(102)
+	if _, err := persistence.CreateExternalProviderEnrollment(ctx, "enrollment-policy-corrupt", enrollmentDigest, externalProviderScope(), time.Hour); err != nil {
+		t.Fatalf("creating enrollment: %v", err)
+	}
+	registration, err := persistence.ConsumeExternalProviderEnrollment(ctx, enrollmentDigest, "registration-policy-corrupt", refreshDigest)
+	if err != nil {
+		t.Fatalf("consuming enrollment: %v", err)
+	}
+	if _, err := persistence.pool.Exec(ctx, `
+		UPDATE external_provider_registrations
+		SET slot_policy_digest = $2
+		WHERE registration_uid = $1`, registration.UID, make([]byte, 32)); err != nil {
+		t.Fatalf("corrupting registration policy digest: %v", err)
+	}
+	if _, err := persistence.RotateExternalProviderSession(ctx, registration.UID, refreshDigest, externalProviderDigest(103), time.Minute); !errors.Is(err, externalprovider.ErrInvalidSlotCapabilityPolicy) {
+		t.Fatalf("RotateExternalProviderSession() error = %v, want invalid slot policy", err)
 	}
 }
 

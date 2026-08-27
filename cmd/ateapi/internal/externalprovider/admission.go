@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"unicode/utf8"
 
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -29,7 +28,7 @@ import (
 )
 
 const (
-	connectProtocolVersion = 1
+	connectProtocolVersion = 2
 	maxClientFrameBytes    = 1 << 20
 	maxSlotLabels          = 64
 	maxSandboxClassBytes   = 253
@@ -55,7 +54,13 @@ type ConnectAdmission struct {
 // malformed hello never burns a one-time session token.
 type prevalidatedConnectHello struct {
 	registrationUID string
-	slots           []AdmittedSlot
+	policyDigest    string
+	slots           []prevalidatedSlot
+}
+
+type prevalidatedSlot struct {
+	slotID    string
+	profileID string
 }
 
 // Registration returns the authenticated registration and immutable scope.
@@ -86,6 +91,7 @@ type admittedLabel struct {
 // Map and protobuf accessors allocate fresh values on every call.
 type AdmittedSlot struct {
 	slotID       string
+	profileID    string
 	sandboxClass string
 	labels       []admittedLabel
 	cpuMilli     int64
@@ -95,6 +101,11 @@ type AdmittedSlot struct {
 // SlotID returns the registration-scoped stable slot identity.
 func (s AdmittedSlot) SlotID() string {
 	return s.slotID
+}
+
+// ProfileID returns the server-issued profile selected for this slot.
+func (s AdmittedSlot) ProfileID() string {
+	return s.profileID
 }
 
 // SandboxClass returns the opaque scheduling class.
@@ -111,8 +122,7 @@ func (s AdmittedSlot) Labels() map[string]string {
 	return labels
 }
 
-// Capacity returns a fresh WorkerCapacity message. Zero fields retain the
-// ateapi meaning of unknown or unconstrained capacity.
+// Capacity returns a fresh copy of the exact server-issued positive capacity.
 func (s AdmittedSlot) Capacity() *ateapipb.WorkerCapacity {
 	return &ateapipb.WorkerCapacity{
 		CpuMilli:    s.cpuMilli,
@@ -155,10 +165,13 @@ func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidat
 	}
 	hello := helloFrame.Hello
 	if hello.GetProtocolVersion() != connectProtocolVersion {
-		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 1")
+		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 2")
 	}
 	if !IsValidIdentity(hello.GetRegistrationUid()) {
 		return nil, invalidConnectAdmission("frame.hello.registration_uid", "has invalid identity syntax")
+	}
+	if !isCapabilityPolicyDigest(hello.GetSlotPolicyDigest()) {
+		return nil, invalidConnectAdmission("frame.hello.slot_policy_digest", "must be a lowercase SHA-256 digest")
 	}
 
 	slots := hello.GetSlots()
@@ -169,7 +182,7 @@ func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidat
 		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the protocol slot limit")
 	}
 
-	normalized := make([]AdmittedSlot, len(slots))
+	normalized := make([]prevalidatedSlot, len(slots))
 	for index, slot := range slots {
 		path := fmt.Sprintf("frame.hello.slots[%d]", index)
 		if slot == nil {
@@ -189,36 +202,28 @@ func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidat
 			}
 		}
 
-		sandboxClass := slot.GetSandboxClass()
-		if !utf8.ValidString(sandboxClass) {
-			return nil, invalidConnectAdmission(path+".sandbox_class", "must be valid UTF-8")
+		if slot.GetSandboxClass() != "" {
+			return nil, invalidConnectAdmission(path+".sandbox_class", "is server-owned and must be empty")
 		}
-		if len(sandboxClass) > maxSandboxClassBytes {
-			return nil, invalidConnectAdmission(path+".sandbox_class", "exceeds 253 UTF-8 bytes")
+		if len(slot.GetLabels()) != 0 {
+			return nil, invalidConnectAdmission(path+".labels", "are server-owned and must be empty")
 		}
-
-		labels, err := normalizeAdmissionLabels(path+".labels", slot.GetLabels())
-		if err != nil {
-			return nil, err
+		profileID := slot.GetProfileId()
+		if !IsValidIdentity(profileID) {
+			return nil, invalidConnectAdmission(path+".profile_id", "has invalid identity syntax")
 		}
-		capacity := slot.GetCapacity()
-		if capacity.GetCpuMilli() < 0 {
-			return nil, invalidConnectAdmission(path+".capacity.cpu_milli", "must be nonnegative")
+		if slot.GetCapacity() != nil {
+			return nil, invalidConnectAdmission(path+".capacity", "is server-owned and must be absent")
 		}
-		if capacity.GetMemoryBytes() < 0 {
-			return nil, invalidConnectAdmission(path+".capacity.memory_bytes", "must be nonnegative")
-		}
-		normalized[index] = AdmittedSlot{
-			slotID:       slotID,
-			sandboxClass: sandboxClass,
-			labels:       labels,
-			cpuMilli:     capacity.GetCpuMilli(),
-			memoryBytes:  capacity.GetMemoryBytes(),
+		normalized[index] = prevalidatedSlot{
+			slotID:    slotID,
+			profileID: profileID,
 		}
 	}
 
 	return &prevalidatedConnectHello{
 		registrationUID: hello.GetRegistrationUid(),
+		policyDigest:    hello.GetSlotPolicyDigest(),
 		slots:           normalized,
 	}, nil
 }
@@ -233,14 +238,38 @@ func validatePrevalidatedConnectAdmission(claim SessionClaim, hello *prevalidate
 	if hello.registrationUID != claim.Registration.UID {
 		return nil, invalidConnectAdmission("frame.hello.registration_uid", "does not match the authenticated registration")
 	}
+	policy := claim.Registration.Scope.SlotPolicy
+	if hello.policyDigest != policy.DigestHex() {
+		return nil, invalidConnectAdmission("frame.hello.slot_policy_digest", "does not match the authenticated registration")
+	}
 	slotLimit := claim.Registration.Scope.MaxSlots
 	if uint64(len(hello.slots)) > uint64(slotLimit) {
 		return nil, invalidConnectAdmission("frame.hello.slots", "exceeds the authenticated slot limit")
 	}
 
+	profileCounts := make(map[string]uint32)
 	admittedSlots := make([]AdmittedSlot, len(hello.slots))
-	for index := range hello.slots {
-		admittedSlots[index] = hello.slots[index].clone()
+	for index, slot := range hello.slots {
+		profile, found := policy.profile(slot.profileID)
+		if !found {
+			return nil, invalidConnectAdmission(fmt.Sprintf("frame.hello.slots[%d].profile_id", index), "is not granted by the authenticated registration")
+		}
+		profileCounts[profile.ProfileID]++
+		if profileCounts[profile.ProfileID] > profile.MaxSlots {
+			return nil, invalidConnectAdmission(fmt.Sprintf("frame.hello.slots[%d].profile_id", index), "exceeds the profile slot limit")
+		}
+		labels, err := normalizeAdmissionLabels(fmt.Sprintf("claim.registration.scope.slot_policy.profiles[%s].labels", profile.ProfileID), profile.Labels)
+		if err != nil {
+			return nil, err
+		}
+		admittedSlots[index] = AdmittedSlot{
+			slotID:       slot.slotID,
+			profileID:    profile.ProfileID,
+			sandboxClass: profile.SandboxClass,
+			labels:       labels,
+			cpuMilli:     profile.CPUMilli,
+			memoryBytes:  profile.MemoryBytes,
+		}
 	}
 	return &ConnectAdmission{
 		registration: claim.Registration,
@@ -271,6 +300,16 @@ func validateAdmissionClaim(claim SessionClaim) error {
 	}
 	if registration.Scope.MaxSlots == 0 || registration.Scope.MaxSlots > uint32(maxSlots) {
 		return invalidConnectAdmission("claim.registration.scope.max_slots", "must be between 1 and 256")
+	}
+	if err := registration.Scope.SlotPolicy.Validate(); err != nil {
+		return invalidConnectAdmission("claim.registration.scope.slot_policy", "is invalid")
+	}
+	var grantedSlots uint64
+	for _, profile := range registration.Scope.SlotPolicy.Profiles() {
+		grantedSlots += uint64(profile.MaxSlots)
+	}
+	if grantedSlots < uint64(registration.Scope.MaxSlots) {
+		return invalidConnectAdmission("claim.registration.scope.slot_policy", "grants fewer slots than max_slots")
 	}
 	return nil
 }

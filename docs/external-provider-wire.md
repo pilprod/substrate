@@ -9,11 +9,13 @@ engines, endpoints, or routes.
 ## Authentication sequence
 
 1. `Enroll` receives an out-of-band enrollment token in gRPC `authorization`
-   metadata and returns a registration UID plus a refresh credential.
+   metadata and returns a registration UID, refresh credential, and immutable
+   server-owned slot capability policy.
 2. `MintSessionToken` receives that refresh credential in `authorization`
-   metadata and returns a short-lived Connect token.
+   metadata and returns a short-lived Connect token plus the same non-secret
+   registration policy for recovery.
 3. `Connect` receives the short-lived token in `authorization` metadata. Its
-   first client frame is `ConnectHello` with `protocol_version=1`; no credential
+   first client frame is `ConnectHello` with `protocol_version=2`; no credential
    is repeated in a frame. Token expiry is checked only at this handshake and
    does not terminate an already accepted stream.
 
@@ -26,6 +28,20 @@ loss; recovery requires a new token or operator lookup.
 The protobuf `debug_redact` option is a schema marker, not a substitute for
 explicit redaction: implementations must never log credential responses or data
 frames as whole protobuf messages.
+
+### Client profile binding
+
+A managed client persists the server-issued `profile_id` beside each local
+capacity entry and sends it for every derived stable slot. It does not persist
+or choose sandbox class, scheduling labels, CPU, or memory. If a registration
+contains exactly one profile, a client may bind new capacity entries to it
+automatically; heterogeneous policies require an explicit selection from the
+IDs returned by `Enroll` or `MintSessionToken`. An unknown ID is never treated
+as a request to create a profile. The existing `native|docker` launcher choice
+remains local process-management configuration and is not encoded into this
+policy. This requires a managed client configuration revision which adds only
+the cluster-issued profile binding; it does not add client-supplied CPU/memory
+authority.
 
 ## Session and channel ordering
 
@@ -95,22 +111,32 @@ route.
 The ateapi-private admission validator is a pure boundary between the first
 frame, an authenticated session claim, and later Worker reconciliation. It is
 split deliberately around the one-time credential claim. Credential-free
-prevalidation first accepts only a `ClientFrame` containing a protocol-v1
+prevalidation first accepts only a `ClientFrame` containing a protocol-v2
 `ConnectHello` with zero client generation and a serialized size no greater
 than 1 MiB, validates the registration identity, and normalizes a sorted unique
 slot list bounded to `1..256`. A malformed hello is therefore rejected without
 burning its session token. Only after the database claim does the second step
 require the hello registration to equal the authenticated registration and
-enforce `scope.max_slots`.
+enforce `scope.max_slots`, the policy digest, every selected profile, and its
+per-profile slot limit.
 
-Each slot uses the published 253-byte ASCII slot identity grammar, at most 64
-Kubernetes label key/value pairs, and nonnegative ateapi `WorkerCapacity`
-fields. A nil capacity is normalized to zero, retaining ateapi's
-unknown/unconstrained meaning. `sandbox_class` remains provider-neutral and
-opaque: admission requires valid UTF-8 and at most 253 bytes, but does not add
-an undocumented enum or nonempty constraint. The accepted result stores no
-protobuf message or caller-owned map and exposes only copied, non-secret
-registration, generation, slot, label, and capacity data.
+Each declaration contains only a stable 253-byte ASCII `slot_id` and a
+`profile_id` issued by the server. The legacy `sandbox_class`, labels, and
+capacity fields must be empty; any client assertion is rejected before the
+session credential is claimed. Admission resolves exact sandbox class,
+Kubernetes scheduling labels, and positive CPU/memory capacity from the
+registration policy. This supports heterogeneous slots without allowing a
+client to create a privileged class, spoof a scheduling label, or overstate
+capacity. A launcher such as a native process or container engine is never a
+sandbox class.
+
+The policy has a versioned, order-independent canonical encoding: profiles and
+labels are sorted, duplicate IDs are rejected, and a domain-separated SHA-256
+digest is persisted and echoed in `ConnectHello`. Unknown versions,
+noncanonical persistence, digest mismatch, invalid labels, and grants whose
+profile slot total is smaller than `scope.max_slots` fail closed. The accepted
+result stores no protobuf message or caller-owned map and exposes only copied,
+non-secret registration, generation, slot, profile, label, and capacity data.
 
 Neither validator claims a credential, receives a stream frame, reconciles a
 Worker, or changes session/channel state. The future `Connect` owner performs
@@ -126,10 +152,10 @@ separate domain-separated SHA-256 inputs and length framing. The resulting
 lowercase base32 values satisfy the existing Worker validators and do not
 contain or concatenate caller-provided registration or slot strings.
 
-The plan copies the authenticated namespace and pool plus the admitted sandbox
-class, client capacity labels, and capacity, sets provider `ExternalSlot`, and
-leaves status unset so the authoritative CreateWorker path can initialize the
-Worker `OFFLINE`. Client labels are capacity hints only within that pinned pool.
+The plan copies the authenticated namespace and pool plus the policy-derived
+sandbox class, scheduling labels, and exact capacity, sets provider
+`ExternalSlot`, and leaves status unset so the authoritative CreateWorker path
+can initialize the Worker `OFFLINE`.
 Session generation and live routing are deliberately absent from the durable
 identity, so a reconnect resolves the same Worker incarnation. A name collision
 with different immutable provider, scope, capacity, execution, or locality
@@ -142,8 +168,8 @@ drain, or delete Workers, and it does not make `Connect` available.
 The in-process control API reconciler consumes that plan idempotently. Before
 any Worker write, it resolves the exact WorkerPool pinned by the authenticated
 scope and merges its metadata labels into every planned Worker. WorkerPool
-labels are server-owned: a client key collision is rejected even when both
-values match. The complete merged set is bounded to 64 valid Kubernetes labels,
+labels and slot-profile labels are both server-owned; a key collision is
+rejected even when both values match. The complete merged set is bounded to 64 valid Kubernetes labels,
 and every candidate is preflighted before reconciliation starts. Missing or
 invalid pools and listers fail closed.
 
@@ -188,10 +214,11 @@ lease halfway through an availability pass. Conversely, cleanup of a fenced
 lease observes that it is no longer current and performs no Worker mutation;
 the current generation has inherited the conservative ownership set.
 
-Normal cleanup first asks the authoritative directory to compare-and-withdraw
-the exact publication proof. Only after the proof is no longer routable does it
-enter the registry lifecycle gate and attempt to set every owned Worker
-`OFFLINE`. The caller may exact-remove the generation lease afterward. A
+Normal cleanup first changes the exact publication proof from `OPEN` to
+`CLOSING`, which immediately rejects new assignments while retaining its
+bindings. Under the same per-registration lifecycle gate it then sets every
+owned Worker `OFFLINE`, withdraws the route, and fences the lease. The caller
+may exact-remove the generation lease afterward. A
 transition changes only
 `WorkerStatus.state`; the control-plane primitive preserves any Actor assignment
 and uses the stored Worker UID/version preconditions. Before activation, the
@@ -202,24 +229,23 @@ the store's immutable mutation contract prevents those fields from drifting
 within that UID.
 
 Availability changes are separate optimistic writes, not one database
-transaction. On a partial activation failure, the lifecycle withdraws the route
-and immediately attempts `OFFLINE` rollback for every call which may have
-committed, including the failing call. Cleanup continues after individual
-errors and returns deterministic sorted `offlined` and conservative `pending`
-sets. Only `pending` is retained for a retry or inherited by a replacement, so
-state remains bounded by the 256-slot admission limit and cannot accumulate
-across failed generations.
+transaction. On a partial activation failure, the lifecycle closes the route,
+immediately attempts `OFFLINE` rollback for every call which may have committed
+including the failing call, and withdraws only after rollback succeeds. Cleanup
+continues after individual errors and returns deterministic sorted `offlined`
+and conservative `pending` sets. Only `pending` is retained for a retry or
+inherited by a replacement, so state remains bounded by the 256-slot admission
+limit and cannot accumulate across failed generations.
 
-This is deliberately an in-process core. The current ateapi deployment runs
-multiple replicas, so a listener must not enable `Connect` until route and
-Worker ownership have a distributed fencing authority or all sessions for a
-registration are proven to land on one authoritative replica. Process restart
-also loses the conservative set: desired Workers are preflighted safely, but an
-omitted Worker left `ACTIVE` by the old process requires a startup/distributed
-sweeper. This slice consumes only a narrow route-authority interface; it does
-not build a second route directory or binding index. It does not register a
-listener, implement `Connect`, receive or send stream frames, route channels,
-or send `ConnectReady`.
+This is deliberately an in-process core. The default ateapi deployment still
+runs multiple replicas. The opt-in external-provider Broker release profile
+therefore pins ateapi to one replica with `Recreate`, so only one process owns
+session routes at a time; HA requires a future distributed fencing authority.
+Startup recovery makes persisted external Workers `OFFLINE` before Broker
+readiness, and every desired Worker is preflighted `OFFLINE` on reconnect. This
+slice consumes only a narrow route-authority interface; it does not build a
+second route directory or binding index, implement `Connect`, receive or send
+stream frames, route channels, or send `ConnectReady`.
 
 Every newly materialized `WorkerAssignment` also snapshots the selected
 Worker's server-assigned resource UID in `worker_resource_uid`. This is a
@@ -299,22 +325,36 @@ bounded conservative Worker set inherited from a fenced generation. Failed
 setup exact-removes its lease after that best-effort pass; any Workers whose
 OFFLINE write failed remain in the bounded lifecycle tombstone for a newer
 generation to preflight. A successfully established session closes in the
-opposite safety order: compare-and-withdraw its exact route, set owned Workers
-`OFFLINE`, then exact-remove its lease. If OFFLINE fails during normal close,
-the route stays unavailable while the handle retains the lease for an explicit
-bounded retry.
+opposite safety order: mark its exact route `CLOSING`, set owned Workers
+`OFFLINE`, withdraw the route, then exact-remove its lease. If OFFLINE fails
+during normal close, the closed route retains its bindings while remaining
+unavailable and the handle retains the lease for an explicit bounded retry.
 
 The coordinator starts no goroutine and emits no log. Its callback frame and
 all retained state contain no credential or data payload. Existing admission,
 route, registry, channel, and Worker bounds remain authoritative; the
 coordinator adds no second route map or unbounded retry.
 
-This does not make the broker deployable. `Broker.Connect` is still
-`UNIMPLEMENTED`, no listener is registered, and no stream receive/send pump or
-execution channel opener exists. The directory and lease are process-local.
-The current multi-replica ateapi deployment therefore remains unsafe for live
-external-provider routing until a distributed authority or proven singleton
-placement boundary is implemented.
+The dedicated Broker listener is TLS-only, default-disabled, and exposes only
+`ExternalProviderBroker`; `Broker.Connect` remains `UNIMPLEMENTED` and no
+stream receive/send pump or execution channel opener exists. The directory and
+lease are process-local. The opt-in Helm profile therefore uses one ateapi
+replica with `Recreate`; distributed route ownership is required before this
+mode can regain HA or zero-downtime rollout.
+
+## Required workload provider opt-in
+
+Capability profiles constrain an external Worker; they do not by themselves
+authorize an actor to leave Kubernetes-backed capacity. Before the broker is
+enabled, a separate API migration must add an explicit Worker provider
+constraint to ActorTemplate/Actor scheduling authority, default it to
+`KUBERNETES_POD`, propagate it into `scheduling.Constraints`, and require an
+exact match with `Worker.provider`. Only an explicit `EXTERNAL_SLOT` value may
+select these Workers. That migration necessarily updates the public ateapi
+protobuf, Kubernetes ActorTemplate API/CRD and generated code, control-api
+translation/validation, workflow constraint construction, scheduler matching,
+and their compatibility tests; it is intentionally not hidden inside this
+broker-policy slice.
 
 ## Authentication implementation boundary
 
@@ -327,9 +367,11 @@ revocation timestamps use the PostgreSQL clock.
 
 PostgreSQL stores only domain-separated SHA-256 credential digests. An
 enrollment is single use, its registration retains the immutable owner
-atespace, worker namespace, worker pool, and slot limit, and each registration
-has exactly one current session digest. Revoking an enrollment also revokes its
-registration. The schema reserves session consumption and generation fields,
+atespace, worker namespace, worker pool, slot limit, and exact canonical slot
+policy plus digest, and each registration has exactly one current session
+digest. Existing development rows created before policy columns remain
+unusable and require a new enrollment; the schema never invents authority for
+them. Revoking an enrollment also revokes its registration. The schema reserves session consumption and generation fields,
 and PostgreSQL now provides an atomic session claim: it validates the current
 unexpired token, consumes it exactly once, and advances a nonzero generation
 which fences older sessions. `Connect` remains `UNIMPLEMENTED` and does not yet

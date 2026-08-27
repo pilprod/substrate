@@ -138,8 +138,13 @@ type EnrollResponse struct {
 	// 1..4096 unpadded base64url bytes as a secret and sends them as the Bearer
 	// token.
 	RefreshCredential []byte `protobuf:"bytes,2,opt,name=refresh_credential,json=refreshCredential,proto3" json:"refresh_credential,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// slot_policy is the immutable, server-owned capability policy bound to the
+	// new registration. Clients may reference its profile IDs but cannot extend
+	// the sandbox classes, scheduling labels, slot counts, or exact capacities
+	// granted by it.
+	SlotPolicy    *SlotCapabilityPolicy `protobuf:"bytes,3,opt,name=slot_policy,json=slotPolicy,proto3" json:"slot_policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollResponse) Reset() {
@@ -182,6 +187,13 @@ func (x *EnrollResponse) GetRegistrationUid() string {
 func (x *EnrollResponse) GetRefreshCredential() []byte {
 	if x != nil {
 		return x.RefreshCredential
+	}
+	return nil
+}
+
+func (x *EnrollResponse) GetSlotPolicy() *SlotCapabilityPolicy {
+	if x != nil {
+		return x.SlotPolicy
 	}
 	return nil
 }
@@ -242,7 +254,10 @@ type MintSessionTokenResponse struct {
 	// time. A new Connect rejects session_token at or after this time. Expiry is
 	// checked only during the Connect handshake and does not terminate an
 	// already accepted stream.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// slot_policy repeats the immutable registration policy so a client can
+	// recover its non-secret profile configuration without re-enrollment.
+	SlotPolicy    *SlotCapabilityPolicy `protobuf:"bytes,3,opt,name=slot_policy,json=slotPolicy,proto3" json:"slot_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -287,6 +302,13 @@ func (x *MintSessionTokenResponse) GetSessionToken() []byte {
 func (x *MintSessionTokenResponse) GetExpiresAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *MintSessionTokenResponse) GetSlotPolicy() *SlotCapabilityPolicy {
+	if x != nil {
+		return x.SlotPolicy
 	}
 	return nil
 }
@@ -668,11 +690,15 @@ type ConnectHello struct {
 	// last character.
 	RegistrationUid string          `protobuf:"bytes,1,opt,name=registration_uid,json=registrationUid,proto3" json:"registration_uid,omitempty"`
 	Slots           []*ExternalSlot `protobuf:"bytes,2,rep,name=slots,proto3" json:"slots,omitempty"`
-	// protocol_version MUST equal 1. Unsupported versions reject the whole
+	// protocol_version MUST equal 2. Unsupported versions reject the whole
 	// Connect handshake before any Worker or channel state is changed.
 	ProtocolVersion uint32 `protobuf:"varint,3,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// slot_policy_digest MUST equal the lowercase SHA-256 digest issued for the
+	// authenticated registration. It prevents a client from silently using a
+	// stale profile interpretation.
+	SlotPolicyDigest string `protobuf:"bytes,4,opt,name=slot_policy_digest,json=slotPolicyDigest,proto3" json:"slot_policy_digest,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ConnectHello) Reset() {
@@ -726,6 +752,13 @@ func (x *ConnectHello) GetProtocolVersion() uint32 {
 	return 0
 }
 
+func (x *ConnectHello) GetSlotPolicyDigest() string {
+	if x != nil {
+		return x.SlotPolicyDigest
+	}
+	return ""
+}
+
 // ExternalSlot is provider-neutral scheduling information for one stable slot.
 // The broker derives Worker execution_identity and locality_identity from the
 // authenticated registration and slot_id; clients never send those identities.
@@ -735,16 +768,19 @@ type ExternalSlot struct {
 	// starts and ends with an ASCII letter or digit, and otherwise contains only
 	// letters, digits, '.', '_', '~', or '-'.
 	SlotId string `protobuf:"bytes,1,opt,name=slot_id,json=slotId,proto3" json:"slot_id,omitempty"`
-	// sandbox_class is an opaque scheduling class, not a runtime/product enum.
-	// It is at most 253 UTF-8 bytes.
+	// sandbox_class is reserved for the pre-policy wire shape and MUST be empty.
+	// The broker derives the trusted sandbox class from profile_id.
 	SandboxClass string `protobuf:"bytes,2,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
-	// labels are provider-neutral scheduling attributes. At most 64 entries are
-	// allowed. Keys and values MUST satisfy Kubernetes label key and label value
-	// syntax so existing ateapi equality selectors can match them.
+	// labels is reserved for the pre-policy wire shape and MUST be empty. The
+	// broker derives trusted scheduling labels from profile_id and the pinned
+	// WorkerPool.
 	Labels map[string]string `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// capacity is the compute capacity exposed by this one slot. CPU and memory
-	// values MUST be nonnegative and have the ateapi.WorkerCapacity semantics.
-	Capacity      *ateapipb.WorkerCapacity `protobuf:"bytes,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// capacity is reserved for the pre-policy wire shape and MUST be absent. The
+	// broker derives exact trusted capacity from profile_id.
+	Capacity *ateapipb.WorkerCapacity `protobuf:"bytes,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// profile_id selects one profile from the registration's immutable
+	// server-owned slot policy.
+	ProfileId     string `protobuf:"bytes,5,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -807,6 +843,154 @@ func (x *ExternalSlot) GetCapacity() *ateapipb.WorkerCapacity {
 	return nil
 }
 
+func (x *ExternalSlot) GetProfileId() string {
+	if x != nil {
+		return x.ProfileId
+	}
+	return ""
+}
+
+// SlotCapabilityPolicy is immutable authority issued by the server at
+// enrollment. Profiles are sorted by profile_id and digest is the lowercase
+// SHA-256 of the server's versioned canonical encoding.
+type SlotCapabilityPolicy struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	Digest        string                 `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"`
+	Profiles      []*SlotProfile         `protobuf:"bytes,3,rep,name=profiles,proto3" json:"profiles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SlotCapabilityPolicy) Reset() {
+	*x = SlotCapabilityPolicy{}
+	mi := &file_external_provider_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SlotCapabilityPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SlotCapabilityPolicy) ProtoMessage() {}
+
+func (x *SlotCapabilityPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SlotCapabilityPolicy.ProtoReflect.Descriptor instead.
+func (*SlotCapabilityPolicy) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SlotCapabilityPolicy) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SlotCapabilityPolicy) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *SlotCapabilityPolicy) GetProfiles() []*SlotProfile {
+	if x != nil {
+		return x.Profiles
+	}
+	return nil
+}
+
+// SlotProfile grants a bounded, provider-neutral scheduling capability. A
+// launcher or product name is not a sandbox class.
+type SlotProfile struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	ProfileId     string                   `protobuf:"bytes,1,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
+	SandboxClass  string                   `protobuf:"bytes,2,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
+	Labels        map[string]string        `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	MaxSlots      uint32                   `protobuf:"varint,4,opt,name=max_slots,json=maxSlots,proto3" json:"max_slots,omitempty"`
+	Capacity      *ateapipb.WorkerCapacity `protobuf:"bytes,5,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SlotProfile) Reset() {
+	*x = SlotProfile{}
+	mi := &file_external_provider_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SlotProfile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SlotProfile) ProtoMessage() {}
+
+func (x *SlotProfile) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SlotProfile.ProtoReflect.Descriptor instead.
+func (*SlotProfile) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SlotProfile) GetProfileId() string {
+	if x != nil {
+		return x.ProfileId
+	}
+	return ""
+}
+
+func (x *SlotProfile) GetSandboxClass() string {
+	if x != nil {
+		return x.SandboxClass
+	}
+	return ""
+}
+
+func (x *SlotProfile) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *SlotProfile) GetMaxSlots() uint32 {
+	if x != nil {
+		return x.MaxSlots
+	}
+	return 0
+}
+
+func (x *SlotProfile) GetCapacity() *ateapipb.WorkerCapacity {
+	if x != nil {
+		return x.Capacity
+	}
+	return nil
+}
+
 // ConnectReady accepts a valid hello and publishes limits for this generation.
 type ConnectReady struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -823,7 +1007,7 @@ type ConnectReady struct {
 
 func (x *ConnectReady) Reset() {
 	*x = ConnectReady{}
-	mi := &file_external_provider_proto_msgTypes[8]
+	mi := &file_external_provider_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -835,7 +1019,7 @@ func (x *ConnectReady) String() string {
 func (*ConnectReady) ProtoMessage() {}
 
 func (x *ConnectReady) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[8]
+	mi := &file_external_provider_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -848,7 +1032,7 @@ func (x *ConnectReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectReady.ProtoReflect.Descriptor instead.
 func (*ConnectReady) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{8}
+	return file_external_provider_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ConnectReady) GetMaxOpenChannels() uint32 {
@@ -884,7 +1068,7 @@ type OpenChannel struct {
 
 func (x *OpenChannel) Reset() {
 	*x = OpenChannel{}
-	mi := &file_external_provider_proto_msgTypes[9]
+	mi := &file_external_provider_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -896,7 +1080,7 @@ func (x *OpenChannel) String() string {
 func (*OpenChannel) ProtoMessage() {}
 
 func (x *OpenChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[9]
+	mi := &file_external_provider_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -909,7 +1093,7 @@ func (x *OpenChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenChannel.ProtoReflect.Descriptor instead.
 func (*OpenChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{9}
+	return file_external_provider_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *OpenChannel) GetChannelId() uint64 {
@@ -949,7 +1133,7 @@ type OpenChannelAck struct {
 
 func (x *OpenChannelAck) Reset() {
 	*x = OpenChannelAck{}
-	mi := &file_external_provider_proto_msgTypes[10]
+	mi := &file_external_provider_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -961,7 +1145,7 @@ func (x *OpenChannelAck) String() string {
 func (*OpenChannelAck) ProtoMessage() {}
 
 func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[10]
+	mi := &file_external_provider_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -974,7 +1158,7 @@ func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenChannelAck.ProtoReflect.Descriptor instead.
 func (*OpenChannelAck) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{10}
+	return file_external_provider_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *OpenChannelAck) GetChannelId() uint64 {
@@ -1013,7 +1197,7 @@ type ChannelData struct {
 
 func (x *ChannelData) Reset() {
 	*x = ChannelData{}
-	mi := &file_external_provider_proto_msgTypes[11]
+	mi := &file_external_provider_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1025,7 +1209,7 @@ func (x *ChannelData) String() string {
 func (*ChannelData) ProtoMessage() {}
 
 func (x *ChannelData) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[11]
+	mi := &file_external_provider_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1038,7 +1222,7 @@ func (x *ChannelData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelData.ProtoReflect.Descriptor instead.
 func (*ChannelData) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{11}
+	return file_external_provider_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ChannelData) GetChannelId() uint64 {
@@ -1066,7 +1250,7 @@ type HalfCloseChannel struct {
 
 func (x *HalfCloseChannel) Reset() {
 	*x = HalfCloseChannel{}
-	mi := &file_external_provider_proto_msgTypes[12]
+	mi := &file_external_provider_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1078,7 +1262,7 @@ func (x *HalfCloseChannel) String() string {
 func (*HalfCloseChannel) ProtoMessage() {}
 
 func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[12]
+	mi := &file_external_provider_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1091,7 +1275,7 @@ func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HalfCloseChannel.ProtoReflect.Descriptor instead.
 func (*HalfCloseChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{12}
+	return file_external_provider_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *HalfCloseChannel) GetChannelId() uint64 {
@@ -1118,7 +1302,7 @@ type ResetChannel struct {
 
 func (x *ResetChannel) Reset() {
 	*x = ResetChannel{}
-	mi := &file_external_provider_proto_msgTypes[13]
+	mi := &file_external_provider_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1314,7 @@ func (x *ResetChannel) String() string {
 func (*ResetChannel) ProtoMessage() {}
 
 func (x *ResetChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[13]
+	mi := &file_external_provider_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1327,7 @@ func (x *ResetChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetChannel.ProtoReflect.Descriptor instead.
 func (*ResetChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{13}
+	return file_external_provider_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ResetChannel) GetChannelId() uint64 {
@@ -1181,7 +1365,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_external_provider_proto_msgTypes[14]
+	mi := &file_external_provider_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1193,7 +1377,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[14]
+	mi := &file_external_provider_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1206,7 +1390,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{14}
+	return file_external_provider_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Heartbeat) GetNonce() uint64 {
@@ -1228,16 +1412,20 @@ var File_external_provider_proto protoreflect.FileDescriptor
 const file_external_provider_proto_rawDesc = "" +
 	"\n" +
 	"\x17external_provider.proto\x12\x10externalprovider\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\fateapi.proto\"\x0f\n" +
-	"\rEnrollRequest\"o\n" +
+	"\rEnrollRequest\"\xb8\x01\n" +
 	"\x0eEnrollResponse\x12)\n" +
 	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\x122\n" +
-	"\x12refresh_credential\x18\x02 \x01(\fB\x03\x80\x01\x01R\x11refreshCredential\"D\n" +
+	"\x12refresh_credential\x18\x02 \x01(\fB\x03\x80\x01\x01R\x11refreshCredential\x12G\n" +
+	"\vslot_policy\x18\x03 \x01(\v2&.externalprovider.SlotCapabilityPolicyR\n" +
+	"slotPolicy\"D\n" +
 	"\x17MintSessionTokenRequest\x12)\n" +
-	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\"\x7f\n" +
+	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\"\xc8\x01\n" +
 	"\x18MintSessionTokenResponse\x12(\n" +
 	"\rsession_token\x18\x01 \x01(\fB\x03\x80\x01\x01R\fsessionToken\x129\n" +
 	"\n" +
-	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xe0\x03\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12G\n" +
+	"\vslot_policy\x18\x03 \x01(\v2&.externalprovider.SlotCapabilityPolicyR\n" +
+	"slotPolicy\"\xe0\x03\n" +
 	"\vClientFrame\x12-\n" +
 	"\x12session_generation\x18\x01 \x01(\x04R\x11sessionGeneration\x126\n" +
 	"\x05hello\x18\x02 \x01(\v2\x1e.externalprovider.ConnectHelloH\x00R\x05hello\x123\n" +
@@ -1259,16 +1447,33 @@ const file_external_provider_proto_rawDesc = "" +
 	"half_close\x18\x06 \x01(\v2\".externalprovider.HalfCloseChannelH\x00R\thalfClose\x126\n" +
 	"\x05reset\x18\a \x01(\v2\x1e.externalprovider.ResetChannelH\x00R\x05reset\x12;\n" +
 	"\theartbeat\x18\b \x01(\v2\x1b.externalprovider.HeartbeatH\x00R\theartbeatB\a\n" +
-	"\x05frame\"\x9a\x01\n" +
+	"\x05frame\"\xc8\x01\n" +
 	"\fConnectHello\x12)\n" +
 	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\x124\n" +
 	"\x05slots\x18\x02 \x03(\v2\x1e.externalprovider.ExternalSlotR\x05slots\x12)\n" +
-	"\x10protocol_version\x18\x03 \x01(\rR\x0fprotocolVersion\"\xff\x01\n" +
+	"\x10protocol_version\x18\x03 \x01(\rR\x0fprotocolVersion\x12,\n" +
+	"\x12slot_policy_digest\x18\x04 \x01(\tR\x10slotPolicyDigest\"\x9e\x02\n" +
 	"\fExternalSlot\x12\x17\n" +
 	"\aslot_id\x18\x01 \x01(\tR\x06slotId\x12#\n" +
 	"\rsandbox_class\x18\x02 \x01(\tR\fsandboxClass\x12B\n" +
 	"\x06labels\x18\x03 \x03(\v2*.externalprovider.ExternalSlot.LabelsEntryR\x06labels\x122\n" +
-	"\bcapacity\x18\x04 \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x1a9\n" +
+	"\bcapacity\x18\x04 \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x12\x1d\n" +
+	"\n" +
+	"profile_id\x18\x05 \x01(\tR\tprofileId\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x01\n" +
+	"\x14SlotCapabilityPolicy\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
+	"\x06digest\x18\x02 \x01(\tR\x06digest\x129\n" +
+	"\bprofiles\x18\x03 \x03(\v2\x1d.externalprovider.SlotProfileR\bprofiles\"\xa0\x02\n" +
+	"\vSlotProfile\x12\x1d\n" +
+	"\n" +
+	"profile_id\x18\x01 \x01(\tR\tprofileId\x12#\n" +
+	"\rsandbox_class\x18\x02 \x01(\tR\fsandboxClass\x12A\n" +
+	"\x06labels\x18\x03 \x03(\v2).externalprovider.SlotProfile.LabelsEntryR\x06labels\x12\x1b\n" +
+	"\tmax_slots\x18\x04 \x01(\rR\bmaxSlots\x122\n" +
+	"\bcapacity\x18\x05 \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"`\n" +
@@ -1323,7 +1528,7 @@ func file_external_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_external_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_external_provider_proto_goTypes = []any{
 	(ChannelKind)(0),                 // 0: externalprovider.ChannelKind
 	(*EnrollRequest)(nil),            // 1: externalprovider.EnrollRequest
@@ -1334,48 +1539,56 @@ var file_external_provider_proto_goTypes = []any{
 	(*ServerFrame)(nil),              // 6: externalprovider.ServerFrame
 	(*ConnectHello)(nil),             // 7: externalprovider.ConnectHello
 	(*ExternalSlot)(nil),             // 8: externalprovider.ExternalSlot
-	(*ConnectReady)(nil),             // 9: externalprovider.ConnectReady
-	(*OpenChannel)(nil),              // 10: externalprovider.OpenChannel
-	(*OpenChannelAck)(nil),           // 11: externalprovider.OpenChannelAck
-	(*ChannelData)(nil),              // 12: externalprovider.ChannelData
-	(*HalfCloseChannel)(nil),         // 13: externalprovider.HalfCloseChannel
-	(*ResetChannel)(nil),             // 14: externalprovider.ResetChannel
-	(*Heartbeat)(nil),                // 15: externalprovider.Heartbeat
-	nil,                              // 16: externalprovider.ExternalSlot.LabelsEntry
-	(*timestamppb.Timestamp)(nil),    // 17: google.protobuf.Timestamp
-	(*ateapipb.WorkerCapacity)(nil),  // 18: ateapi.WorkerCapacity
+	(*SlotCapabilityPolicy)(nil),     // 9: externalprovider.SlotCapabilityPolicy
+	(*SlotProfile)(nil),              // 10: externalprovider.SlotProfile
+	(*ConnectReady)(nil),             // 11: externalprovider.ConnectReady
+	(*OpenChannel)(nil),              // 12: externalprovider.OpenChannel
+	(*OpenChannelAck)(nil),           // 13: externalprovider.OpenChannelAck
+	(*ChannelData)(nil),              // 14: externalprovider.ChannelData
+	(*HalfCloseChannel)(nil),         // 15: externalprovider.HalfCloseChannel
+	(*ResetChannel)(nil),             // 16: externalprovider.ResetChannel
+	(*Heartbeat)(nil),                // 17: externalprovider.Heartbeat
+	nil,                              // 18: externalprovider.ExternalSlot.LabelsEntry
+	nil,                              // 19: externalprovider.SlotProfile.LabelsEntry
+	(*timestamppb.Timestamp)(nil),    // 20: google.protobuf.Timestamp
+	(*ateapipb.WorkerCapacity)(nil),  // 21: ateapi.WorkerCapacity
 }
 var file_external_provider_proto_depIdxs = []int32{
-	17, // 0: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	7,  // 1: externalprovider.ClientFrame.hello:type_name -> externalprovider.ConnectHello
-	10, // 2: externalprovider.ClientFrame.open:type_name -> externalprovider.OpenChannel
-	11, // 3: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	12, // 4: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
-	13, // 5: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	14, // 6: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
-	15, // 7: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
-	9,  // 8: externalprovider.ServerFrame.ready:type_name -> externalprovider.ConnectReady
-	10, // 9: externalprovider.ServerFrame.open:type_name -> externalprovider.OpenChannel
-	11, // 10: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	12, // 11: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
-	13, // 12: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	14, // 13: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
-	15, // 14: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
-	8,  // 15: externalprovider.ConnectHello.slots:type_name -> externalprovider.ExternalSlot
-	16, // 16: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
-	18, // 17: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
-	0,  // 18: externalprovider.OpenChannel.kind:type_name -> externalprovider.ChannelKind
-	1,  // 19: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
-	3,  // 20: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
-	5,  // 21: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
-	2,  // 22: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
-	4,  // 23: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
-	6,  // 24: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
-	22, // [22:25] is the sub-list for method output_type
-	19, // [19:22] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	9,  // 0: externalprovider.EnrollResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
+	20, // 1: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	9,  // 2: externalprovider.MintSessionTokenResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
+	7,  // 3: externalprovider.ClientFrame.hello:type_name -> externalprovider.ConnectHello
+	12, // 4: externalprovider.ClientFrame.open:type_name -> externalprovider.OpenChannel
+	13, // 5: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	14, // 6: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
+	15, // 7: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	16, // 8: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
+	17, // 9: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	11, // 10: externalprovider.ServerFrame.ready:type_name -> externalprovider.ConnectReady
+	12, // 11: externalprovider.ServerFrame.open:type_name -> externalprovider.OpenChannel
+	13, // 12: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	14, // 13: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
+	15, // 14: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	16, // 15: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
+	17, // 16: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	8,  // 17: externalprovider.ConnectHello.slots:type_name -> externalprovider.ExternalSlot
+	18, // 18: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
+	21, // 19: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
+	10, // 20: externalprovider.SlotCapabilityPolicy.profiles:type_name -> externalprovider.SlotProfile
+	19, // 21: externalprovider.SlotProfile.labels:type_name -> externalprovider.SlotProfile.LabelsEntry
+	21, // 22: externalprovider.SlotProfile.capacity:type_name -> ateapi.WorkerCapacity
+	0,  // 23: externalprovider.OpenChannel.kind:type_name -> externalprovider.ChannelKind
+	1,  // 24: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
+	3,  // 25: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
+	5,  // 26: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
+	2,  // 27: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
+	4,  // 28: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
+	6,  // 29: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
+	27, // [27:30] is the sub-list for method output_type
+	24, // [24:27] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_external_provider_proto_init() }
@@ -1407,7 +1620,7 @@ func file_external_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_external_provider_proto_rawDesc), len(file_external_provider_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   16,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

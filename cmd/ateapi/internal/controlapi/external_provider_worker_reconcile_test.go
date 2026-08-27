@@ -118,6 +118,28 @@ func (s *reconcileWorkerStore) mutate(name string, mutate func(*ateapipb.Worker)
 
 func reconcileWorkerPlan(t *testing.T, registrationUID string, slots ...*externalproviderpb.ExternalSlot) *externalprovider.WorkerPlan {
 	t.Helper()
+	profiles := make([]externalprovider.SlotProfile, len(slots))
+	declared := make([]*externalproviderpb.ExternalSlot, len(slots))
+	for index, slot := range slots {
+		profileID := fmt.Sprintf("profile-%03d", index)
+		profiles[index] = externalprovider.SlotProfile{
+			ProfileID:    profileID,
+			SandboxClass: slot.GetSandboxClass(),
+			Labels:       maps.Clone(slot.GetLabels()),
+			MaxSlots:     1,
+			CPUMilli:     slot.GetCapacity().GetCpuMilli(),
+			MemoryBytes:  slot.GetCapacity().GetMemoryBytes(),
+		}
+		declared[index] = proto.Clone(slot).(*externalproviderpb.ExternalSlot)
+		declared[index].ProfileId = profileID
+		declared[index].SandboxClass = ""
+		declared[index].Labels = nil
+		declared[index].Capacity = nil
+	}
+	policy, err := externalprovider.NewSlotCapabilityPolicy(externalprovider.SlotCapabilityPolicyVersion, profiles)
+	if err != nil {
+		t.Fatalf("NewSlotCapabilityPolicy() error = %v", err)
+	}
 	claim := externalprovider.SessionClaim{
 		Registration: externalprovider.Registration{
 			UID:           registrationUID,
@@ -127,15 +149,17 @@ func reconcileWorkerPlan(t *testing.T, registrationUID string, slots ...*externa
 				WorkerNamespace: "workers",
 				WorkerPool:      "pool-a",
 				MaxSlots:        uint32(len(slots)),
+				SlotPolicy:      policy,
 			},
 		},
 		Generation: 1,
 	}
 	admission, err := externalprovider.ValidateConnectAdmission(claim, &externalproviderpb.ClientFrame{
 		Frame: &externalproviderpb.ClientFrame_Hello{Hello: &externalproviderpb.ConnectHello{
-			RegistrationUid: registrationUID,
-			ProtocolVersion: 1,
-			Slots:           slots,
+			RegistrationUid:  registrationUID,
+			ProtocolVersion:  2,
+			SlotPolicyDigest: policy.DigestHex(),
+			Slots:            declared,
 		}},
 	})
 	if err != nil {
@@ -190,8 +214,8 @@ func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
 	plan := reconcileWorkerPlan(t, "registration-a",
-		reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}),
-		reconcileSlot("slot-b", "docker", map[string]string{"runtime": "claude"}),
+		reconcileSlot("slot-a", "gvisor", map[string]string{"runtime": "codex"}),
+		reconcileSlot("slot-b", "microvm", map[string]string{"runtime": "claude"}),
 	)
 
 	first, err := reconcileWorkers(t, ctx, persistence, plan)
@@ -225,7 +249,7 @@ func TestReconcileExternalWorkersCreatesOfflineAndIsIdempotent(t *testing.T) {
 func TestReconcileExternalWorkersPropagatesPinnedPoolLabels(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", map[string]string{
 		"runtime": "codex",
 	}))
 	poolLister := reconcileWorkerPoolLister(t, map[string]string{
@@ -250,7 +274,7 @@ func TestReconcileExternalWorkersPropagatesPinnedPoolLabels(t *testing.T) {
 func TestReconcileExternalWorkersRejectsPoolLabelSpoofBeforeWrites(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", map[string]string{
 		"kagent.dev/worker-pool": "coding-local",
 	}))
 	poolLister := reconcileWorkerPoolLister(t, map[string]string{
@@ -268,7 +292,7 @@ func TestReconcileExternalWorkersRejectsPoolLabelSpoofBeforeWrites(t *testing.T)
 
 func TestReconcileExternalWorkersRejectsUnavailableOrInvalidPoolBeforeWrites(t *testing.T) {
 	ctx := context.Background()
-	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 
 	t.Run("missing", func(t *testing.T) {
 		persistence := newReconcileWorkerStore()
@@ -308,7 +332,7 @@ func TestReconcileExternalWorkersRejectsUnavailableOrInvalidPoolBeforeWrites(t *
 func TestReconcileExternalWorkersRefreshesPoolLabelsAndPreservesServerState(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}))
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", map[string]string{"runtime": "codex"}))
 
 	created, err := reconcileExternalWorkers(ctx, persistence, reconcileWorkerPoolLister(t, map[string]string{
 		"kagent.dev/worker-pool": "coding-local",
@@ -357,8 +381,8 @@ func TestReconcileExternalWorkersPreflightsAllMergedLabelsBeforeWrites(t *testin
 		tooMany[fmt.Sprintf("capacity.example/label-%02d", index)] = "available"
 	}
 	plan := reconcileWorkerPlan(t, "registration-a",
-		reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}),
-		reconcileSlot("slot-b", "native", tooMany),
+		reconcileSlot("slot-a", "gvisor", map[string]string{"runtime": "codex"}),
+		reconcileSlot("slot-b", "gvisor", tooMany),
 	)
 	poolLister := reconcileWorkerPoolLister(t, map[string]string{"placement": "external"})
 
@@ -374,7 +398,7 @@ func TestReconcileExternalWorkersPreflightsAllMergedLabelsBeforeWrites(t *testin
 func TestReconcileExternalWorkersRefreshesOnlyMutableProviderFields(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	originalPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", map[string]string{"runtime": "codex"}))
+	originalPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", map[string]string{"runtime": "codex"}))
 	created, err := reconcileWorkers(t, ctx, persistence, originalPlan)
 	if err != nil {
 		t.Fatal(err)
@@ -385,13 +409,13 @@ func TestReconcileExternalWorkersRefreshesOnlyMutableProviderFields(t *testing.T
 		worker.Status.Assignment = newAPIAssignment("actor-uid-1")
 	})
 
-	changedPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", map[string]string{"runtime": "codex", "accelerator": "none"}))
+	changedPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "microvm", map[string]string{"runtime": "codex", "accelerator": "none"}))
 	updated, err := reconcileWorkers(t, ctx, persistence, changedPlan)
 	if err != nil {
 		t.Fatalf("reconcileExternalWorkers(changed) error = %v", err)
 	}
 	worker := updated[0]
-	if worker.GetSandboxClass() != "docker" || !maps.Equal(worker.GetLabels(), map[string]string{"runtime": "codex", "accelerator": "none"}) {
+	if worker.GetSandboxClass() != "microvm" || !maps.Equal(worker.GetLabels(), map[string]string{"runtime": "codex", "accelerator": "none"}) {
 		t.Errorf("mutable fields were not refreshed: %+v", worker)
 	}
 	if worker.GetMetadata().GetUid() != created[0].GetMetadata().GetUid() || worker.GetMetadata().GetVersion() != 2 ||
@@ -404,7 +428,7 @@ func TestReconcileExternalWorkersRefreshesOnlyMutableProviderFields(t *testing.T
 func TestReconcileExternalWorkersRejectsIdentityCollision(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+	plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 	desired := plan.Workers()[0]
 	collision := proto.Clone(desired).(*ateapipb.Worker)
 	collision.ExternalSlot.ExecutionIdentity = "different-execution"
@@ -423,7 +447,7 @@ func TestReconcileExternalWorkersRetriesCreateAndUpdateRaces(t *testing.T) {
 	t.Run("create", func(t *testing.T) {
 		persistence := newReconcileWorkerStore()
 		persistence.createRace = true
-		plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+		plan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 		workers, err := reconcileWorkers(t, ctx, persistence, plan)
 		if err != nil {
 			t.Fatalf("reconcileExternalWorkers() error = %v", err)
@@ -435,17 +459,17 @@ func TestReconcileExternalWorkersRetriesCreateAndUpdateRaces(t *testing.T) {
 
 	t.Run("update", func(t *testing.T) {
 		persistence := newReconcileWorkerStore()
-		original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+		original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 		if _, err := reconcileWorkers(t, ctx, persistence, original); err != nil {
 			t.Fatal(err)
 		}
 		persistence.updateConflicts = 2
-		changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", nil))
+		changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "microvm", nil))
 		workers, err := reconcileWorkers(t, ctx, persistence, changed)
 		if err != nil {
 			t.Fatalf("reconcileExternalWorkers() error = %v", err)
 		}
-		if workers[0].GetSandboxClass() != "docker" || persistence.updateCalls != 3 {
+		if workers[0].GetSandboxClass() != "microvm" || persistence.updateCalls != 3 {
 			t.Fatalf("update race ended with sandbox %q after %d updates", workers[0].GetSandboxClass(), persistence.updateCalls)
 		}
 	})
@@ -455,8 +479,8 @@ func TestReconcileExternalWorkersDoesNotOwnOmittedSlots(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
 	fullPlan := reconcileWorkerPlan(t, "registration-a",
-		reconcileSlot("slot-a", "native", nil),
-		reconcileSlot("slot-b", "native", nil),
+		reconcileSlot("slot-a", "gvisor", nil),
+		reconcileSlot("slot-b", "gvisor", nil),
 	)
 	created, err := reconcileWorkers(t, ctx, persistence, fullPlan)
 	if err != nil {
@@ -467,7 +491,7 @@ func TestReconcileExternalWorkersDoesNotOwnOmittedSlots(t *testing.T) {
 		worker.Status.State = ateapipb.WorkerState_WORKER_STATE_ACTIVE
 	})
 
-	narrowPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+	narrowPlan := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 	if _, err := reconcileWorkers(t, ctx, persistence, narrowPlan); err != nil {
 		t.Fatal(err)
 	}
@@ -480,12 +504,12 @@ func TestReconcileExternalWorkersDoesNotOwnOmittedSlots(t *testing.T) {
 func TestReconcileExternalWorkersBoundsRetriesAndHonorsContext(t *testing.T) {
 	ctx := context.Background()
 	persistence := newReconcileWorkerStore()
-	original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "native", nil))
+	original := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "gvisor", nil))
 	if _, err := reconcileWorkers(t, ctx, persistence, original); err != nil {
 		t.Fatal(err)
 	}
 	persistence.updateConflicts = maxExternalWorkerReconcileAttempts + 1
-	changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "docker", nil))
+	changed := reconcileWorkerPlan(t, "registration-a", reconcileSlot("slot-a", "microvm", nil))
 	if _, err := reconcileWorkers(t, ctx, persistence, changed); !errors.Is(err, store.ErrVersionConflict) {
 		t.Fatalf("reconcileExternalWorkers() error = %v, want ErrVersionConflict", err)
 	}

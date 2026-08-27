@@ -60,6 +60,7 @@ type Scope struct {
 	WorkerNamespace string
 	WorkerPool      string
 	MaxSlots        uint32
+	SlotPolicy      SlotCapabilityPolicy
 }
 
 // IsValidIdentity reports whether value satisfies the published opaque
@@ -97,6 +98,16 @@ func (s Scope) Validate() error {
 	}
 	if s.MaxSlots == 0 || s.MaxSlots > maxSlots {
 		return fmt.Errorf("max slots %d must be between 1 and %d", s.MaxSlots, maxSlots)
+	}
+	if err := s.SlotPolicy.Validate(); err != nil {
+		return fmt.Errorf("slot capability policy: %w", err)
+	}
+	var grantedSlots uint64
+	for _, profile := range s.SlotPolicy.Profiles() {
+		grantedSlots += uint64(profile.MaxSlots)
+	}
+	if grantedSlots < uint64(s.MaxSlots) {
+		return fmt.Errorf("slot capability policy grants %d slots, fewer than max slots %d", grantedSlots, s.MaxSlots)
 	}
 	return nil
 }

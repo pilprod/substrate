@@ -130,8 +130,8 @@ CREATE TABLE IF NOT EXISTS leases (
 CREATE INDEX IF NOT EXISTS leases_expires_at_idx ON leases (expires_at);
 
 -- Enrollment and broker credentials are persisted only as domain-separated
--- SHA-256 digests. Scope columns are copied once into the registration and no
--- adapter operation updates them afterwards.
+-- SHA-256 digests. Scope and canonical slot-policy columns are copied once
+-- into the registration and no adapter operation updates them afterwards.
 CREATE TABLE IF NOT EXISTS external_provider_enrollments (
     enrollment_uid     text PRIMARY KEY
         CHECK (octet_length(enrollment_uid) BETWEEN 1 AND 253)
@@ -143,12 +143,18 @@ CREATE TABLE IF NOT EXISTS external_provider_enrollments (
     worker_namespace   text NOT NULL CHECK (worker_namespace <> ''),
     worker_pool        text NOT NULL CHECK (worker_pool <> ''),
     max_slots          integer NOT NULL CHECK (max_slots BETWEEN 1 AND 256),
+    slot_policy_canonical bytea NOT NULL,
+    slot_policy_digest bytea NOT NULL,
     created_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at         timestamptz NOT NULL,
     consumed_at        timestamptz,
     revoked_at         timestamptz,
     registration_uid   text UNIQUE,
-    CHECK ((consumed_at IS NULL) = (registration_uid IS NULL))
+    CHECK ((consumed_at IS NULL) = (registration_uid IS NULL)),
+    CONSTRAINT external_provider_enrollments_slot_policy_check CHECK (
+        octet_length(slot_policy_canonical) BETWEEN 1 AND 2097152
+        AND octet_length(slot_policy_digest) = 32
+    )
 );
 
 CREATE INDEX IF NOT EXISTS external_provider_enrollments_expires_at_idx
@@ -165,6 +171,8 @@ CREATE TABLE IF NOT EXISTS external_provider_registrations (
     worker_namespace          text NOT NULL CHECK (worker_namespace <> ''),
     worker_pool               text NOT NULL CHECK (worker_pool <> ''),
     max_slots                 integer NOT NULL CHECK (max_slots BETWEEN 1 AND 256),
+    slot_policy_canonical     bytea NOT NULL,
+    slot_policy_digest        bytea NOT NULL,
     refresh_digest            bytea NOT NULL UNIQUE
         CHECK (octet_length(refresh_digest) = 32),
     current_session_digest    bytea UNIQUE
@@ -176,12 +184,67 @@ CREATE TABLE IF NOT EXISTS external_provider_registrations (
     created_at                timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at                timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK ((current_session_digest IS NULL) = (current_session_expires_at IS NULL)),
-    CHECK (session_consumed_at IS NULL OR current_session_digest IS NOT NULL)
+    CHECK (session_consumed_at IS NULL OR current_session_digest IS NOT NULL),
+    CONSTRAINT external_provider_registrations_slot_policy_check CHECK (
+        octet_length(slot_policy_canonical) BETWEEN 1 AND 2097152
+        AND octet_length(slot_policy_digest) = 32
+    )
 );
 
 CREATE INDEX IF NOT EXISTS external_provider_registrations_session_expiry_idx
     ON external_provider_registrations (current_session_expires_at)
     WHERE current_session_digest IS NOT NULL;
+
+-- Existing development databases may predate registration capability policy.
+-- Add nullable columns without inventing authority for those rows: loading a
+-- NULL policy fails closed and the operator must issue a new enrollment. The
+-- compatibility constraint keeps those rows revocable while rejecting partial
+-- or malformed policy state; application issuance always writes both fields.
+ALTER TABLE external_provider_enrollments
+    ADD COLUMN IF NOT EXISTS slot_policy_canonical bytea;
+ALTER TABLE external_provider_enrollments
+    ADD COLUMN IF NOT EXISTS slot_policy_digest bytea;
+ALTER TABLE external_provider_registrations
+    ADD COLUMN IF NOT EXISTS slot_policy_canonical bytea;
+ALTER TABLE external_provider_registrations
+    ADD COLUMN IF NOT EXISTS slot_policy_digest bytea;
+
+DO $migration$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'external_provider_enrollments_slot_policy_check'
+          AND conrelid = 'external_provider_enrollments'::regclass
+    ) THEN
+        ALTER TABLE external_provider_enrollments
+            ADD CONSTRAINT external_provider_enrollments_slot_policy_check CHECK (
+                (slot_policy_canonical IS NULL AND slot_policy_digest IS NULL)
+                OR (
+                    slot_policy_canonical IS NOT NULL
+                    AND octet_length(slot_policy_canonical) BETWEEN 1 AND 2097152
+                    AND slot_policy_digest IS NOT NULL
+                    AND octet_length(slot_policy_digest) = 32
+                )
+            ) NOT VALID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'external_provider_registrations_slot_policy_check'
+          AND conrelid = 'external_provider_registrations'::regclass
+    ) THEN
+        ALTER TABLE external_provider_registrations
+            ADD CONSTRAINT external_provider_registrations_slot_policy_check CHECK (
+                (slot_policy_canonical IS NULL AND slot_policy_digest IS NULL)
+                OR (
+                    slot_policy_canonical IS NOT NULL
+                    AND octet_length(slot_policy_canonical) BETWEEN 1 AND 2097152
+                    AND slot_policy_digest IS NOT NULL
+                    AND octet_length(slot_policy_digest) = 32
+                )
+            ) NOT VALID;
+    END IF;
+END
+$migration$;
 `
 
 // applySchema idempotently creates atepg's tables.

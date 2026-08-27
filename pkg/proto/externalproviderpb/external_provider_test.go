@@ -139,11 +139,11 @@ func TestSensitiveFieldsAreDebugRedacted(t *testing.T) {
 func TestRequestMessagesCarryNoCredentialFields(t *testing.T) {
 	hello := (&ConnectHello{}).ProtoReflect().Descriptor()
 	fields := hello.Fields()
-	if got, want := fields.Len(), 3; got != want {
+	if got, want := fields.Len(), 4; got != want {
 		t.Fatalf("ConnectHello field count = %d, want %d", got, want)
 	}
-	if fields.ByName("registration_uid") == nil || fields.ByName("slots") == nil || fields.ByName("protocol_version") == nil {
-		t.Fatalf("ConnectHello fields = %v, want registration_uid, slots, and protocol_version", fieldNames(fields))
+	if fields.ByName("registration_uid") == nil || fields.ByName("slots") == nil || fields.ByName("protocol_version") == nil || fields.ByName("slot_policy_digest") == nil {
+		t.Fatalf("ConnectHello fields = %v, want registration_uid, slots, protocol_version, and slot_policy_digest", fieldNames(fields))
 	}
 
 	for _, message := range []protoreflect.MessageDescriptor{
@@ -230,7 +230,7 @@ func TestPublishedSchemaBaseline(t *testing.T) {
 	}
 	sum := sha256.Sum256(wireDescriptor)
 	got := hex.EncodeToString(sum[:])
-	const want = "a506f904a476097ad2f24b5d73deef14f7aa67c43f455a145b7b0c609749daec"
+	const want = "e4a6d65cd7b6c7a551f3c9e0589dfead1de1e034c141f46c1c8bd63e09c00e34"
 	if got != want {
 		t.Fatalf("wire descriptor SHA-256 = %q, want %q", got, want)
 	}
