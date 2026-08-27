@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
@@ -30,6 +31,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const (
+	defaultMaxPendingConnectHandshakes uint32 = 64
+	maximumPendingConnectHandshakes    uint32 = 1024
+	defaultConnectHandshakeTimeout            = 15 * time.Second
+	maximumConnectHandshakeTimeout            = time.Minute
+)
+
 // Broker implements authentication and the external session stream. The ateapi
 // binary registers it only on the dedicated, explicitly enabled TLS listener.
 type Broker struct {
@@ -38,12 +46,41 @@ type Broker struct {
 	random         io.Reader
 	sessionTTL     time.Duration
 	sessionRuntime *SessionRuntime
+
+	handshakeTimeout    time.Duration
+	pendingHandshakes   chan struct{}
+	handshakeConfigured bool
 }
 
 var _ externalproviderpb.ExternalProviderBrokerServer = (*Broker)(nil)
 
 // BrokerOption configures an optional Broker authority.
 type BrokerOption func(*Broker) error
+
+// ConnectHandshakeLimits bounds streams which have not yet presented and
+// atomically claimed a valid first Hello.
+type ConnectHandshakeLimits struct {
+	MaxPending uint32
+	Timeout    time.Duration
+}
+
+// WithConnectHandshakeLimits overrides the conservative pending-handshake
+// bounds. It may be supplied at most once.
+func WithConnectHandshakeLimits(limits ConnectHandshakeLimits) BrokerOption {
+	return func(broker *Broker) error {
+		if broker.handshakeConfigured {
+			return errors.New("external provider Connect handshake limits are already configured")
+		}
+		if limits.MaxPending == 0 || limits.MaxPending > maximumPendingConnectHandshakes ||
+			limits.Timeout < time.Millisecond || limits.Timeout > maximumConnectHandshakeTimeout {
+			return errors.New("external provider Connect handshake limits are invalid")
+		}
+		broker.pendingHandshakes = make(chan struct{}, limits.MaxPending)
+		broker.handshakeTimeout = limits.Timeout
+		broker.handshakeConfigured = true
+		return nil
+	}
+}
 
 // WithSessionRuntime enables authenticated Connect handling with the supplied
 // process-local route and Worker lifecycle authority.
@@ -73,7 +110,13 @@ func newBroker(store ExternalProviderStore, random io.Reader, sessionTTL time.Du
 	if err := validateTTL(sessionTTL, MaxSessionTTL); err != nil {
 		return nil, fmt.Errorf("session TTL: %w", err)
 	}
-	broker := &Broker{store: store, random: random, sessionTTL: sessionTTL}
+	broker := &Broker{
+		store:             store,
+		random:            random,
+		sessionTTL:        sessionTTL,
+		handshakeTimeout:  defaultConnectHandshakeTimeout,
+		pendingHandshakes: make(chan struct{}, defaultMaxPendingConnectHandshakes),
+	}
 	for _, opt := range opts {
 		if opt == nil {
 			continue
@@ -177,15 +220,56 @@ func (b *Broker) MintSessionToken(ctx context.Context, req *externalproviderpb.M
 
 // Connect receives and prevalidates Hello before atomically consuming the
 // session credential. Ready is sent synchronously by the coordinator before
-// the route becomes visible and Workers become ACTIVE.
+// the route becomes visible and, for a forwarding-bound coordinator, Workers
+// become ACTIVE.
 func (b *Broker) Connect(stream grpc.BidiStreamingServer[externalproviderpb.ClientFrame, externalproviderpb.ServerFrame]) error {
 	if b == nil || b.store == nil || b.sessionRuntime == nil || b.sessionRuntime.coordinator == nil || stream == nil || stream.Context() == nil {
 		return status.Error(codes.FailedPrecondition, "session runtime is unavailable")
 	}
 	ctx := stream.Context()
-	first, err := stream.Recv()
-	if err != nil {
-		return connectReceiveError(ctx, err, true)
+	handshake, acquired := b.acquireConnectHandshake()
+	if !acquired {
+		return status.Error(codes.ResourceExhausted, "too many pending Connect handshakes")
+	}
+	releaseHandshakeOnReturn := true
+	defer func() {
+		if releaseHandshakeOnReturn {
+			handshake.release()
+		}
+	}()
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, b.handshakeTimeout)
+	defer cancelHandshake()
+	firstResult := make(chan connectReceiveResult, 1)
+	firstReceiveDone := make(chan struct{})
+	go func() {
+		defer close(firstReceiveDone)
+		frame, err := stream.Recv()
+		firstResult <- connectReceiveResult{frame: frame, err: err}
+	}()
+	var first *externalproviderpb.ClientFrame
+	select {
+	case result := <-firstResult:
+		if result.err != nil {
+			return connectReceiveError(ctx, result.err, true)
+		}
+		first = result.frame
+	case <-handshakeCtx.Done():
+		// A timed-out Recv may unblock only after this handler returns and gRPC
+		// cancels its stream. Retain its admission slot until that goroutine exits,
+		// so stalled peers can never create more than the configured bound.
+		select {
+		case <-firstReceiveDone:
+		default:
+			releaseHandshakeOnReturn = false
+			go func() {
+				<-firstReceiveDone
+				handshake.release()
+			}()
+		}
+		if ctx.Err() != nil {
+			return connectContextError(ctx)
+		}
+		return status.Error(codes.DeadlineExceeded, "Connect handshake deadline exceeded")
 	}
 	hello, err := prevalidateConnectHello(first)
 	if err != nil {
@@ -198,13 +282,22 @@ func (b *Broker) Connect(stream grpc.BidiStreamingServer[externalproviderpb.Clie
 	}
 	sessionDigest := digestCredential(sessionDigestDomain, sessionCredential)
 	clear(sessionCredential)
-	claim, err := b.store.ClaimExternalProviderSession(ctx, hello.registrationUID, sessionDigest)
+	claim, err := b.store.ClaimExternalProviderSession(handshakeCtx, hello.registrationUID, sessionDigest)
 	if err != nil {
+		if ctx.Err() != nil {
+			return connectContextError(ctx)
+		}
+		if handshakeCtx.Err() != nil {
+			return status.Error(codes.DeadlineExceeded, "Connect handshake deadline exceeded")
+		}
 		if errors.Is(err, ErrAuthenticationFailed) {
 			return unauthenticated()
 		}
 		return status.Error(codes.Unavailable, "session authentication is unavailable")
 	}
+	handshake.release()
+	releaseHandshakeOnReturn = false
+	cancelHandshake()
 
 	session, err := b.sessionRuntime.coordinator.establish(ctx, claim, hello, func(_ context.Context, frame *externalproviderpb.ServerFrame) error {
 		return stream.Send(frame)
@@ -251,7 +344,7 @@ func runConnectedSession(
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := session.close(cleanupCtx); err != nil {
+		if err := session.close(cleanupCtx); err != nil && returnedErr == nil {
 			returnedErr = status.Error(codes.Unavailable, "session cleanup failed")
 		}
 	}()
@@ -282,6 +375,30 @@ func runConnectedSession(
 			}
 		}
 	}
+}
+
+type connectHandshakeLease struct {
+	slots chan struct{}
+	once  sync.Once
+}
+
+func (b *Broker) acquireConnectHandshake() (*connectHandshakeLease, bool) {
+	if b == nil || b.pendingHandshakes == nil {
+		return nil, false
+	}
+	select {
+	case b.pendingHandshakes <- struct{}{}:
+		return &connectHandshakeLease{slots: b.pendingHandshakes}, true
+	default:
+		return nil, false
+	}
+}
+
+func (l *connectHandshakeLease) release() {
+	if l == nil || l.slots == nil {
+		return
+	}
+	l.once.Do(func() { <-l.slots })
 }
 
 func applyConnectEffect(

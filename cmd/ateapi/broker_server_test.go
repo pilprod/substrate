@@ -101,6 +101,16 @@ func TestExternalProviderBrokerServerIsDedicatedTLSAndMetadataOnly(t *testing.T)
 	if store.consumeCalls.Load() != 1 {
 		t.Fatalf("ConsumeExternalProviderEnrollment calls = %d, want 1", store.consumeCalls.Load())
 	}
+	oversizedCredential := brokerServerTestCredential(0x43)
+	oversizedRequest := &externalproviderpb.EnrollRequest{}
+	oversizedRequest.ProtoReflect().SetUnknown(bytes.Repeat([]byte{0x78, 0x00}, externalprovider.MaxWireMessageBytes/2+1))
+	oversizedCtx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+oversizedCredential)
+	if _, err := client.Enroll(oversizedCtx, oversizedRequest); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("oversized Enroll() code = %v, want ResourceExhausted", status.Code(err))
+	}
+	if store.consumeCalls.Load() != 1 {
+		t.Fatalf("oversized Enroll reached store; consume calls = %d, want 1", store.consumeCalls.Load())
+	}
 
 	_, err = client.Enroll(context.Background(), &externalproviderpb.EnrollRequest{})
 	if status.Code(err) != codes.Unauthenticated {
@@ -116,7 +126,7 @@ func TestExternalProviderBrokerServerIsDedicatedTLSAndMetadataOnly(t *testing.T)
 		t.Fatalf("Connect() code = %v, want FailedPrecondition", status.Code(err))
 	}
 	logOutput := logs.String()
-	for _, secret := range []string{enrollmentCredential, string(response.GetRefreshCredential()), sessionCredential} {
+	for _, secret := range []string{enrollmentCredential, string(response.GetRefreshCredential()), sessionCredential, oversizedCredential} {
 		if strings.Contains(logOutput, secret) {
 			t.Fatalf("Broker logs contain credential %q: %s", secret, logOutput)
 		}

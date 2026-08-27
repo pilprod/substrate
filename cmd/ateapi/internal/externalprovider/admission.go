@@ -29,7 +29,13 @@ import (
 
 const (
 	connectProtocolVersion = 2
-	maxClientFrameBytes    = 1 << 20
+	// MaxWireMessageBytes is the transport and protobuf size ceiling for every
+	// client request and stream frame.
+	MaxWireMessageBytes = 1 << 20
+	// MaxBrokerResponseBytes also accommodates the bounded 2 MiB canonical slot
+	// policy in Enroll and MintSessionToken responses.
+	MaxBrokerResponseBytes = (2 << 20) + (64 << 10)
+	maxClientFrameBytes    = MaxWireMessageBytes
 	maxSlotLabels          = 64
 	maxSandboxClassBytes   = 253
 )

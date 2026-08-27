@@ -121,7 +121,10 @@ func (a *SessionAuthority) Bind(
 	if err != nil {
 		return nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
 	}
-	coordinator, err := newSessionCoordinator(a.registry, reconciler, a.routes, lifecycle, a.channelLimits)
+	// This runtime intentionally has no execution-channel forwarder yet. Keep
+	// every reconciled Worker OFFLINE until a later constructor can bind both
+	// the coordinator and that forwarding authority atomically.
+	coordinator, err := newSessionCoordinatorWithActivation(a.registry, reconciler, a.routes, lifecycle, a.channelLimits, false)
 	if err != nil {
 		return nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}

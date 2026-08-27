@@ -306,7 +306,9 @@ For one generation, the coordinator enforces this order:
    frame. The callback returns success only after the frame is visible to the
    peer.
 6. Publish the bindings through the existing `SessionRouteDirectory`.
-7. Activate Workers through the generation-gated Worker lifecycle.
+7. For a coordinator constructed together with execution forwarding, activate
+   Workers through the generation-gated Worker lifecycle. A passive transport
+   coordinator stops after publication and leaves them `OFFLINE`.
 
 No Worker becomes `ACTIVE` before both the Ready callback and route publication
 succeed. Admission, reconciliation, and channel-state failures never cross the
@@ -335,12 +337,17 @@ coordinator adds no second route map or unbounded retry.
 
 The dedicated Broker listener is TLS-only, default-disabled, and exposes only
 `ExternalProviderBroker`. It prevalidates Hello before consuming the credential,
-sends Ready synchronously, publishes and activates through the coordinator,
-then applies post-Ready frames with at most one frame queued. EOF, cancellation,
-transport failure, protocol failure, route replacement, and unsupported effects
-all enter the same CLOSING, OFFLINE, withdraw, and fence cleanup. Handler status
-messages are fixed and the Broker never logs authorization metadata, frames,
-payloads, peer reset text, or transport error text.
+sends Ready synchronously, publishes through the coordinator, then applies
+post-Ready frames with at most one frame queued. Pending first-Hello/token-claim
+handshakes have a fixed concurrency bound and deadline. The gRPC server and
+protobuf state machines both enforce the same 1 MiB inbound/frame ceiling;
+the separately bounded server-send ceiling accommodates the at-most-2 MiB
+canonical capability policy in unary responses. EOF, cancellation, transport
+failure, protocol failure, route replacement, and unsupported effects all
+enter the same CLOSING, OFFLINE, withdraw, and fence cleanup. Handler status
+messages are fixed and the Broker never logs
+authorization metadata, frames, payloads, peer reset text, or transport error
+text.
 
 Heartbeat response frames are transport-complete. Execution forwarding is the
 remaining boundary: there is not yet an authority which binds server-opened
@@ -348,10 +355,14 @@ remaining boundary: there is not yet an authority which binds server-opened
 channels, to the exact routed Worker and its cluster data plane. Until that
 interface exists, every effect requiring such forwarding fails the entire
 session closed with `FAILED_PRECONDITION`; no actor or execution bytes are
-accepted or silently dropped. The directory and lease are process-local. The
-opt-in Helm profile therefore uses one ateapi replica with `Recreate`;
-distributed route ownership is required before this mode can regain HA or
-zero-downtime rollout.
+accepted or silently dropped. The production `SessionAuthority` therefore uses
+a passive coordinator: it reconciles slots `OFFLINE` and exercises
+Ready/route/channel/cleanup lifecycle, but never activates a Worker. A later
+constructor must bind execution forwarding and Worker activation together; a
+standalone flag cannot enable activation. The directory and lease are
+process-local. The opt-in Helm profile therefore uses one ateapi replica with
+`Recreate`; distributed route ownership is required before this mode can regain
+HA or zero-downtime rollout.
 
 ## Required workload provider opt-in
 

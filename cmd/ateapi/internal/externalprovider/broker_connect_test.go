@@ -109,14 +109,21 @@ func connectTestContext(parent context.Context, fill byte) context.Context {
 	return metadata.NewIncomingContext(parent, metadata.Pairs("authorization", "Bearer "+string(testCredential(fill))))
 }
 
-func connectTestBroker(t *testing.T, coordinator *sessionCoordinator, claim func(context.Context, string, CredentialDigest) (SessionClaim, error)) (*Broker, *fakeStore) {
+func connectTestBroker(
+	t *testing.T,
+	coordinator *sessionCoordinator,
+	claim func(context.Context, string, CredentialDigest) (SessionClaim, error),
+	opts ...BrokerOption,
+) (*Broker, *fakeStore) {
 	t.Helper()
 	store := &fakeStore{claim: claim}
+	brokerOptions := []BrokerOption{WithSessionRuntime(&SessionRuntime{coordinator: coordinator})}
+	brokerOptions = append(brokerOptions, opts...)
 	broker, err := newBroker(
 		store,
 		bytes.NewReader(make([]byte, credentialEntropyBytes)),
 		time.Minute,
-		WithSessionRuntime(&SessionRuntime{coordinator: coordinator}),
+		brokerOptions...,
 	)
 	if err != nil {
 		t.Fatalf("newBroker() error = %v", err)
@@ -205,6 +212,93 @@ func TestBrokerConnectPrevalidatesBeforeClaimAndReady(t *testing.T) {
 	}
 	if store.claimCalls != 0 || len(stream.sentSnapshot()) != 0 {
 		t.Fatalf("invalid Hello caused claim/send = %d/%d", store.claimCalls, len(stream.sentSnapshot()))
+	}
+}
+
+func TestBrokerConnectBoundsAndTimesOutPendingHandshakes(t *testing.T) {
+	coordinator, _, _, _ := newCoordinatorHarness(t, 1, 1, 1)
+	claim := validSessionClaim(1)
+	broker, store := connectTestBroker(
+		t,
+		coordinator,
+		func(context.Context, string, CredentialDigest) (SessionClaim, error) { return claim, nil },
+		WithConnectHandshakeLimits(ConnectHandshakeLimits{MaxPending: 1, Timeout: 20 * time.Millisecond}),
+	)
+	firstParent, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	first := &connectTestStream{
+		ctx:     connectTestContext(firstParent, 0x8b),
+		receive: make(chan connectTestReceive),
+	}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- broker.Connect(first) }()
+	requirePendingHandshakeCount(t, broker, 1)
+
+	second := newConnectTestStream(
+		connectTestContext(context.Background(), 0x8c),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	if err := broker.Connect(second); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("concurrent Connect() code = %v, want ResourceExhausted", status.Code(err))
+	}
+	select {
+	case err := <-firstResult:
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Fatalf("stalled Connect() code = %v, want DeadlineExceeded", status.Code(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled Connect did not reach its handshake deadline")
+	}
+	// The fake Recv is still blocked after the handler returns. Its slot must
+	// remain held until cancellation actually releases that receiver.
+	if got := len(broker.pendingHandshakes); got != 1 {
+		t.Fatalf("pending handshakes after deadline = %d, want 1", got)
+	}
+	third := newConnectTestStream(
+		connectTestContext(context.Background(), 0x8d),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	if err := broker.Connect(third); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("post-timeout Connect() code = %v, want ResourceExhausted until Recv exits", status.Code(err))
+	}
+	cancelFirst()
+	requirePendingHandshakeCount(t, broker, 0)
+
+	fourth := newConnectTestStream(
+		connectTestContext(context.Background(), 0x8e),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	if err := broker.Connect(fourth); err != nil {
+		t.Fatalf("Connect() after slot release error = %v", err)
+	}
+	if store.claimCalls != 1 {
+		t.Fatalf("session claim calls = %d, want only final valid handshake", store.claimCalls)
+	}
+}
+
+func TestBrokerConnectHandshakeDeadlineBoundsSessionClaim(t *testing.T) {
+	coordinator, _, routes, _ := newCoordinatorHarness(t, 1, 1, 1)
+	broker, store := connectTestBroker(
+		t,
+		coordinator,
+		func(ctx context.Context, _ string, _ CredentialDigest) (SessionClaim, error) {
+			<-ctx.Done()
+			return SessionClaim{}, ctx.Err()
+		},
+		WithConnectHandshakeLimits(ConnectHandshakeLimits{MaxPending: 1, Timeout: 20 * time.Millisecond}),
+	)
+	stream := newConnectTestStream(
+		connectTestContext(context.Background(), 0x8f),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	if err := broker.Connect(stream); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("Connect() code = %v, want DeadlineExceeded", status.Code(err))
+	}
+	if store.claimCalls != 1 || len(stream.sentSnapshot()) != 0 {
+		t.Fatalf("timed-out claim calls/sends = %d/%d, want 1/0", store.claimCalls, len(stream.sentSnapshot()))
+	}
+	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("route stats after claim deadline = %+v, want empty", stats)
 	}
 }
 
@@ -361,6 +455,36 @@ func TestBrokerConnectCleanupFailureLeavesClosingRouteForReplacementRecovery(t *
 	}
 }
 
+func TestBrokerConnectCleanupFailurePreservesPrimaryStatus(t *testing.T) {
+	coordinator, _, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
+	claim := validSessionClaim(1)
+	broker, _ := connectTestBroker(t, coordinator, func(context.Context, string, CredentialDigest) (SessionClaim, error) {
+		return claim, nil
+	})
+	var armed atomic.Bool
+	runtime.before = func(call availabilityCall) {
+		if call.state != ateapipb.WorkerState_WORKER_STATE_ACTIVE || !armed.CompareAndSwap(false, true) {
+			return
+		}
+		runtime.mu.Lock()
+		runtime.offlineFails = 1
+		runtime.offlineErr = errors.New("cleanup failure secret")
+		runtime.mu.Unlock()
+	}
+	stream := newConnectTestStream(
+		connectTestContext(context.Background(), 0x91),
+		connectTestReceive{frame: validClientFrame()},
+		connectTestReceive{frame: validClientFrame()},
+	)
+	err := broker.Connect(stream)
+	if status.Code(err) != codes.InvalidArgument || strings.Contains(err.Error(), "cleanup failure secret") {
+		t.Fatalf("Connect() error = %v, want redacted primary InvalidArgument", err)
+	}
+	if stats := routes.Stats(); stats.Routes != 1 {
+		t.Fatalf("route stats after cleanup failure = %+v, want retained CLOSING route", stats)
+	}
+}
+
 func TestBrokerConnectReplacementInterruptsIdleFrameReceive(t *testing.T) {
 	coordinator, _, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim := validSessionClaim(1)
@@ -514,6 +638,18 @@ func requireCoordinatorWorkerState(t *testing.T, runtime *coordinatorRuntime, wa
 	t.Fatalf("Worker did not reach %v", want)
 }
 
+func requirePendingHandshakeCount(t *testing.T, broker *Broker, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(broker.pendingHandshakes) == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("pending handshake count = %d, want %d", len(broker.pendingHandshakes), want)
+}
+
 func TestSessionAuthorityBindsWorkerRuntimeExactlyOnce(t *testing.T) {
 	config := SessionRuntimeConfig{
 		MaxTrackedRegistrations: 1,
@@ -531,6 +667,36 @@ func TestSessionAuthorityBindsWorkerRuntimeExactlyOnce(t *testing.T) {
 	runtime, err := authority.Bind(workerRuntime, workerRuntime)
 	if err != nil || runtime == nil || runtime.coordinator == nil {
 		t.Fatalf("Bind() runtime/error = %v/%v", runtime, err)
+	}
+	if runtime.coordinator.activateWorkers {
+		t.Fatal("SessionAuthority enabled Workers without an execution-channel forwarder")
+	}
+	claim := validSessionClaim(1)
+	store := &fakeStore{claim: func(context.Context, string, CredentialDigest) (SessionClaim, error) {
+		return claim, nil
+	}}
+	broker, err := newBroker(
+		store,
+		bytes.NewReader(make([]byte, credentialEntropyBytes)),
+		time.Minute,
+		WithSessionRuntime(runtime),
+	)
+	if err != nil {
+		t.Fatalf("newBroker() error = %v", err)
+	}
+	stream := newConnectTestStream(
+		connectTestContext(context.Background(), 0x90),
+		connectTestReceive{frame: validClientFrame()},
+	)
+	if err := broker.Connect(stream); err != nil {
+		t.Fatalf("passive Connect() error = %v", err)
+	}
+	worker := onlyCoordinatorWorker(t, workerRuntime)
+	if worker.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+		t.Fatalf("passive Worker state = %v, want OFFLINE", worker.GetStatus().GetState())
+	}
+	if got := workerRuntime.eventSnapshot(); !slices.Equal(got, []string{"reconcile"}) {
+		t.Fatalf("passive runtime events = %v, want reconciliation without availability writes", got)
 	}
 	if second, err := authority.Bind(workerRuntime, workerRuntime); err == nil || second != nil {
 		t.Fatalf("second Bind() runtime/error = %v/%v, want nil/error", second, err)

@@ -105,6 +105,8 @@ func newExternalProviderBrokerGRPCServer(
 	}
 	server := grpc.NewServer(
 		grpc.Creds(serverCredentials),
+		grpc.MaxRecvMsgSize(externalprovider.MaxWireMessageBytes),
+		grpc.MaxSendMsgSize(externalprovider.MaxBrokerResponseBytes),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge:      time.Hour,

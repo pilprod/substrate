@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	maxServerFrameBytes                  = 1 << 20
+	maxServerFrameBytes                  = MaxWireMessageBytes
 	maxChannelTextBytes                  = 1024
 	maxReadyOpenChannels                 = 65535
 	maxReadyDataBytes                    = 65536

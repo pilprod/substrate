@@ -39,10 +39,15 @@ type sessionCoordinator struct {
 	routes     *SessionRouteDirectory
 	lifecycle  *workerSessionLifecycle
 	limits     ChannelSessionLimits
+	// activateWorkers is true only when the caller also owns a complete
+	// execution-channel forwarding path. Passive transport runtimes leave every
+	// reconciled Worker OFFLINE while still exercising route/session lifecycle.
+	activateWorkers bool
 }
 
-// coordinatedSession is returned only after Ready, route publication, and
-// Worker activation all succeed. close is retryable after an OFFLINE failure.
+// coordinatedSession is returned only after Ready, route publication, and any
+// enabled Worker activation succeed. close is retryable after an OFFLINE
+// failure.
 type coordinatedSession struct {
 	coordinator *sessionCoordinator
 	lease       *sessionLease
@@ -60,6 +65,17 @@ func newSessionCoordinator(
 	lifecycle *workerSessionLifecycle,
 	limits ChannelSessionLimits,
 ) (*sessionCoordinator, error) {
+	return newSessionCoordinatorWithActivation(registry, reconciler, routes, lifecycle, limits, true)
+}
+
+func newSessionCoordinatorWithActivation(
+	registry *sessionRegistry,
+	reconciler WorkerPlanReconciler,
+	routes *SessionRouteDirectory,
+	lifecycle *workerSessionLifecycle,
+	limits ChannelSessionLimits,
+	activateWorkers bool,
+) (*sessionCoordinator, error) {
 	if registry == nil || reconciler == nil || routes == nil || lifecycle == nil ||
 		routes.registry != registry || lifecycle.registry != registry || lifecycle.routes != routes {
 		return nil, fmt.Errorf("%w: registry, reconciler, route directory, and lifecycle authority must agree", errInvalidSessionCoordinator)
@@ -69,11 +85,12 @@ func newSessionCoordinator(
 		return nil, fmt.Errorf("%w: channel limits: %w", errInvalidSessionCoordinator, err)
 	}
 	return &sessionCoordinator{
-		registry:   registry,
-		reconciler: reconciler,
-		routes:     routes,
-		lifecycle:  lifecycle,
-		limits:     normalized,
+		registry:        registry,
+		reconciler:      reconciler,
+		routes:          routes,
+		lifecycle:       lifecycle,
+		limits:          normalized,
+		activateWorkers: activateWorkers,
 	}, nil
 }
 
@@ -157,8 +174,10 @@ func (c *sessionCoordinator) establish(
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.lifecycle.activate(ctx, route, plan, reconciled); err != nil {
-		return nil, fmt.Errorf("activating external provider Workers: %w", err)
+	if c.activateWorkers {
+		if _, err := c.lifecycle.activate(ctx, route, plan, reconciled); err != nil {
+			return nil, fmt.Errorf("activating external provider Workers: %w", err)
+		}
 	}
 
 	session := &coordinatedSession{
