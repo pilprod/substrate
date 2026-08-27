@@ -165,26 +165,48 @@ func (a *SessionAuthority) BindExecutionForwarding(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
 ) (*SessionRuntime, *ExternalExecutionDialer, error) {
+	runtime, execution, _, err := a.bindForwarding(reconciler, availability)
+	return runtime, execution, err
+}
+
+// BindProviderForwarding atomically binds Worker lifecycle and both
+// server-owned provider data planes. EXECUTION_GRPC and ACTOR_INGRESS share one
+// route/session fence while retaining distinct typed dialers, so callers
+// cannot select an arbitrary channel kind.
+func (a *SessionAuthority) BindProviderForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
+	return a.bindForwarding(reconciler, availability)
+}
+
+func (a *SessionAuthority) bindForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
 	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
-		return nil, nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
+		return nil, nil, nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.bound {
-		return nil, nil, fmt.Errorf("%w: authority is already bound", errInvalidSessionRuntime)
+		return nil, nil, nil, fmt.Errorf("%w: authority is already bound", errInvalidSessionRuntime)
 	}
 	lifecycle, err := newWorkerSessionLifecycle(a.registry, availability, a.routes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
+		return nil, nil, nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
 	}
 	forwarder, err := newExecutionForwarder(a.routes, a.executionLimits)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: forwarding: %w", errInvalidSessionRuntime, err)
+		return nil, nil, nil, fmt.Errorf("%w: forwarding: %w", errInvalidSessionRuntime, err)
 	}
 	coordinator, err := newSessionCoordinatorWithForwarder(a.registry, reconciler, a.routes, lifecycle, a.channelLimits, forwarder)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
+		return nil, nil, nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}
 	a.bound = true
-	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, &ExternalExecutionDialer{forwarder: forwarder}, nil
+	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate},
+		&ExternalExecutionDialer{forwarder: forwarder},
+		&ExternalActorIngressDialer{forwarder: forwarder},
+		nil
 }

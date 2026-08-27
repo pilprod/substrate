@@ -1245,6 +1245,58 @@ func TestSessionAuthorityExecutionForwardingIsExplicitAndSingleUse(t *testing.T)
 	}
 }
 
+func TestSessionAuthorityProviderForwardingSharesExactFence(t *testing.T) {
+	config := SessionRuntimeConfig{
+		MaxTrackedRegistrations: 1,
+		ClaimInstallGateLimits:  ClaimInstallGateLimits{MaxInFlight: 1, MaxDistinctKeys: 1},
+		RouteLimits:             SessionRouteDirectoryLimits{MaxRoutes: 1, MaxBindings: 1},
+		ChannelLimits:           ChannelSessionLimits{MaxOpenChannels: 2, MaxDataBytes: 32},
+		ExecutionLimits:         DefaultExecutionForwardingLimits(),
+	}
+	authority, err := NewSessionAuthority(config)
+	if err != nil {
+		t.Fatalf("NewSessionAuthority() error = %v", err)
+	}
+	runtime := newCoordinatorRuntime()
+	sessionRuntime, execution, ingress, err := authority.BindProviderForwarding(runtime, runtime)
+	if err != nil || sessionRuntime == nil || execution == nil || ingress == nil {
+		t.Fatalf("BindProviderForwarding() = (%v, %v, %v, %v)", sessionRuntime, execution, ingress, err)
+	}
+	if execution.forwarder == nil || ingress.forwarder != execution.forwarder ||
+		sessionRuntime.coordinator.forwarder != execution.forwarder || !sessionRuntime.coordinator.activateWorkers {
+		t.Fatal("provider dialers do not share the coordinator's exact forwarding fence")
+	}
+	if second, secondExecution, secondIngress, err := authority.BindProviderForwarding(runtime, runtime); err == nil || second != nil || secondExecution != nil || secondIngress != nil {
+		t.Fatalf("second BindProviderForwarding() = (%v, %v, %v, %v), want nil/nil/nil/error", second, secondExecution, secondIngress, err)
+	}
+}
+
+func TestExternalActorIngressDialerUsesDedicatedChannelKind(t *testing.T) {
+	fixture := newExecutionForwarderFixture(t, nil)
+	result := make(chan executionDialResult, 1)
+	go func() {
+		connection, err := (&ExternalActorIngressDialer{forwarder: fixture.forwarder}).DialContext(context.Background(), fixture.assignment)
+		result <- executionDialResult{conn: connection, err: err}
+	}()
+	open := nextExecutionServerFrame(t, fixture.sender)
+	if open.GetOpen().GetKind() != externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_INGRESS ||
+		open.GetOpen().GetChannelId() == 0 || open.GetOpen().GetChannelId()%2 != 0 || open.GetOpen().GetSlotId() != "slot-a" {
+		t.Fatalf("Open frame = %v, want even ACTOR_INGRESS slot-a", open)
+	}
+	if err := fixture.session.applyClientFrame(clientAckFrame(open.GetSessionGeneration(), open.GetOpen().GetChannelId(), true, "")); err != nil {
+		t.Fatalf("apply accepted OpenAck: %v", err)
+	}
+	select {
+	case dialed := <-result:
+		if dialed.err != nil || dialed.conn == nil {
+			t.Fatalf("DialContext() = (%v, %v)", dialed.conn, dialed.err)
+		}
+		_ = dialed.conn.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("Actor ingress DialContext did not complete after OpenAck")
+	}
+}
+
 func TestExecutionForwarderConcurrentChannelsSerializeSend(t *testing.T) {
 	fixture := newExecutionForwarderFixture(t, nil)
 	dialer := &ExternalExecutionDialer{forwarder: fixture.forwarder}

@@ -352,7 +352,24 @@ func (d *ExternalExecutionDialer) DialContext(ctx context.Context, assignment *a
 	if d == nil || d.forwarder == nil {
 		return nil, ErrExternalExecutionUnavailable
 	}
-	return d.forwarder.dial(ctx, assignment)
+	return d.forwarder.dial(ctx, assignment, externalproviderpb.ChannelKind_CHANNEL_KIND_EXECUTION_GRPC)
+}
+
+// ExternalActorIngressDialer opens generation-fenced ACTOR_INGRESS byte
+// streams. It shares the same route/session fence as ExternalExecutionDialer,
+// so neither channel kind can cross a provider generation replacement.
+type ExternalActorIngressDialer struct {
+	forwarder *executionForwarder
+}
+
+// DialContext validates the complete assignment snapshot, opens a server-owned
+// ACTOR_INGRESS channel, and returns only after the external provider accepts
+// Open. It never consumes an endpoint or provider credential from the caller.
+func (d *ExternalActorIngressDialer) DialContext(ctx context.Context, assignment *ateapipb.WorkerAssignment) (net.Conn, error) {
+	if d == nil || d.forwarder == nil {
+		return nil, ErrExternalExecutionUnavailable
+	}
+	return d.forwarder.dial(ctx, assignment, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_INGRESS)
 }
 
 type executionForwarder struct {
@@ -378,9 +395,13 @@ func newExecutionForwarder(routes *SessionRouteDirectory, limits ExecutionForwar
 	}, nil
 }
 
-func (f *executionForwarder) dial(ctx context.Context, assignment *ateapipb.WorkerAssignment) (net.Conn, error) {
+func (f *executionForwarder) dial(ctx context.Context, assignment *ateapipb.WorkerAssignment, kind externalproviderpb.ChannelKind) (net.Conn, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalidExternalExecutionAssignment)
+	}
+	if kind != externalproviderpb.ChannelKind_CHANNEL_KIND_EXECUTION_GRPC &&
+		kind != externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_INGRESS {
+		return nil, fmt.Errorf("%w: unsupported server channel kind", ErrInvalidExternalExecutionAssignment)
 	}
 	snapshot, err := validateExecutionAssignment(assignment)
 	if err != nil {
@@ -396,7 +417,7 @@ func (f *executionForwarder) dial(ctx context.Context, assignment *ateapipb.Work
 	if session == nil || !f.routes.AuthorizesBinding(route, binding) {
 		return nil, ErrExternalExecutionUnavailable
 	}
-	return session.open(ctx, binding)
+	return session.open(ctx, binding, kind)
 }
 
 type executionAssignmentSnapshot struct {
@@ -585,9 +606,13 @@ func (s *executionSession) done() <-chan struct{} {
 	return s.ctx.Done()
 }
 
-func (s *executionSession) open(ctx context.Context, binding SessionWorkerBinding) (net.Conn, error) {
+func (s *executionSession) open(ctx context.Context, binding SessionWorkerBinding, kind externalproviderpb.ChannelKind) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if kind != externalproviderpb.ChannelKind_CHANNEL_KIND_EXECUTION_GRPC &&
+		kind != externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_INGRESS {
+		return nil, ErrInvalidExternalExecutionAssignment
 	}
 	if err := s.wire.lockOperation(ctx); err != nil {
 		return nil, err
@@ -601,7 +626,7 @@ func (s *executionSession) open(ctx context.Context, binding SessionWorkerBindin
 		s.wire.unlockOperation()
 		return nil, err
 	}
-	effect, err := s.channels.OpenServerChannel(connection.channelID, externalproviderpb.ChannelKind_CHANNEL_KIND_EXECUTION_GRPC, binding.SlotID())
+	effect, err := s.channels.OpenServerChannel(connection.channelID, kind, binding.SlotID())
 	if err == nil {
 		err = s.wire.sendFrame(ctx, effect.Frame())
 	}

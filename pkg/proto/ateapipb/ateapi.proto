@@ -22,6 +22,13 @@ option go_package = "github.com/agent-substrate/substrate/pkg/proto/ateapipb";
 
 // Control is the primary RPC interface for Agentic Substrate.
 service Control {
+  // OpenActorIngress opens one authenticated, ordered byte stream to the
+  // runtime of an exact RUNNING Actor assigned to a live ExternalSlot Worker.
+  // The first client frame must contain open. The server resolves the current
+  // Worker assignment and session route; clients never supply an endpoint,
+  // provider credential, or external session generation.
+  rpc OpenActorIngress(stream ActorIngressFrame) returns (stream ActorIngressFrame) {}
+
   // Get an Actor.
   rpc GetActor(GetActorRequest) returns (Actor) {}
 
@@ -1288,3 +1295,44 @@ message MintCertResponse {
   // leaf-to-root order.
   repeated bytes actor_certificates = 1;
 }
+
+// ActorIngressFrame carries one frame of the in-cluster Actor ingress stream.
+//
+// The first client frame MUST contain open. The first server frame MUST contain
+// opened. open and opened are forbidden afterwards. Exactly one frame member
+// MUST be set. data MUST contain 1..65536 bytes. A sender may emit half_close
+// at most once; it may receive until its peer also half-closes. reset
+// immediately terminates both directions. Error text from the external
+// provider is never carried by this API.
+message ActorIngressFrame {
+  oneof frame {
+    ActorIngressOpen open = 1;
+    ActorIngressOpened opened = 2;
+    bytes data = 3 [debug_redact = true];
+    ActorIngressHalfClose half_close = 4;
+    ActorIngressReset reset = 5;
+  }
+}
+
+// ActorIngressOpen identifies the exact durable Actor incarnation. The server
+// resolves and validates its current Worker assignment after acquiring the
+// Actor lifecycle lease.
+message ActorIngressOpen {
+  // +k8s:opaqueType
+  ObjectRef actor = 1;
+
+  // actor_uid is the canonical server-assigned Actor resource UID observed by
+  // the caller. A deleted and recreated Actor with the same name is rejected.
+  string actor_uid = 2;
+}
+
+// ActorIngressOpened confirms that the exact Actor and provider channel are
+// fenced for this RPC. It intentionally carries no endpoint or generation.
+message ActorIngressOpened {}
+
+// ActorIngressHalfClose ends only the sender's data direction.
+message ActorIngressHalfClose {}
+
+// ActorIngressReset immediately terminates both directions without exposing a
+// peer-provided reason.
+message ActorIngressReset {}

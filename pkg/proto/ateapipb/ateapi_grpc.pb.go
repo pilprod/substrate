@@ -33,6 +33,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	Control_OpenActorIngress_FullMethodName       = "/ateapi.Control/OpenActorIngress"
 	Control_GetActor_FullMethodName               = "/ateapi.Control/GetActor"
 	Control_CreateActor_FullMethodName            = "/ateapi.Control/CreateActor"
 	Control_UpdateActor_FullMethodName            = "/ateapi.Control/UpdateActor"
@@ -69,6 +70,12 @@ const (
 //
 // Control is the primary RPC interface for Agentic Substrate.
 type ControlClient interface {
+	// OpenActorIngress opens one authenticated, ordered byte stream to the
+	// runtime of an exact RUNNING Actor assigned to a live ExternalSlot Worker.
+	// The first client frame must contain open. The server resolves the current
+	// Worker assignment and session route; clients never supply an endpoint,
+	// provider credential, or external session generation.
+	OpenActorIngress(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ActorIngressFrame, ActorIngressFrame], error)
 	// Get an Actor.
 	GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -139,6 +146,19 @@ type controlClient struct {
 func NewControlClient(cc grpc.ClientConnInterface) ControlClient {
 	return &controlClient{cc}
 }
+
+func (c *controlClient) OpenActorIngress(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ActorIngressFrame, ActorIngressFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Control_ServiceDesc.Streams[0], Control_OpenActorIngress_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ActorIngressFrame, ActorIngressFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_OpenActorIngressClient = grpc.BidiStreamingClient[ActorIngressFrame, ActorIngressFrame]
 
 func (c *controlClient) GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -426,6 +446,12 @@ func (c *controlClient) DeleteActorTemplate(ctx context.Context, in *DeleteActor
 //
 // Control is the primary RPC interface for Agentic Substrate.
 type ControlServer interface {
+	// OpenActorIngress opens one authenticated, ordered byte stream to the
+	// runtime of an exact RUNNING Actor assigned to a live ExternalSlot Worker.
+	// The first client frame must contain open. The server resolves the current
+	// Worker assignment and session route; clients never supply an endpoint,
+	// provider credential, or external session generation.
+	OpenActorIngress(grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]) error
 	// Get an Actor.
 	GetActor(context.Context, *GetActorRequest) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -497,6 +523,9 @@ type ControlServer interface {
 // pointer dereference when methods are called.
 type UnimplementedControlServer struct{}
 
+func (UnimplementedControlServer) OpenActorIngress(grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]) error {
+	return status.Error(codes.Unimplemented, "method OpenActorIngress not implemented")
+}
 func (UnimplementedControlServer) GetActor(context.Context, *GetActorRequest) (*Actor, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetActor not implemented")
 }
@@ -601,6 +630,13 @@ func RegisterControlServer(s grpc.ServiceRegistrar, srv ControlServer) {
 	}
 	s.RegisterService(&Control_ServiceDesc, srv)
 }
+
+func _Control_OpenActorIngress_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControlServer).OpenActorIngress(&grpc.GenericServerStream[ActorIngressFrame, ActorIngressFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_OpenActorIngressServer = grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]
 
 func _Control_GetActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetActorRequest)
@@ -1226,7 +1262,14 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DeleteActorTemplate_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "OpenActorIngress",
+			Handler:       _Control_OpenActorIngress_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "ateapi.proto",
 }
 
