@@ -99,7 +99,7 @@ func TestK8sServiceAccountIssuerDiscoveryTransport(t *testing.T) {
 	}
 }
 
-func TestK8sServiceAccountIssuerDiscoveryTransportSendsTokenToKubernetesJWKSURL(t *testing.T) {
+func TestK8sServiceAccountIssuerDiscoveryTransportDoesNotSendTokenToAnyHostJWKSPath(t *testing.T) {
 	tokenFile := t.TempDir() + "/token"
 	if err := os.WriteFile(tokenFile, []byte("test-token\n"), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
@@ -126,8 +126,8 @@ func TestK8sServiceAccountIssuerDiscoveryTransportSendsTokenToKubernetesJWKSURL(
 	if _, err := transport.RoundTrip(req); err != nil {
 		t.Fatalf("RoundTrip() error = %v", err)
 	}
-	if gotAuth != "Bearer test-token" {
-		t.Fatalf("Authorization = %q, want Bearer test-token", gotAuth)
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want empty", gotAuth)
 	}
 }
 
@@ -155,6 +155,9 @@ func TestK8sServiceAccountIssuerDiscoveryTransportDoesNotSendTokenToArbitraryURL
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	// Redirect handling can copy this sensitive header from an earlier request.
+	// The transport must remove it when the new target is outside its allowlist.
+	req.Header.Set("Authorization", "Bearer copied-by-redirect")
 	if _, err := transport.RoundTrip(req); err != nil {
 		t.Fatalf("RoundTrip() error = %v", err)
 	}
@@ -163,8 +166,62 @@ func TestK8sServiceAccountIssuerDiscoveryTransportDoesNotSendTokenToArbitraryURL
 	}
 }
 
+func TestK8sServiceAccountIssuerDiscoveryTransportSendsRotatingTokenOnlyToExactOverrides(t *testing.T) {
+	tokenFile := t.TempDir() + "/token"
+	writeToken := func(token string) {
+		t.Helper()
+		if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+	}
+	writeToken("token-one")
+
+	var gotAuth []string
+	transport := &issuerDiscoveryTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotAuth = append(gotAuth, req.Header.Get("Authorization"))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(nil),
+				Header:     make(http.Header),
+			}, nil
+		}),
+		tokenFile: tokenFile,
+		issuer:    "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c",
+		overrideURLs: []string{
+			"https://kubernetes.default.svc/.well-known/openid-configuration",
+			"https://kubernetes.default.svc/openid/v1/jwks",
+		},
+	}
+
+	request := func(rawURL string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if _, err := transport.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip(%q) error = %v", rawURL, err)
+		}
+	}
+	request("https://kubernetes.default.svc/.well-known/openid-configuration")
+	writeToken("token-two")
+	request("https://kubernetes.default.svc/openid/v1/jwks")
+	request("https://kubernetes.default.svc/openid/v1/jwks?redirected=true")
+
+	want := []string{"Bearer token-one", "Bearer token-two", ""}
+	if len(gotAuth) != len(want) {
+		t.Fatalf("captured Authorization headers = %q, want %q", gotAuth, want)
+	}
+	for i := range want {
+		if gotAuth[i] != want[i] {
+			t.Fatalf("Authorization[%d] = %q, want %q", i, gotAuth[i], want[i])
+		}
+	}
+}
+
 func TestBuildJWTIssuerDiscoveryClientUsesDefaultTransportWithoutDiscoveryToken(t *testing.T) {
-	client, err := NewHTTPClient("https://accounts.google.com", "", "")
+	client, err := NewHTTPClient("https://accounts.google.com", EndpointOverrides{}, "", "")
 	if err != nil {
 		t.Fatalf("NewHTTPClient() error = %v", err)
 	}
@@ -177,8 +234,40 @@ func TestBuildJWTIssuerDiscoveryClientUsesDefaultTransportWithoutDiscoveryToken(
 }
 
 func TestNewHTTPClientRequiresCAWithDiscoveryToken(t *testing.T) {
-	if _, err := NewHTTPClient("https://kubernetes.default.svc", "", "/token"); err == nil {
+	if _, err := NewHTTPClient("https://kubernetes.default.svc", EndpointOverrides{}, "", "/token"); err == nil {
 		t.Fatal("NewHTTPClient() with a discovery token and no CA succeeded")
+	}
+}
+
+func TestNewHTTPClientRejectsInvalidEndpointOverrides(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		overrides EndpointOverrides
+	}{
+		{
+			name:      "partial",
+			overrides: EndpointOverrides{DiscoveryURL: "https://kubernetes.default.svc/.well-known/openid-configuration"},
+		},
+		{
+			name: "insecure discovery",
+			overrides: EndpointOverrides{
+				DiscoveryURL: "http://kubernetes.default.svc/.well-known/openid-configuration",
+				JWKSURL:      "https://kubernetes.default.svc/openid/v1/jwks",
+			},
+		},
+		{
+			name: "JWKS query",
+			overrides: EndpointOverrides{
+				DiscoveryURL: "https://kubernetes.default.svc/.well-known/openid-configuration",
+				JWKSURL:      "https://kubernetes.default.svc/openid/v1/jwks?token=secret",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewHTTPClient("https://issuer.example", tt.overrides, "", ""); err == nil {
+				t.Fatal("NewHTTPClient() succeeded, want error")
+			}
+		})
 	}
 }
 

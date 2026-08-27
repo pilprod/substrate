@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -125,6 +126,7 @@ var (
 type Verifier struct {
 	issuer     string
 	audiences  []string
+	overrides  EndpointOverrides
 	httpClient *http.Client
 
 	mu                    sync.RWMutex
@@ -136,8 +138,8 @@ type Verifier struct {
 
 // NewVerifier returns a verifier for issuer. A token is accepted when at least
 // one of its audiences matches audiences.
-func NewVerifier(issuer string, audiences []string, httpClient *http.Client) *Verifier {
-	return &Verifier{issuer: issuer, audiences: slices.Clone(audiences), httpClient: httpClient}
+func NewVerifier(issuer string, audiences []string, overrides EndpointOverrides, httpClient *http.Client) *Verifier {
+	return &Verifier{issuer: issuer, audiences: slices.Clone(audiences), overrides: overrides, httpClient: httpClient}
 }
 
 // Verify verifies and extracts claims from a JWT.
@@ -308,7 +310,7 @@ func (v *Verifier) key(ctx context.Context, keyID string, now time.Time) (crypto
 	if key == nil && len(v.keys) > 0 {
 		v.lastUnknownKeyRefresh = now
 	}
-	keys, err := discoverKeysForIssuer(ctx, v.httpClient, v.issuer)
+	keys, err := discoverKeysForIssuer(ctx, v.httpClient, v.issuer, v.overrides)
 	if err != nil {
 		v.lastFailedRefresh = now
 		if key != nil {
@@ -455,12 +457,17 @@ type jwkT struct {
 	RSAE string `json:"e"`
 }
 
-func discoverKeysForIssuer(ctx context.Context, httpClient *http.Client, issuer string) ([]*KeyAndID, error) {
-	var discoveryDocURL string
-	if strings.HasSuffix(issuer, "/") {
-		discoveryDocURL = issuer + ".well-known/openid-configuration"
-	} else {
-		discoveryDocURL = issuer + "/.well-known/openid-configuration"
+func discoverKeysForIssuer(ctx context.Context, httpClient *http.Client, issuer string, overrides EndpointOverrides) ([]*KeyAndID, error) {
+	if err := overrides.validate(); err != nil {
+		return nil, err
+	}
+	discoveryDocURL := overrides.DiscoveryURL
+	if discoveryDocURL == "" {
+		if strings.HasSuffix(issuer, "/") {
+			discoveryDocURL = issuer + ".well-known/openid-configuration"
+		} else {
+			discoveryDocURL = issuer + "/.well-known/openid-configuration"
+		}
 	}
 
 	oidcConfig, err := fetchJSON[oidcConfigT](ctx, httpClient, discoveryDocURL)
@@ -473,7 +480,15 @@ func discoverKeysForIssuer(ctx context.Context, httpClient *http.Client, issuer 
 
 	slog.InfoContext(ctx, "Fetched discovery doc", slog.Any("doc", oidcConfig))
 
-	jwkSet, err := fetchJSON[jwkSetT](ctx, httpClient, oidcConfig.JWKSURI)
+	jwksURL := overrides.JWKSURL
+	if jwksURL == "" {
+		jwksURL = oidcConfig.JWKSURI
+	}
+	if err := validateHTTPSFetchURL(jwksURL); err != nil {
+		return nil, fmt.Errorf("discovered JWKS URL is invalid: %w", err)
+	}
+
+	jwkSet, err := fetchJSON[jwkSetT](ctx, httpClient, jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("while fetching JWKS: %w", err)
 	}
@@ -512,6 +527,14 @@ func discoverKeysForIssuer(ctx context.Context, httpClient *http.Client, issuer 
 	}
 
 	return ret, nil
+}
+
+func validateHTTPSFetchURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("must be an absolute HTTPS URL without userinfo or fragment")
+	}
+	return nil
 }
 
 // parseJWK converts a single JWK into a verification key, returning an error for a key

@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,9 +67,134 @@ func newTestIssuer(t *testing.T) *testIssuer {
 		}
 		writeJSON(t, w, ti.jwks)
 	})
-	ti.server = httptest.NewServer(mux)
+	ti.server = httptest.NewTLSServer(mux)
 	t.Cleanup(ti.server.Close)
 	return ti
+}
+
+func TestVerifierUsesExactOverridesAndRotatingDiscoveryToken(t *testing.T) {
+	const gkeIssuer = "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c"
+	tokenFile := t.TempDir() + "/token"
+	writeToken := func(token string) {
+		t.Helper()
+		if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+	}
+	writeToken("token-one")
+
+	var maliciousRequests atomic.Int32
+	malicious := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		maliciousRequests.Add(1)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("malicious JWKS endpoint received Authorization = %q", got)
+		}
+		writeJSON(t, w, jwkSetT{})
+	}))
+	t.Cleanup(malicious.Close)
+
+	key1 := testRSAKey(t)
+	keys := jwkSetT{}
+	addKey := func(kid string, key *rsa.PrivateKey) {
+		keys.Keys = append(keys.Keys, jwkT{
+			KeyType: "RSA",
+			KeyID:   kid,
+			RSAN:    b64url(key.PublicKey.N.Bytes()),
+			RSAE:    b64url(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+		})
+	}
+	addKey("key-one", key1)
+
+	var authMu sync.Mutex
+	var authHeaders []string
+	recordAuth := func(r *http.Request) {
+		authMu.Lock()
+		defer authMu.Unlock()
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		recordAuth(r)
+		writeJSON(t, w, oidcConfigT{Issuer: gkeIssuer, JWKSURI: malicious.URL + "/openid/v1/jwks"})
+	})
+	mux.HandleFunc("/openid/v1/jwks", func(w http.ResponseWriter, r *http.Request) {
+		recordAuth(r)
+		writeJSON(t, w, keys)
+	})
+	overrideServer := httptest.NewTLSServer(mux)
+	t.Cleanup(overrideServer.Close)
+
+	overrides := EndpointOverrides{
+		DiscoveryURL: overrideServer.URL + "/.well-known/openid-configuration",
+		JWKSURL:      overrideServer.URL + "/openid/v1/jwks",
+	}
+	client := overrideServer.Client()
+	client.Transport = &issuerDiscoveryTransport{
+		base:         client.Transport,
+		tokenFile:    tokenFile,
+		issuer:       gkeIssuer,
+		overrideURLs: []string{overrides.DiscoveryURL, overrides.JWKSURL},
+	}
+	verifier := NewVerifier(gkeIssuer, []string{testAudience}, overrides, client)
+	now := time.Now()
+
+	token1 := mintJWT(t, "RS256", "key-one", key1, validClaims(gkeIssuer))
+	if _, err := verifier.Verify(t.Context(), token1, now); err != nil {
+		t.Fatalf("Verify(key-one) error = %v", err)
+	}
+
+	key2, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addKey("key-two", key2)
+	writeToken("token-two")
+	token2 := mintJWT(t, "RS256", "key-two", key2, validClaims(gkeIssuer))
+	if _, err := verifier.Verify(t.Context(), token2, now); err != nil {
+		t.Fatalf("Verify(key-two) after key and service-account token rotation error = %v", err)
+	}
+
+	if got := maliciousRequests.Load(); got != 0 {
+		t.Fatalf("malicious discovery jwks_uri received %d requests, want 0", got)
+	}
+	authMu.Lock()
+	defer authMu.Unlock()
+	wantAuth := []string{"Bearer token-one", "Bearer token-one", "Bearer token-two", "Bearer token-two"}
+	if len(authHeaders) != len(wantAuth) {
+		t.Fatalf("override Authorization headers = %q, want %q", authHeaders, wantAuth)
+	}
+	for i := range wantAuth {
+		if authHeaders[i] != wantAuth[i] {
+			t.Fatalf("override Authorization[%d] = %q, want %q", i, authHeaders[i], wantAuth[i])
+		}
+	}
+}
+
+func TestDiscoverKeysOverrideRejectsIssuerMismatchBeforeJWKSFetch(t *testing.T) {
+	var jwksRequests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, oidcConfigT{Issuer: "https://attacker.example", JWKSURI: "https://attacker.example/jwks"})
+	})
+	mux.HandleFunc("/openid/v1/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		jwksRequests.Add(1)
+		writeJSON(t, w, jwkSetT{})
+	})
+	server := httptest.NewTLSServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := discoverKeysForIssuer(t.Context(), server.Client(),
+		"https://container.googleapis.com/v1/projects/p/locations/l/clusters/c",
+		EndpointOverrides{
+			DiscoveryURL: server.URL + "/.well-known/openid-configuration",
+			JWKSURL:      server.URL + "/openid/v1/jwks",
+		})
+	if err == nil || !strings.Contains(err.Error(), "does not match expected issuer") {
+		t.Fatalf("discoverKeysForIssuer() error = %v, want issuer mismatch", err)
+	}
+	if got := jwksRequests.Load(); got != 0 {
+		t.Fatalf("JWKS requests after issuer mismatch = %d, want 0", got)
+	}
 }
 
 func TestVerifierRetriesInitialDiscoveryFailure(t *testing.T) {
@@ -76,7 +202,7 @@ func TestVerifierRetriesInitialDiscoveryFailure(t *testing.T) {
 	key := testRSAKey(t)
 	ti.addRSA("key", &key.PublicKey)
 	ti.jwksFailures.Store(1)
-	verifier := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client())
+	verifier := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client())
 	token := mintJWT(t, "RS256", "key", key, validClaims(ti.issuer()))
 	now := time.Now()
 
@@ -98,7 +224,7 @@ func TestVerifierUsesCachedKeyWhenRefreshFails(t *testing.T) {
 	ti := newTestIssuer(t)
 	key := testRSAKey(t)
 	ti.addRSA("key", &key.PublicKey)
-	verifier := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client())
+	verifier := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client())
 	token := mintJWT(t, "RS256", "key", key, validClaims(ti.issuer()))
 	now := time.Now()
 
@@ -128,7 +254,7 @@ func TestVerifierReturnsKubernetesClaims(t *testing.T) {
 	}
 	token := mintJWT(t, "RS256", "key", key, claims)
 
-	got, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(t.Context(), token, time.Now())
+	got, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(t.Context(), token, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +267,7 @@ func TestVerifierCachesAndRefreshesKeys(t *testing.T) {
 	ti := newTestIssuer(t)
 	key1 := testRSAKey(t)
 	ti.addRSA("key-1", &key1.PublicKey)
-	verifier := NewVerifier(ti.issuer(), []string{"other", testAudience}, ti.server.Client())
+	verifier := NewVerifier(ti.issuer(), []string{"other", testAudience}, EndpointOverrides{}, ti.server.Client())
 	now := time.Now()
 
 	token1 := mintJWT(t, "RS256", "key-1", key1, validClaims(ti.issuer()))
@@ -359,7 +485,7 @@ func TestVerifyECDSA(t *testing.T) {
 			ti.addEC(t, "ec-1", tc.crv, &key.PublicKey)
 			tok := mintJWT(t, tc.alg, "ec-1", key, validClaims(ti.issuer()))
 
-			if _, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err != nil {
+			if _, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err != nil {
 				t.Fatalf("Verify(%s) = %v, want nil", tc.alg, err)
 			}
 		})
@@ -379,7 +505,7 @@ func TestVerifyRejectsECKeyForRSAlg(t *testing.T) {
 	// RS256 header pointing at the EC key; the RSA signing key is irrelevant because
 	// the key-type check fails before signature verification.
 	tok := mintJWT(t, "RS256", "ec-1", testRSAKey(t), validClaims(ti.issuer()))
-	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err == nil {
+	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err == nil {
 		t.Fatal("Verify accepted an RS256 token whose kid names an EC key")
 	}
 }
@@ -398,7 +524,7 @@ func TestVerifyMixedJWKS(t *testing.T) {
 	ti.addEC(t, "ec-1", "P-256", &ecKey.PublicKey)
 
 	tok := mintJWT(t, "RS256", "rsa-1", rsaKey, validClaims(ti.issuer()))
-	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err != nil {
+	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(context.Background(), tok, time.Now()); err != nil {
 		t.Fatalf("Verify with a mixed RSA+EC JWKS = %v, want nil", err)
 	}
 }
@@ -417,12 +543,12 @@ func TestVerifyUnusableJWKSKeySkipped(t *testing.T) {
 	})
 
 	good := mintJWT(t, "RS256", "rsa-1", rsaKey, validClaims(ti.issuer()))
-	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(context.Background(), good, time.Now()); err != nil {
+	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(context.Background(), good, time.Now()); err != nil {
 		t.Fatalf("Verify with an unusable key in the JWKS = %v, want nil (bad key should be skipped)", err)
 	}
 
 	referencesSkipped := mintJWT(t, "RS256", "ec-bad", rsaKey, validClaims(ti.issuer()))
-	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, ti.server.Client()).Verify(context.Background(), referencesSkipped, time.Now()); err == nil {
+	if _, err := NewVerifier(ti.issuer(), []string{testAudience}, EndpointOverrides{}, ti.server.Client()).Verify(context.Background(), referencesSkipped, time.Now()); err == nil {
 		t.Fatal("Verify accepted a token whose kid names a key that was skipped")
 	}
 }
@@ -435,7 +561,7 @@ func TestDiscoverKeysAllUnusable(t *testing.T) {
 	ti.jwks.Keys = append(ti.jwks.Keys, jwkT{
 		KeyType: "EC", KeyID: "ec-bad", EllipticCurve: "P-192", EllipticX: "AA", EllipticY: "AA",
 	})
-	_, err := discoverKeysForIssuer(context.Background(), ti.server.Client(), ti.issuer())
+	_, err := discoverKeysForIssuer(context.Background(), ti.server.Client(), ti.issuer(), EndpointOverrides{})
 	if err == nil {
 		t.Fatal("discoverKeysForIssuer returned nil error for an issuer with no usable keys")
 	}
@@ -448,7 +574,7 @@ func TestDiscoverKeysAllUnusable(t *testing.T) {
 // keys at all, versus one whose keys are all unusable.
 func TestDiscoverKeysEmptyJWKS(t *testing.T) {
 	ti := newTestIssuer(t) // no keys registered
-	_, err := discoverKeysForIssuer(context.Background(), ti.server.Client(), ti.issuer())
+	_, err := discoverKeysForIssuer(context.Background(), ti.server.Client(), ti.issuer(), EndpointOverrides{})
 	if err == nil {
 		t.Fatal("discoverKeysForIssuer returned nil error for an empty JWKS")
 	}

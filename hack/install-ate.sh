@@ -491,12 +491,12 @@ create_api_authentication_config() {
     fi
   fi
 
-  local discovery_config=""
-  case "${jwt_issuer}" in
-    https://kubernetes.default.svc|https://kubernetes.default.svc.cluster.local)
-      discovery_config=$'  certificateAuthorityFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n  discoveryTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token\n'
-      ;;
-  esac
+  # Keep token verification bound to the issuer published by the cluster while
+  # fetching discovery and signing keys over the in-cluster API path. This is
+  # required on GKE, where the issuer is container.googleapis.com but restricted
+  # workloads do not need public Google API egress merely to authenticate KSAs.
+  local discovery_config
+  discovery_config=$'  discoveryURL: https://kubernetes.default.svc/.well-known/openid-configuration\n  jwksURL: https://kubernetes.default.svc/openid/v1/jwks\n  certificateAuthorityFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n  discoveryTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token\n'
   local authentication_config
   authentication_config=$(printf 'actorIdentityJWTProvider: kubernetes\nexternalProviderEnrollmentAdmins:\n- provider: kubernetes\n  subjects:\n  - system:serviceaccount:ate-system:ate-client\njwtProviders:\n- name: kubernetes\n  issuer: %s\n  audiences: [api.ate-system.svc]\n%s' "${jwt_issuer}" "${discovery_config}")
   run_kubectl create configmap -n ate-system ate-api-authentication \
