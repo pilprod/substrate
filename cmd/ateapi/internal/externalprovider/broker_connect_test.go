@@ -563,7 +563,7 @@ func TestBrokerConnectReplacementInterruptsIdleFrameReceive(t *testing.T) {
 	}
 }
 
-+func TestBrokerConnectReplacementAbortsBlockedProductionSendWithoutWaitCycle(t *testing.T) {
+func TestBrokerConnectReplacementAbortsBlockedProductionSendWithoutWaitCycle(t *testing.T) {
 	coordinator, _, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim := validSessionClaim(1)
 	firstCredential := testCredential(0x92)
@@ -751,11 +751,14 @@ func TestBrokerConnectRevokesAssignmentBeforeDetachedBlockedSendCleanup(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("Connect did not send Ready")
 	}
+	requireCoordinatorWorkerState(t, runtime, ateapipb.WorkerState_WORKER_STATE_ACTIVE)
 	worker := onlyCoordinatorWorker(t, runtime)
 	dialResult := startExecutionDial(context.Background(), &ExternalExecutionDialer{forwarder: coordinator.forwarder}, executionAssignment(worker))
 	var open *externalproviderpb.ServerFrame
 	select {
 	case open = <-openFrames:
+	case dialed := <-dialResult:
+		t.Fatalf("DialContext returned before execution Open: (%v, %v)", dialed.conn, dialed.err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Connect did not send execution Open")
 	}

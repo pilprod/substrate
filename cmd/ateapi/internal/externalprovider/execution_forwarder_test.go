@@ -145,7 +145,7 @@ func newExecutionForwarderFixture(t *testing.T, edit func(*ExecutionForwardingLi
 	ctx, cancel := context.WithCancel(context.Background())
 	sender := newExecutionTestSender()
 	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-	session, err := coordinator.establish(ctx, claim, hello, sender.send)
+	session, err := coordinator.establish(ctx, coordinatorGatedClaim(t, claim), hello, sender.send)
 	if err != nil {
 		cancel()
 		t.Fatalf("establish() error = %v", err)
@@ -827,7 +827,7 @@ func TestRouteReplacementWaitsForInFlightTransportSend(t *testing.T) {
 	}
 	established := make(chan establishOutcome, 1)
 	go func() {
-		session, err := fixture.coordinator.establish(fixture.ctx, claim, hello, secondSender.send)
+		session, err := fixture.coordinator.establish(fixture.ctx, coordinatorGatedClaim(t, claim), hello, secondSender.send)
 		established <- establishOutcome{session: session, err: err}
 	}()
 	select {
@@ -1108,7 +1108,7 @@ func TestExecutionForwarderBindsBeforeActivationAndUnbindsBeforeCleanup(t *testi
 	defer cancel()
 	sender := newExecutionTestSender()
 	claim, hello := coordinatorInput(t, "registration-a", 1, "slot-a")
-	session, err := coordinator.establish(ctx, claim, hello, sender.send)
+	session, err := coordinator.establish(ctx, coordinatorGatedClaim(t, claim), hello, sender.send)
 	if err != nil {
 		t.Fatalf("establish() error = %v", err)
 	}
@@ -1131,7 +1131,7 @@ func TestExecutionForwarderReplacementPreservesNewGeneration(t *testing.T) {
 
 	secondSender := newExecutionTestSender()
 	claim, hello := coordinatorInput(t, "registration-a", 2, "slot-a")
-	second, err := fixture.coordinator.establish(fixture.ctx, claim, hello, secondSender.send)
+	second, err := fixture.coordinator.establish(fixture.ctx, coordinatorGatedClaim(t, claim), hello, secondSender.send)
 	if err != nil {
 		t.Fatalf("establish(generation 2) error = %v", err)
 	}
@@ -1223,6 +1223,7 @@ func TestExecutionForwarderSendFailureFencesGeneration(t *testing.T) {
 func TestSessionAuthorityExecutionForwardingIsExplicitAndSingleUse(t *testing.T) {
 	config := SessionRuntimeConfig{
 		MaxTrackedRegistrations: 1,
+		ClaimInstallGateLimits:  ClaimInstallGateLimits{MaxInFlight: 1, MaxDistinctKeys: 1},
 		RouteLimits:             SessionRouteDirectoryLimits{MaxRoutes: 1, MaxBindings: 1},
 		ChannelLimits:           ChannelSessionLimits{MaxOpenChannels: 1, MaxDataBytes: 32},
 		ExecutionLimits:         DefaultExecutionForwardingLimits(),
