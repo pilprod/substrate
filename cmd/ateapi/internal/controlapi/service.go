@@ -37,6 +37,8 @@ import (
 type RPCService struct {
 	ateapipb.UnimplementedControlServer
 	impl                  serviceStore
+	actorIngressStore     actorIngressStore
+	actorIngressDialer    ActorIngressByteDialer
 	workerCache           *workercache.Cache
 	dialer                workerExecutionDialer
 	workerPoolLister      listersv1alpha1.WorkerPoolLister
@@ -74,6 +76,7 @@ func NewRPCService(
 	impl := newServiceImpl(persistence, actorTemplateLister, storageClassLister)
 	s := &RPCService{
 		impl:                  impl,
+		actorIngressStore:     impl,
 		workerCache:           workerCache,
 		workerPoolLister:      workerPoolLister,
 		csiDriverConfigLister: csiDriverConfigLister,
