@@ -24,8 +24,16 @@ import (
 
 // AuthenticationConfig configures JWT authentication for ateapi.
 type AuthenticationConfig struct {
-	ActorIdentityJWTProvider string              `json:"actorIdentityJWTProvider"`
-	JWTProviders             []JWTProviderConfig `json:"jwtProviders"`
+	ActorIdentityJWTProvider         string               `json:"actorIdentityJWTProvider"`
+	ExternalProviderEnrollmentAdmins []JWTPrincipalConfig `json:"externalProviderEnrollmentAdmins,omitempty"`
+	JWTProviders                     []JWTProviderConfig  `json:"jwtProviders"`
+}
+
+// JWTPrincipalConfig grants one narrowly scoped operation to exact subjects
+// authenticated by a named JWT provider. An empty list grants nobody.
+type JWTPrincipalConfig struct {
+	Provider string   `json:"provider"`
+	Subjects []string `json:"subjects"`
 }
 
 // JWTProviderConfig configures one trusted OIDC issuer.
@@ -95,6 +103,27 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 	}
 	if !names[cfg.ActorIdentityJWTProvider] {
 		return fmt.Errorf("actorIdentityJWTProvider %q does not name a JWT provider", cfg.ActorIdentityJWTProvider)
+	}
+
+	principals := make(map[string]bool)
+	for i, admin := range cfg.ExternalProviderEnrollmentAdmins {
+		field := fmt.Sprintf("externalProviderEnrollmentAdmins[%d]", i)
+		if !names[admin.Provider] {
+			return fmt.Errorf("%s.provider %q does not name a JWT provider", field, admin.Provider)
+		}
+		if len(admin.Subjects) == 0 {
+			return fmt.Errorf("%s.subjects must contain at least one subject", field)
+		}
+		for j, subject := range admin.Subjects {
+			if subject == "" {
+				return fmt.Errorf("%s.subjects[%d] must not be empty", field, j)
+			}
+			principal := admin.Provider + "\x00" + subject
+			if principals[principal] {
+				return fmt.Errorf("duplicate external provider enrollment admin subject %q for provider %q", subject, admin.Provider)
+			}
+			principals[principal] = true
+		}
 	}
 	return nil
 }

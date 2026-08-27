@@ -17,6 +17,7 @@ syntax = "proto3";
 package externalprovider;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 import "ateapi.proto";
 
 option go_package = "github.com/agent-substrate/substrate/pkg/proto/externalproviderpb";
@@ -48,6 +49,45 @@ service ExternalProviderBroker {
   // the network connection and both sides multiplex bounded byte streams over
   // it; no client listener or persisted live endpoint is part of this API.
   rpc Connect(stream ClientFrame) returns (stream ServerFrame) {}
+}
+
+// ExternalProviderAdmin is available only on the authenticated ate-api control
+// listener. It is deliberately not registered on the public Broker listener.
+// Implementations MUST additionally authorize an exact operator identity
+// before validating the request or issuing credential material.
+service ExternalProviderAdmin {
+  // CreateExternalProviderEnrollment creates one scoped, single-use enrollment
+  // credential. The credential is returned exactly once and cannot be looked
+  // up again; only its digest is retained by the server.
+  rpc CreateExternalProviderEnrollment(CreateExternalProviderEnrollmentRequest) returns (CreateExternalProviderEnrollmentResponse) {}
+}
+
+message ExternalProviderEnrollmentScope {
+  string owner_atespace = 1;
+  string worker_namespace = 2;
+  string worker_pool = 3;
+  uint32 max_slots = 4;
+
+  // slot_policy is the exact immutable policy to bind to the enrollment. A
+  // request MUST leave digest empty; the server canonicalizes profiles and
+  // returns the authoritative digest in the response.
+  SlotCapabilityPolicy slot_policy = 5;
+}
+
+message CreateExternalProviderEnrollmentRequest {
+  ExternalProviderEnrollmentScope scope = 1;
+  google.protobuf.Duration ttl = 2;
+}
+
+message CreateExternalProviderEnrollmentResponse {
+  string enrollment_uid = 1;
+
+  // enrollment_credential is an opaque, single-use bearer credential. The
+  // server persists only its digest and never returns these bytes again.
+  bytes enrollment_credential = 2 [ debug_redact = true ];
+
+  google.protobuf.Timestamp expires_at = 3;
+  ExternalProviderEnrollmentScope scope = 4;
 }
 
 // EnrollRequest is intentionally empty. The enrollment credential is carried

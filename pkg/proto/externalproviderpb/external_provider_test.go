@@ -33,7 +33,7 @@ func TestExternalProviderBrokerDescriptor(t *testing.T) {
 	}
 
 	services := File_external_provider_proto.Services()
-	if got, want := services.Len(), 1; got != want {
+	if got, want := services.Len(), 2; got != want {
 		t.Fatalf("service count = %d, want %d", got, want)
 	}
 	service := services.ByName("ExternalProviderBroker")
@@ -73,6 +73,13 @@ func TestExternalProviderBrokerDescriptor(t *testing.T) {
 			t.Errorf("%s server streaming = %t, want %t", test.name, got, test.serverStreaming)
 		}
 	}
+	admin := services.ByName("ExternalProviderAdmin")
+	if admin == nil || admin.FullName() != "externalprovider.ExternalProviderAdmin" {
+		t.Fatalf("ExternalProviderAdmin service = %v", admin)
+	}
+	if got, want := admin.Methods().Len(), 1; got != want || admin.Methods().ByName("CreateExternalProviderEnrollment") == nil {
+		t.Fatalf("ExternalProviderAdmin methods = %v, want CreateExternalProviderEnrollment", admin.Methods())
+	}
 
 	capacity := (&ExternalSlot{}).ProtoReflect().Descriptor().Fields().ByName("capacity").Message()
 	wantCapacity := (&ateapipb.WorkerCapacity{}).ProtoReflect().Descriptor()
@@ -98,11 +105,12 @@ func TestExternalProviderBrokerDescriptor(t *testing.T) {
 
 func TestSensitiveFieldsAreDebugRedacted(t *testing.T) {
 	want := map[protoreflect.FullName]protoreflect.Kind{
-		"externalprovider.EnrollResponse.refresh_credential":      protoreflect.BytesKind,
-		"externalprovider.MintSessionTokenResponse.session_token": protoreflect.BytesKind,
-		"externalprovider.ChannelData.data":                       protoreflect.BytesKind,
-		"externalprovider.OpenChannelAck.error_message":           protoreflect.StringKind,
-		"externalprovider.ResetChannel.reason":                    protoreflect.StringKind,
+		"externalprovider.CreateExternalProviderEnrollmentResponse.enrollment_credential": protoreflect.BytesKind,
+		"externalprovider.EnrollResponse.refresh_credential":                              protoreflect.BytesKind,
+		"externalprovider.MintSessionTokenResponse.session_token":                         protoreflect.BytesKind,
+		"externalprovider.ChannelData.data":                                               protoreflect.BytesKind,
+		"externalprovider.OpenChannelAck.error_message":                                   protoreflect.StringKind,
+		"externalprovider.ResetChannel.reason":                                            protoreflect.StringKind,
 	}
 	found := make(map[protoreflect.FullName]bool, len(want))
 
@@ -147,6 +155,7 @@ func TestRequestMessagesCarryNoCredentialFields(t *testing.T) {
 	}
 
 	for _, message := range []protoreflect.MessageDescriptor{
+		(&CreateExternalProviderEnrollmentRequest{}).ProtoReflect().Descriptor(),
 		(&EnrollRequest{}).ProtoReflect().Descriptor(),
 		(&MintSessionTokenRequest{}).ProtoReflect().Descriptor(),
 		(&ClientFrame{}).ProtoReflect().Descriptor(),
@@ -230,7 +239,7 @@ func TestPublishedSchemaBaseline(t *testing.T) {
 	}
 	sum := sha256.Sum256(wireDescriptor)
 	got := hex.EncodeToString(sum[:])
-	const want = "e4a6d65cd7b6c7a551f3c9e0589dfead1de1e034c141f46c1c8bd63e09c00e34"
+	const want = "a093a7dfb734cbdba0099d1b7d9f8557b82a3359857196479ae3458717ef9964"
 	if got != want {
 		t.Fatalf("wire descriptor SHA-256 = %q, want %q", got, want)
 	}

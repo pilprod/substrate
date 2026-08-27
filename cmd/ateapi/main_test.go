@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/agent-substrate/substrate/internal/ateapiauth"
 )
 
 func TestConnectStoreRequiresPostgresConnectionString(t *testing.T) {
@@ -32,6 +34,29 @@ func TestConnectStoreRequiresPostgresConnectionString(t *testing.T) {
 	_, err := connectStore(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "--postgres-connection-string is required") {
 		t.Fatalf("connectStore() error = %v, want missing-connection-string error", err)
+	}
+}
+
+func TestExternalProviderEnrollmentAdminPrincipalsResolveExactIssuerAndSubject(t *testing.T) {
+	cfg := &ateapiauth.AuthenticationConfig{
+		JWTProviders: []ateapiauth.JWTProviderConfig{
+			{Name: "kubernetes", Issuer: "https://kubernetes.example"},
+			{Name: "google", Issuer: "https://accounts.google.com"},
+		},
+		ExternalProviderEnrollmentAdmins: []ateapiauth.JWTPrincipalConfig{
+			{Provider: "kubernetes", Subjects: []string{"system:serviceaccount:ate-system:ate-client"}},
+			{Provider: "google", Subjects: []string{"operator-a", "operator-b"}},
+		},
+	}
+	principals := externalProviderEnrollmentAdminPrincipals(cfg)
+	if got, want := len(principals), 3; got != want {
+		t.Fatalf("principal count = %d, want %d", got, want)
+	}
+	if got := principals[0]; got.Provider != "kubernetes" || got.Issuer != "https://kubernetes.example" || got.Subject != "system:serviceaccount:ate-system:ate-client" {
+		t.Fatalf("first principal = %+v", got)
+	}
+	if got := principals[2]; got.Provider != "google" || got.Issuer != "https://accounts.google.com" || got.Subject != "operator-b" {
+		t.Fatalf("last principal = %+v", got)
 	}
 }
 

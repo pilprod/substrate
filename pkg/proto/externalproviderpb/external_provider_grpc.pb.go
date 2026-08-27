@@ -249,3 +249,121 @@ var ExternalProviderBroker_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "external_provider.proto",
 }
+
+const (
+	ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName = "/externalprovider.ExternalProviderAdmin/CreateExternalProviderEnrollment"
+)
+
+// ExternalProviderAdminClient is the client API for ExternalProviderAdmin service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ExternalProviderAdmin is available only on the authenticated ate-api control
+// listener. It is deliberately not registered on the public Broker listener.
+// Implementations MUST additionally authorize an exact operator identity
+// before validating the request or issuing credential material.
+type ExternalProviderAdminClient interface {
+	// CreateExternalProviderEnrollment creates one scoped, single-use enrollment
+	// credential. The credential is returned exactly once and cannot be looked
+	// up again; only its digest is retained by the server.
+	CreateExternalProviderEnrollment(ctx context.Context, in *CreateExternalProviderEnrollmentRequest, opts ...grpc.CallOption) (*CreateExternalProviderEnrollmentResponse, error)
+}
+
+type externalProviderAdminClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewExternalProviderAdminClient(cc grpc.ClientConnInterface) ExternalProviderAdminClient {
+	return &externalProviderAdminClient{cc}
+}
+
+func (c *externalProviderAdminClient) CreateExternalProviderEnrollment(ctx context.Context, in *CreateExternalProviderEnrollmentRequest, opts ...grpc.CallOption) (*CreateExternalProviderEnrollmentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateExternalProviderEnrollmentResponse)
+	err := c.cc.Invoke(ctx, ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ExternalProviderAdminServer is the server API for ExternalProviderAdmin service.
+// All implementations must embed UnimplementedExternalProviderAdminServer
+// for forward compatibility.
+//
+// ExternalProviderAdmin is available only on the authenticated ate-api control
+// listener. It is deliberately not registered on the public Broker listener.
+// Implementations MUST additionally authorize an exact operator identity
+// before validating the request or issuing credential material.
+type ExternalProviderAdminServer interface {
+	// CreateExternalProviderEnrollment creates one scoped, single-use enrollment
+	// credential. The credential is returned exactly once and cannot be looked
+	// up again; only its digest is retained by the server.
+	CreateExternalProviderEnrollment(context.Context, *CreateExternalProviderEnrollmentRequest) (*CreateExternalProviderEnrollmentResponse, error)
+	mustEmbedUnimplementedExternalProviderAdminServer()
+}
+
+// UnimplementedExternalProviderAdminServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedExternalProviderAdminServer struct{}
+
+func (UnimplementedExternalProviderAdminServer) CreateExternalProviderEnrollment(context.Context, *CreateExternalProviderEnrollmentRequest) (*CreateExternalProviderEnrollmentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateExternalProviderEnrollment not implemented")
+}
+func (UnimplementedExternalProviderAdminServer) mustEmbedUnimplementedExternalProviderAdminServer() {}
+func (UnimplementedExternalProviderAdminServer) testEmbeddedByValue()                               {}
+
+// UnsafeExternalProviderAdminServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ExternalProviderAdminServer will
+// result in compilation errors.
+type UnsafeExternalProviderAdminServer interface {
+	mustEmbedUnimplementedExternalProviderAdminServer()
+}
+
+func RegisterExternalProviderAdminServer(s grpc.ServiceRegistrar, srv ExternalProviderAdminServer) {
+	// If the following call panics, it indicates UnimplementedExternalProviderAdminServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ExternalProviderAdmin_ServiceDesc, srv)
+}
+
+func _ExternalProviderAdmin_CreateExternalProviderEnrollment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateExternalProviderEnrollmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExternalProviderAdminServer).CreateExternalProviderEnrollment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExternalProviderAdminServer).CreateExternalProviderEnrollment(ctx, req.(*CreateExternalProviderEnrollmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ExternalProviderAdmin_ServiceDesc is the grpc.ServiceDesc for ExternalProviderAdmin service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ExternalProviderAdmin_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "externalprovider.ExternalProviderAdmin",
+	HandlerType: (*ExternalProviderAdminServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateExternalProviderEnrollment",
+			Handler:    _ExternalProviderAdmin_CreateExternalProviderEnrollment_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "external_provider.proto",
+}

@@ -25,6 +25,10 @@ func TestLoadAuthenticationConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "authentication.yaml")
 	if err := os.WriteFile(path, []byte(`
 actorIdentityJWTProvider: kubernetes
+externalProviderEnrollmentAdmins:
+- provider: kubernetes
+  subjects:
+  - system:serviceaccount:ate-system:ate-client
 jwtProviders:
 - name: kubernetes
   issuer: https://kubernetes.default.svc
@@ -41,6 +45,9 @@ jwtProviders:
 	}
 	if got := len(cfg.JWTProviders); got != 2 {
 		t.Fatalf("len(JWTProviders) = %d, want 2", got)
+	}
+	if got := cfg.ExternalProviderEnrollmentAdmins[0].Subjects[0]; got != "system:serviceaccount:ate-system:ate-client" {
+		t.Fatalf("external provider enrollment admin subject = %q", got)
 	}
 }
 
@@ -83,6 +90,21 @@ func TestValidateAuthenticationConfig(t *testing.T) {
 		{name: "insecure issuer", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Issuer = "http://issuer.example" }},
 		{name: "no audiences", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Audiences = nil }},
 		{name: "duplicate provider", mutate: func(c *AuthenticationConfig) { c.JWTProviders = append(c.JWTProviders, c.JWTProviders[0]) }},
+		{name: "unknown enrollment admin provider", mutate: func(c *AuthenticationConfig) {
+			c.ExternalProviderEnrollmentAdmins = []JWTPrincipalConfig{{Provider: "missing", Subjects: []string{"operator"}}}
+		}},
+		{name: "empty enrollment admin subjects", mutate: func(c *AuthenticationConfig) {
+			c.ExternalProviderEnrollmentAdmins = []JWTPrincipalConfig{{Provider: "kubernetes"}}
+		}},
+		{name: "empty enrollment admin subject", mutate: func(c *AuthenticationConfig) {
+			c.ExternalProviderEnrollmentAdmins = []JWTPrincipalConfig{{Provider: "kubernetes", Subjects: []string{""}}}
+		}},
+		{name: "duplicate enrollment admin subject", mutate: func(c *AuthenticationConfig) {
+			c.ExternalProviderEnrollmentAdmins = []JWTPrincipalConfig{
+				{Provider: "kubernetes", Subjects: []string{"operator"}},
+				{Provider: "kubernetes", Subjects: []string{"operator"}},
+			}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

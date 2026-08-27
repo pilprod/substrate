@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/portforward"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -54,10 +55,12 @@ const (
 	liveBundleSelector   = "podcert.ate.dev/canarying=live"
 )
 
-// Client wraps the gRPC ControlClient and DebugClient and ensures the port-forward connection is closed when done.
+// Client wraps ate-api clients and ensures the port-forward connection is
+// closed when done.
 type Client struct {
 	ateapipb.ControlClient
 	ateapipb.DebugClient
+	externalproviderpb.ExternalProviderAdminClient
 	conn           *grpc.ClientConn
 	cancel         func()
 	tracerProvider *sdktrace.TracerProvider
@@ -134,10 +137,11 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		return nil, fmt.Errorf("failed to dial manual endpoint: %w", err)
 	}
 	return &Client{
-		ControlClient: ateapipb.NewControlClient(conn),
-		DebugClient:   ateapipb.NewDebugClient(conn),
-		conn:          conn,
-		cancel:        func() {},
+		ControlClient:               ateapipb.NewControlClient(conn),
+		DebugClient:                 ateapipb.NewDebugClient(conn),
+		ExternalProviderAdminClient: externalproviderpb.NewExternalProviderAdminClient(conn),
+		conn:                        conn,
+		cancel:                      func() {},
 	}, nil
 }
 
@@ -195,10 +199,11 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 	}
 
 	return &Client{
-		ControlClient: ateapipb.NewControlClient(conn),
-		DebugClient:   ateapipb.NewDebugClient(conn),
-		conn:          conn,
-		cancel:        stopForward,
+		ControlClient:               ateapipb.NewControlClient(conn),
+		DebugClient:                 ateapipb.NewDebugClient(conn),
+		ExternalProviderAdminClient: externalproviderpb.NewExternalProviderAdminClient(conn),
+		conn:                        conn,
+		cancel:                      stopForward,
 	}, nil
 }
 

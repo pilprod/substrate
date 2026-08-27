@@ -5,6 +5,10 @@ configured with the file passed to `--authentication-config`:
 
 ```yaml
 actorIdentityJWTProvider: kubernetes
+externalProviderEnrollmentAdmins:
+- provider: kubernetes
+  subjects:
+  - system:serviceaccount:ate-system:ate-client
 jwtProviders:
 - name: kubernetes
   issuer: https://kubernetes.default.svc.cluster.local
@@ -24,9 +28,18 @@ matches. `certificateAuthorityFile` and `discoveryTokenFile` are optional and
 are needed for OIDC discovery against some private Kubernetes API servers.
 
 `actorIdentityJWTProvider` identifies the provider allowed to call
-`ActorIdentity.MintJWT`. Other authenticated providers can call every RPC.
-Authorization and RBAC are not implemented yet, so only configure providers
-whose users should have full access, including `DebugClear`.
+`ActorIdentity.MintJWT`. General authorization and RBAC are not implemented
+yet, so only configure providers whose users should have full control-plane
+access, including `DebugClear`.
+
+`externalProviderEnrollmentAdmins` is a narrow exception: it authorizes only
+`ExternalProviderAdmin.CreateExternalProviderEnrollment`, and only for an
+exact tuple of configured provider name, that provider's verified issuer, and
+JWT `sub`. An omitted or empty list authorizes nobody. mTLS identities are not
+implicitly enrollment administrators. The default installation helper grants
+the `ate-client` ServiceAccount because `kubectl-ate` mints a short-lived token
+for that exact subject; Kubernetes RBAC still controls who may request that
+ServiceAccount token.
 
 ## Google Cloud CLI tokens
 

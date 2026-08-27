@@ -44,6 +44,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
 	"github.com/agent-substrate/substrate/pkg/client/informers/externalversions"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -259,6 +260,14 @@ func main() {
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
 	debugSrv := debugapi.NewService(persistence)
+	externalProviderStore, _ := persistence.(externalprovider.ExternalProviderStore)
+	externalProviderAdminSrv, err := externalprovider.NewEnrollmentAdminServer(
+		externalProviderStore,
+		externalProviderEnrollmentAdminPrincipals(authenticationConfig),
+	)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to configure external provider enrollment admin", err)
+	}
 
 	lisCfg := &net.ListenConfig{}
 	lis, err := lisCfg.Listen(ctx, "tcp", *listenAddr)
@@ -293,11 +302,12 @@ func main() {
 	ateapipb.RegisterControlServer(mux, controlSrv)
 	ateapipb.RegisterActorIdentityServer(mux, actorIdentitySrv)
 	ateapipb.RegisterDebugServer(mux, debugSrv)
+	externalproviderpb.RegisterExternalProviderAdminServer(mux, externalProviderAdminSrv)
 
 	var brokerRuntime *externalProviderBrokerRuntime
 	if brokerConfig.enabled() {
-		brokerStore, ok := persistence.(externalprovider.ExternalProviderStore)
-		if !ok {
+		brokerStore := externalProviderStore
+		if brokerStore == nil {
 			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
 		}
 		recovery, sessionRuntime, err := recoverAndBindExternalProviderDataPlanes(
@@ -544,4 +554,22 @@ func buildJWTProviders(ctx context.Context, cfg *ateapiauth.AuthenticationConfig
 		slog.InfoContext(ctx, "Configured JWT provider", slog.String("name", providerCfg.Name), slog.String("issuer", providerCfg.Issuer))
 	}
 	return serverCfg, actorIdentityIssuer, nil
+}
+
+func externalProviderEnrollmentAdminPrincipals(cfg *ateapiauth.AuthenticationConfig) []externalprovider.EnrollmentAdminPrincipal {
+	issuers := make(map[string]string, len(cfg.JWTProviders))
+	for _, provider := range cfg.JWTProviders {
+		issuers[provider.Name] = provider.Issuer
+	}
+	var result []externalprovider.EnrollmentAdminPrincipal
+	for _, admin := range cfg.ExternalProviderEnrollmentAdmins {
+		for _, subject := range admin.Subjects {
+			result = append(result, externalprovider.EnrollmentAdminPrincipal{
+				Provider: admin.Provider,
+				Issuer:   issuers[admin.Provider],
+				Subject:  subject,
+			})
+		}
+	}
+	return result
 }

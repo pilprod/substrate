@@ -231,6 +231,44 @@ kubectl ate admin make-jwt-pool \
   --secret-namespace ate-system \
   --key-id "1"
 
+# Define the exact immutable slot capability policy. The server canonicalizes
+# profile and label order and returns the authoritative digest.
+cat > /tmp/external-provider-policy.yaml <<'EOF'
+version: 1
+profiles:
+- profileId: codex-native
+  sandboxClass: host-process-hardened
+  labels:
+    agent.example/provider: codex
+  maxSlots: 2
+  capacity:
+    cpuMilli: 4000
+    memoryBytes: 17179869184
+EOF
+
+# Issue one enrollment. The parent directory must already be owner-only. The
+# CLI atomically creates a new 0600 file and refuses to overwrite any path.
+install -d -m 0700 /absolute/private/path
+kubectl ate admin create external-provider-enrollment \
+  --owner-atespace tenant-a \
+  --worker-namespace external-workers \
+  --worker-pool local-agents \
+  --max-slots 2 \
+  --slot-policy /tmp/external-provider-policy.yaml \
+  --ttl 1h \
+  --credential-file /absolute/private/path/enrollment-token
+
 # DANGEROUS: Completely clear all Actor and Worker tracking state
 kubectl ate admin debug-clear-store
 ```
+
+Enrollment issuance uses the primary ate-api TLS/authentication boundary, not
+the public Broker. `externalProviderEnrollmentAdmins` in
+`authentication.yaml` must match the authenticated JWT provider and exact
+subject; missing configuration denies every call. `-o json` and `-o yaml` are
+rejected for this command so the credential is never serialized implicitly.
+Use `--credential-file=-` only to explicitly request raw stdout delivery. Every
+post-RPC output error says `DO NOT RETRY`; for an ambiguous stdout failure,
+discard partial output and issue a new enrollment because the plaintext cannot
+be retrieved. File output is staged, synced, linked without replacement, and
+published only after the server response has been fully validated.

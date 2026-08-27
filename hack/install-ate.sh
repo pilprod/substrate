@@ -498,7 +498,7 @@ create_api_authentication_config() {
       ;;
   esac
   local authentication_config
-  authentication_config=$(printf 'actorIdentityJWTProvider: kubernetes\njwtProviders:\n- name: kubernetes\n  issuer: %s\n  audiences: [api.ate-system.svc]\n%s' "${jwt_issuer}" "${discovery_config}")
+  authentication_config=$(printf 'actorIdentityJWTProvider: kubernetes\nexternalProviderEnrollmentAdmins:\n- provider: kubernetes\n  subjects:\n  - system:serviceaccount:ate-system:ate-client\njwtProviders:\n- name: kubernetes\n  issuer: %s\n  audiences: [api.ate-system.svc]\n%s' "${jwt_issuer}" "${discovery_config}")
   run_kubectl create configmap -n ate-system ate-api-authentication \
     --from-literal=authentication.yaml="${authentication_config}" \
     --dry-run=client -o yaml \

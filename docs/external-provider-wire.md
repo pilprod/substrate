@@ -421,10 +421,15 @@ construction, and scheduler matching share that default-preserving contract.
 
 ## Authentication implementation boundary
 
-The first broker-auth slice is private to the `ateapi` binary and is not
-registered on a gRPC listener. Its in-process issuer returns a stable,
-non-secret enrollment UID for operator lookup or revocation plus a separately
-redacted credential. Enrollment credentials are valid for at most 24 hours;
+The credential issuer remains private to the `ateapi` binary. The primary,
+authenticated ate-api listener exposes only a narrow `ExternalProviderAdmin`
+wrapper for issuance; it requires an exact, explicitly configured JWT provider,
+issuer, and subject before parsing the requested scope. An empty allowlist
+fails closed. `ExternalProviderAdmin` is never registered on the dedicated
+public Broker listener, whose service set remains `ExternalProviderBroker`
+only. The admin response returns a stable, non-secret enrollment UID for
+operator lookup or revocation plus a `debug_redact` credential exactly once.
+Enrollment credentials are valid for at most 24 hours;
 session credentials are valid for at most 15 minutes. Both expiries and all
 revocation timestamps use the PostgreSQL clock.
 
