@@ -218,6 +218,15 @@ func main() {
 		dialerOpts = append(dialerOpts, controlapi.WithInsecureCredentials())
 	}
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts, dialerOpts...)
+	providerExecutionDialer, err := controlapi.NewProviderExecutionDialer(ateletDialer)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to create provider execution dialer", err)
+	}
+	defer func() {
+		if err := providerExecutionDialer.Close(); err != nil {
+			slog.ErrorContext(ctx, "Failed to close provider execution dialer", slog.Any("err", err))
+		}
+	}()
 	brokerConfig := externalProviderBrokerConfig{
 		ListenAddress:          *externalProviderBrokerListenAddr,
 		ServerCredentialBundle: *externalProviderBrokerServerCredBundle,
@@ -240,7 +249,7 @@ func main() {
 		sandboxConfigLister,
 		csiDriverConfigLister,
 		storageClassLister,
-		ateletDialer,
+		providerExecutionDialer,
 		instruments,
 		*egressGatewayAddress,
 		*actorWorkflowDeadline,
@@ -291,9 +300,16 @@ func main() {
 		if !ok {
 			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
 		}
-		recovery, err := externalprovider.RecoverExternalWorkersOffline(ctx, controlSrv, externalprovider.StartupSweepConfig{})
+		recovery, sessionRuntime, err := recoverAndBindExternalProviderExecution(
+			ctx,
+			controlSrv,
+			sessionAuthority,
+			func(dialer *externalprovider.ExternalExecutionDialer) error {
+				return providerExecutionDialer.BindExternal(dialer)
+			},
+		)
 		if err != nil {
-			serverboot.Fatal(ctx, "Failed to recover external provider Workers", err)
+			serverboot.Fatal(ctx, "Failed to recover and bind external provider execution", err)
 		}
 		slog.InfoContext(ctx, "External provider Worker recovery completed",
 			slog.Uint64("scanned", recovery.Scanned),
@@ -302,10 +318,6 @@ func main() {
 			slog.Uint64("already_offline", recovery.AlreadyOffline),
 			slog.Uint64("already_draining", recovery.AlreadyDraining),
 		)
-		sessionRuntime, err := sessionAuthority.Bind(controlSrv, controlSrv)
-		if err != nil {
-			serverboot.Fatal(ctx, "Failed to bind external provider session runtime", err)
-		}
 		brokerRuntime, err = startExternalProviderBroker(ctx, brokerStore, sessionRuntime, brokerConfig, slog.Default())
 		if err != nil {
 			serverboot.Fatal(ctx, "Failed to start external provider Broker", err)

@@ -18,12 +18,50 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 )
+
+func TestRPCServiceSharesUnboundProviderDialerWithWorkflowAndPreservesKubernetes(t *testing.T) {
+	kubernetes := &recordingExecutionDialer{}
+	provider, err := NewProviderExecutionDialer(kubernetes)
+	if err != nil {
+		t.Fatalf("NewProviderExecutionDialer() error = %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+
+	service := NewRPCService(
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		provider,
+		nil,
+		"",
+		time.Second,
+		nil,
+	)
+	if service.dialer != provider || service.actorWorkflow.dialer != provider {
+		t.Fatal("RPC service and workflow do not share the provider execution dialer")
+	}
+	assignment := &ateapipb.WorkerAssignment{
+		WorkerNamespace: "workers-a",
+		WorkerPod:       "worker-a",
+	}
+	if connection, err := service.dialer.DialForWorker(assignment); err != nil || connection != nil {
+		t.Fatalf("unbound provider Kubernetes DialForWorker() = (%v, %v), want nil/nil from Kubernetes test dialer", connection, err)
+	}
+	if kubernetes.workerAssignment != assignment {
+		t.Fatal("unbound provider dialer did not preserve the Kubernetes execution path")
+	}
+}
 
 type recordingExecutionDialer struct {
 	workerAssignment *ateapipb.WorkerAssignment

@@ -38,7 +38,7 @@ type RPCService struct {
 	ateapipb.UnimplementedControlServer
 	impl                  serviceStore
 	workerCache           *workercache.Cache
-	dialer                *AteletDialer
+	dialer                workerExecutionDialer
 	workerPoolLister      listersv1alpha1.WorkerPoolLister
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
 	actorWorkflow         *ActorWorkflow
@@ -64,7 +64,7 @@ func NewRPCService(
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister,
 	storageClassLister storagev1listers.StorageClassLister,
-	dialer *AteletDialer,
+	dialer workerExecutionDialer,
 	instruments *Instruments,
 	egressGatewayAddress string,
 	actorWorkflowDeadline time.Duration,
