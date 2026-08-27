@@ -137,6 +137,30 @@ func (r *sessionRegistry) remove(registrationUID string, generation uint64, leas
 	return true
 }
 
+// whileCurrent runs fn while lease is still the exact current lease. Holding
+// the registry read lock across fn makes a route publication or lookup atomic
+// with respect to a newer generation fencing the lease. Callers must not call
+// a sessionRegistry mutator from fn.
+func (r *sessionRegistry) whileCurrent(lease *sessionLease, fn func()) bool {
+	if r == nil || lease == nil || fn == nil || !IsValidIdentity(lease.registrationUID) || lease.generation == 0 {
+		return false
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	current, exists := r.sessions[lease.registrationUID]
+	if !exists || current.lease != lease || current.lease.generation != lease.generation {
+		return false
+	}
+	select {
+	case <-lease.ctx.Done():
+		return false
+	default:
+	}
+	fn()
+	return true
+}
+
 func (l *sessionLease) registration() string {
 	return l.registrationUID
 }
