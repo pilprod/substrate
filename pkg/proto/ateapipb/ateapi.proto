@@ -1118,6 +1118,9 @@ enum WorkerState {
   WORKER_STATE_ACTIVE = 1;
   // Execution slot draining or terminating. Not schedulable.
   WORKER_STATE_DRAINING = 2;
+  // External execution slot is not connected. Not schedulable. A broker
+  // liveness transition into this state does not clear an Actor assignment.
+  WORKER_STATE_OFFLINE = 3;
 }
 
 message WorkerStatus {

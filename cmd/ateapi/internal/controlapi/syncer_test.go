@@ -440,7 +440,10 @@ func TestSyncer_NeverReconcilesExternalWorker(t *testing.T) {
 			ExecutionIdentity: "host-1.slot-1",
 			LocalityIdentity:  "device-1",
 		},
-		Status: &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+		Status: &ateapipb.WorkerStatus{
+			State:      ateapipb.WorkerState_WORKER_STATE_OFFLINE,
+			Assignment: &ateapipb.ActorAssignment{ActorUid: "actor-uid-1"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create external worker: %v", err)
@@ -464,8 +467,11 @@ func TestSyncer_NeverReconcilesExternalWorker(t *testing.T) {
 		if got.GetWorkerPod() != "" || got.GetWorkerPodUid() != "" || got.GetNodeName() != "" || got.GetIp() != "" {
 			t.Errorf("%s: Kubernetes identity was written to external worker: %v", stage, got)
 		}
-		if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
-			t.Errorf("%s: state = %v, want ACTIVE", stage, got.GetStatus().GetState())
+		if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+			t.Errorf("%s: state = %v, want OFFLINE", stage, got.GetStatus().GetState())
+		}
+		if got.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
+			t.Errorf("%s: assignment = %v, want preserved", stage, got.GetStatus().GetAssignment())
 		}
 	}
 

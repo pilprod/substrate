@@ -139,7 +139,11 @@ func (s *RPCService) CreateWorker(ctx context.Context, req *ateapipb.CreateWorke
 	// status is output-only, so whatever the request carried there is replaced
 	// rather than rejected.
 	worker := proto.Clone(req.GetWorker()).(*ateapipb.Worker)
-	worker.Status = &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
+	initialState := ateapipb.WorkerState_WORKER_STATE_ACTIVE
+	if effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		initialState = ateapipb.WorkerState_WORKER_STATE_OFFLINE
+	}
+	worker.Status = &ateapipb.WorkerStatus{State: initialState}
 
 	created, err := s.impl.CreateWorker(ctx, worker)
 	if errors.Is(err, store.ErrAlreadyExists) {

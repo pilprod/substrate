@@ -1151,6 +1151,61 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 	})
 
+	t.Run("UpdateWorker_ExternalAvailabilityPreservesAssignment", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		worker := newTestWorker(testWorkerName, "")
+		worker.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+		worker.WorkerPodUid = ""
+		worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+		}
+		assignment := &ateapipb.ActorAssignment{
+			ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "default", Name: "test-template"},
+			Actor:         &ateapipb.ObjectRef{Atespace: "team-a", Name: "actor-1"},
+			ActorUid:      "actor-uid-1",
+		}
+		worker.Status = &ateapipb.WorkerStatus{
+			State:      ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Assignment: assignment,
+		}
+		created, err := s.CreateWorker(ctx, worker)
+		if err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+		watch, err := s.WatchWorkers(ctx)
+		if err != nil {
+			t.Fatalf("WatchWorkers failed: %v", err)
+		}
+		defer watch.Close()
+
+		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.Status.State = ateapipb.WorkerState_WORKER_STATE_OFFLINE
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("UpdateWorker failed: %v", err)
+		}
+		if updated.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+			t.Errorf("state = %v, want OFFLINE", updated.GetStatus().GetState())
+		}
+		if diff := cmp.Diff(assignment, updated.GetStatus().GetAssignment(), protocmp.Transform()); diff != "" {
+			t.Errorf("state update changed assignment (-want +got):\n%s", diff)
+		}
+		if updated.GetMetadata().GetVersion() != created.GetMetadata().GetVersion()+1 {
+			t.Errorf("version = %d, want %d", updated.GetMetadata().GetVersion(), created.GetMetadata().GetVersion()+1)
+		}
+		event := receiveEvent(t, watch.Events)
+		if event.Type != store.WorkerEventUpdated {
+			t.Errorf("event type = %v, want WorkerEventUpdated", event.Type)
+		}
+		if diff := cmp.Diff(updated, event.Worker, protocmp.Transform()); diff != "" {
+			t.Errorf("availability event mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("CreateWorker_AlreadyExists", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()

@@ -105,6 +105,13 @@ func TestSchedule(t *testing.T) {
 			constraints: Constraints{SandboxClass: "gvisor"},
 		},
 		{
+			name: "offline workers never scheduled",
+			fleet: fleet{
+				worker("w-offline", "gvisor", "node-a", tierTwo, withState(ateapipb.WorkerState_WORKER_STATE_OFFLINE)),
+			},
+			constraints: Constraints{SandboxClass: "gvisor"},
+		},
+		{
 			name: "unspecified workers never scheduled",
 			fleet: fleet{
 				worker("w-unspecified", "gvisor", "node-a", tierTwo, withState(ateapipb.WorkerState_WORKER_STATE_UNSPECIFIED)),
@@ -256,6 +263,12 @@ func TestApplies(t *testing.T) {
 		{
 			name:        "skips draining worker",
 			worker:      worker("w", "gvisor", "node-a", nil, withState(ateapipb.WorkerState_WORKER_STATE_DRAINING)),
+			constraints: Constraints{SandboxClass: "gvisor"},
+			want:        false,
+		},
+		{
+			name:        "skips offline worker",
+			worker:      worker("w", "gvisor", "node-a", nil, withState(ateapipb.WorkerState_WORKER_STATE_OFFLINE)),
 			constraints: Constraints{SandboxClass: "gvisor"},
 			want:        false,
 		},

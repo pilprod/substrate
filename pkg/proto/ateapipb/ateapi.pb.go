@@ -431,6 +431,9 @@ const (
 	WorkerState_WORKER_STATE_ACTIVE WorkerState = 1
 	// Execution slot draining or terminating. Not schedulable.
 	WorkerState_WORKER_STATE_DRAINING WorkerState = 2
+	// External execution slot is not connected. Not schedulable. A broker
+	// liveness transition into this state does not clear an Actor assignment.
+	WorkerState_WORKER_STATE_OFFLINE WorkerState = 3
 )
 
 // Enum value maps for WorkerState.
@@ -439,11 +442,13 @@ var (
 		0: "WORKER_STATE_UNSPECIFIED",
 		1: "WORKER_STATE_ACTIVE",
 		2: "WORKER_STATE_DRAINING",
+		3: "WORKER_STATE_OFFLINE",
 	}
 	WorkerState_value = map[string]int32{
 		"WORKER_STATE_UNSPECIFIED": 0,
 		"WORKER_STATE_ACTIVE":      1,
 		"WORKER_STATE_DRAINING":    2,
+		"WORKER_STATE_OFFLINE":     3,
 	}
 )
 
@@ -5887,11 +5892,12 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0eWorkerProvider\x12\x1f\n" +
 	"\x1bWORKER_PROVIDER_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eWORKER_PROVIDER_KUBERNETES_POD\x10\x01\x12!\n" +
-	"\x1dWORKER_PROVIDER_EXTERNAL_SLOT\x10\x02*_\n" +
+	"\x1dWORKER_PROVIDER_EXTERNAL_SLOT\x10\x02*y\n" +
 	"\vWorkerState\x12\x1c\n" +
 	"\x18WORKER_STATE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13WORKER_STATE_ACTIVE\x10\x01\x12\x19\n" +
-	"\x15WORKER_STATE_DRAINING\x10\x02*k\n" +
+	"\x15WORKER_STATE_DRAINING\x10\x02\x12\x18\n" +
+	"\x14WORKER_STATE_OFFLINE\x10\x03*k\n" +
 	"\x17ActorCertificatePurpose\x12)\n" +
 	"%ACTOR_CERTIFICATE_PURPOSE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!ACTOR_CERTIFICATE_PURPOSE_ATUNNEL\x10\x012\x9e\x10\n" +

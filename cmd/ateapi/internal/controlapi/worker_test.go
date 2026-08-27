@@ -212,7 +212,7 @@ func TestCreateWorker(t *testing.T) {
 	if got.GetMetadata().GetUid() == "" {
 		t.Error("created worker has no uid; the store is meant to assign one")
 	}
-	// Registration always normalizes the server-owned initial state to ACTIVE.
+	// A KubernetesPod is ready when it registers.
 	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
 		t.Errorf("created worker state = %v, want %v", got.GetStatus().GetState(), ateapipb.WorkerState_WORKER_STATE_ACTIVE)
 	}
@@ -231,6 +231,10 @@ func TestCreateExternalWorker(t *testing.T) {
 	svc, persistence := newWorkerAPIService(t)
 	worker := newAPIWorker(apiWorkerName)
 	makeAPIWorkerExternal(worker)
+	worker.Status = &ateapipb.WorkerStatus{
+		State:      ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+		Assignment: newAPIAssignment("forged-actor-uid"),
+	}
 
 	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
 	if err != nil {
@@ -245,8 +249,11 @@ func TestCreateExternalWorker(t *testing.T) {
 	if got.GetWorkerPod() != "" || got.GetWorkerPodUid() != "" || got.GetNodeName() != "" || got.GetIp() != "" {
 		t.Errorf("external Worker carries Kubernetes identity: %v", got)
 	}
-	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
-		t.Errorf("created worker state = %v, want ACTIVE", got.GetStatus().GetState())
+	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+		t.Errorf("created worker state = %v, want OFFLINE", got.GetStatus().GetState())
+	}
+	if got.GetStatus().GetAssignment() != nil {
+		t.Errorf("created worker assignment = %v, want request-owned status discarded", got.GetStatus().GetAssignment())
 	}
 
 	stored, err := persistence.GetWorker(ctx, apiWorkerName)
@@ -401,6 +408,33 @@ func TestUpdateWorker_LeavesStatusAlone(t *testing.T) {
 	}
 	if diff := cmp.Diff(assigned.GetStatus(), got.GetStatus(), protocmp.Transform()); diff != "" {
 		t.Errorf("UpdateWorker() disturbed status (-want +got):\n%s", diff)
+	}
+}
+
+func TestUpdateWorker_CannotActivateExternalWorker(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newWorkerAPIService(t)
+	worker := newAPIWorker(apiWorkerName)
+	makeAPIWorkerExternal(worker)
+	created, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
+	if err != nil {
+		t.Fatalf("CreateWorker() failed: %v", err)
+	}
+
+	got, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(created, func(w *ateapipb.Worker) {
+			w.SandboxClass = "microvm"
+			w.Status.State = ateapipb.WorkerState_WORKER_STATE_ACTIVE
+		}),
+	})
+	if err != nil {
+		t.Fatalf("UpdateWorker() failed: %v", err)
+	}
+	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+		t.Errorf("state = %v, want OFFLINE: only the external provider broker may activate the Worker", got.GetStatus().GetState())
+	}
+	if got.GetSandboxClass() != "microvm" {
+		t.Errorf("sandbox_class = %q, want mutable fields to be updated", got.GetSandboxClass())
 	}
 }
 
