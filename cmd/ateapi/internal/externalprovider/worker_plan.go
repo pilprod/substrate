@@ -168,6 +168,7 @@ func PlanExternalWorkers(admission *ConnectAdmission) (*WorkerPlan, error) {
 			ExternalSlot: &ateapipb.ExternalSlotIdentity{
 				ExecutionIdentity: executionIdentity,
 				LocalityIdentity:  localityIdentity,
+				OwnerAtespace:     registration.Scope.OwnerAtespace,
 			},
 		}
 		if !resources.IsValidResourceName(name) || !IsValidIdentity(executionIdentity) || !IsValidIdentity(localityIdentity) {

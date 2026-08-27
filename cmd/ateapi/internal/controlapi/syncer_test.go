@@ -439,6 +439,7 @@ func TestSyncer_NeverReconcilesExternalWorker(t *testing.T) {
 		ExternalSlot: &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-1",
 			LocalityIdentity:  "device-1",
+			OwnerAtespace:     "team-a",
 		},
 		Status: &ateapipb.WorkerStatus{
 			State:      ateapipb.WorkerState_WORKER_STATE_OFFLINE,

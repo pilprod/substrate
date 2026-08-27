@@ -123,6 +123,7 @@ func TestValidateWorkerAssignmentCreate(t *testing.T) {
 		assignment.ExternalSlot = &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-01.slot_02",
 			LocalityIdentity:  "device-01~workspace",
+			OwnerAtespace:     "team-a",
 		}
 		return assignment
 	}
@@ -168,6 +169,22 @@ func TestValidateWorkerAssignmentCreate(t *testing.T) {
 			assignment.ExternalSlot.LocalityIdentity = strings.Repeat("z", maxExternalSlotIdentityLength)
 			return assignment
 		}(),
+	}, {
+		name: "ExternalSlot missing owner atespace",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot.OwnerAtespace = ""
+			return assignment
+		}(),
+		want: field.ErrorList{field.Required(root.Child("external_slot", "owner_atespace"), "")},
+	}, {
+		name: "ExternalSlot invalid owner atespace",
+		obj: func() *ateapipb.WorkerAssignment {
+			assignment := validExternal()
+			assignment.ExternalSlot.OwnerAtespace = "Team_A"
+			return assignment
+		}(),
+		want: field.ErrorList{field.Invalid(root.Child("external_slot", "owner_atespace"), nil, "").WithOrigin("format=k8s-short-name")},
 	}, {
 		name: "ExternalSlot missing identity",
 		obj: func() *ateapipb.WorkerAssignment {

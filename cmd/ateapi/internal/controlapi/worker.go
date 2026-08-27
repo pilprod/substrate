@@ -70,6 +70,12 @@ func validateExternalSlotIdentity(identity *ateapipb.ExternalSlotIdentity, fldPa
 	}
 	errs := validateExternalSlotIdentityValue(identity.GetExecutionIdentity(), fldPath.Child("execution_identity"))
 	errs = append(errs, validateExternalSlotIdentityValue(identity.GetLocalityIdentity(), fldPath.Child("locality_identity"))...)
+	ownerPath := fldPath.Child("owner_atespace")
+	if identity.GetOwnerAtespace() == "" {
+		errs = append(errs, field.Required(ownerPath, ""))
+	} else if !resources.IsValidResourceName(identity.GetOwnerAtespace()) {
+		errs = append(errs, field.Invalid(ownerPath, identity.GetOwnerAtespace(), "must be a valid Atespace resource name"))
+	}
 	return errs
 }
 

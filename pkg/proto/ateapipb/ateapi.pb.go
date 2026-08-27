@@ -4921,10 +4921,10 @@ func (x *Worker) GetExternalSlot() *ExternalSlotIdentity {
 	return nil
 }
 
-// ExternalSlotIdentity contains stable provider lookup identities. Both
-// values are opaque, non-secret identifiers: they are never a URL, token,
-// socket path, or live endpoint. The external provider resolves them to an
-// authenticated live session.
+// ExternalSlotIdentity contains stable provider lookup identities and the
+// server-issued ownership boundary. The lookup values are opaque, non-secret
+// identifiers: they are never a URL, token, socket path, or live endpoint. The
+// external provider resolves them to an authenticated live session.
 type ExternalSlotIdentity struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Stable identity used to resolve the execution slot.
@@ -4939,8 +4939,15 @@ type ExternalSlotIdentity struct {
 	// +k8s:maxLength=253
 	// +k8s:customValidation
 	LocalityIdentity string `protobuf:"bytes,2,opt,name=locality_identity,json=localityIdentity,proto3" json:"locality_identity,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// owner_atespace is the only Atespace whose Actors may be placed on this
+	// slot. It is copied from the server-issued provider registration scope;
+	// provider clients cannot select or change it.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	OwnerAtespace string `protobuf:"bytes,3,opt,name=owner_atespace,json=ownerAtespace,proto3" json:"owner_atespace,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExternalSlotIdentity) Reset() {
@@ -4983,6 +4990,13 @@ func (x *ExternalSlotIdentity) GetExecutionIdentity() string {
 func (x *ExternalSlotIdentity) GetLocalityIdentity() string {
 	if x != nil {
 		return x.LocalityIdentity
+	}
+	return ""
+}
+
+func (x *ExternalSlotIdentity) GetOwnerAtespace() string {
+	if x != nil {
+		return x.OwnerAtespace
 	}
 	return ""
 }
@@ -5839,10 +5853,11 @@ const file_ateapi_proto_rawDesc = "" +
 	"\rexternal_slot\x18\r \x01(\v2\x1c.ateapi.ExternalSlotIdentityR\fexternalSlot\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x99\x01\n" +
 	"\x14ExternalSlotIdentity\x12-\n" +
 	"\x12execution_identity\x18\x01 \x01(\tR\x11executionIdentity\x12+\n" +
-	"\x11locality_identity\x18\x02 \x01(\tR\x10localityIdentity\"r\n" +
+	"\x11locality_identity\x18\x02 \x01(\tR\x10localityIdentity\x12%\n" +
+	"\x0eowner_atespace\x18\x03 \x01(\tR\rownerAtespace\"r\n" +
 	"\fWorkerStatus\x12)\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x127\n" +
 	"\n" +

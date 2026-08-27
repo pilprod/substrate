@@ -29,6 +29,11 @@ import (
 
 // Constraints describes what a worker must satisfy to host an actor.
 type Constraints struct {
+	// OwnerAtespace identifies the Actor's Atespace. ExternalSlot workers are
+	// eligible only when their server-issued owner Atespace matches exactly.
+	// KubernetesPod workers are shared and ignore this constraint.
+	OwnerAtespace string
+
 	// SandboxClass must equal the worker's sandbox class. Snapshots are not
 	// portable across sandbox classes, so this is never relaxed.
 	SandboxClass string
@@ -129,6 +134,12 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 }
 
 func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bool {
+	if worker.GetProvider() == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if constraints.OwnerAtespace == "" || worker.GetExternalSlot().GetOwnerAtespace() != constraints.OwnerAtespace {
+			return false
+		}
+	}
+
 	if worker.GetSandboxClass() != constraints.SandboxClass {
 		return false
 	}

@@ -56,6 +56,9 @@ func TestExternalProviderWorkerPlanSatisfiesCreateWorkerContract(t *testing.T) {
 		t.Fatalf("PlanExternalWorkers() error = %v", err)
 	}
 	for _, worker := range plan.Workers() {
+		if got := worker.GetExternalSlot().GetOwnerAtespace(); got != claim.Registration.Scope.OwnerAtespace {
+			t.Errorf("planned Worker %q owner atespace = %q, want %q", worker.GetMetadata().GetName(), got, claim.Registration.Scope.OwnerAtespace)
+		}
 		if errs := validateCreateWorkerRequest(&ateapipb.CreateWorkerRequest{Worker: worker}); len(errs) != 0 {
 			t.Errorf("planned Worker %q failed CreateWorker validation: %v", worker.GetMetadata().GetName(), errs)
 		}

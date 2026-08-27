@@ -72,6 +72,7 @@ func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
 		ExternalSlot: &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-2",
 			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
 		},
 	}
 
@@ -88,6 +89,7 @@ func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
 		ExternalSlot: &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-2",
 			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
 		},
 	}
 	if !proto.Equal(got, want) {

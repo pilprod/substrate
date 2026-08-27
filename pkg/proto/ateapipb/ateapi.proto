@@ -1105,10 +1105,10 @@ enum WorkerProvider {
   WORKER_PROVIDER_EXTERNAL_SLOT = 2;
 }
 
-// ExternalSlotIdentity contains stable provider lookup identities. Both
-// values are opaque, non-secret identifiers: they are never a URL, token,
-// socket path, or live endpoint. The external provider resolves them to an
-// authenticated live session.
+// ExternalSlotIdentity contains stable provider lookup identities and the
+// server-issued ownership boundary. The lookup values are opaque, non-secret
+// identifiers: they are never a URL, token, socket path, or live endpoint. The
+// external provider resolves them to an authenticated live session.
 message ExternalSlotIdentity {
   // Stable identity used to resolve the execution slot.
   //
@@ -1123,6 +1123,14 @@ message ExternalSlotIdentity {
   // +k8s:maxLength=253
   // +k8s:customValidation
   string locality_identity = 2;
+
+  // owner_atespace is the only Atespace whose Actors may be placed on this
+  // slot. It is copied from the server-issued provider registration scope;
+  // provider clients cannot select or change it.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  string owner_atespace = 3;
 }
 
 enum WorkerState {

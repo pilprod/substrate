@@ -1112,6 +1112,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-2",
 			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
 		}
 
 		created, err := s.CreateWorker(ctx, worker)
@@ -1161,6 +1162,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
 			ExecutionIdentity: "host-1.slot-2",
 			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
 		}
 		assignment := &ateapipb.ActorAssignment{
 			ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "default", Name: "test-template"},
@@ -1451,7 +1453,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
 			{"provider", "provider", func(w *ateapipb.Worker) { w.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT }},
 			{"external_slot", "external_slot", func(w *ateapipb.Worker) {
-				w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1"}
+				w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1", OwnerAtespace: "team-a"}
 			}},
 			{"capacity_changed", "capacity", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }},
 			// An update replaces the worker, so a caller that leaves capacity

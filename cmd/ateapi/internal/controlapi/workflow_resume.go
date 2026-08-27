@@ -633,6 +633,7 @@ func actorResourceLimits(tmpl *atev1alpha1.ActorTemplate) (cpuMilli, memBytes in
 func schedulingConstraints(actor *ateapipb.Actor, tmpl *atev1alpha1.ActorTemplate) (scheduling.Constraints, error) {
 	cpuMilli, memBytes := actorResourceLimits(tmpl)
 	c := scheduling.Constraints{
+		OwnerAtespace: actor.GetMetadata().GetAtespace(),
 		SandboxClass:  string(tmpl.Spec.SandboxClass),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes: actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(),

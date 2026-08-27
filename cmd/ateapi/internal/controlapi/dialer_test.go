@@ -280,6 +280,7 @@ func TestDialForWorkerErrors(t *testing.T) {
 			ExternalSlot: &ateapipb.ExternalSlotIdentity{
 				ExecutionIdentity: "host-1.slot-1",
 				LocalityIdentity:  "device-1",
+				OwnerAtespace:     "team-a",
 			},
 		}
 		_, err := d.DialForWorker(assignment)

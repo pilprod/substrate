@@ -57,6 +57,7 @@ func makeAPIWorkerExternal(worker *ateapipb.Worker) {
 	worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
 		ExecutionIdentity: "host-01.slot_02",
 		LocalityIdentity:  "device-01~workspace",
+		OwnerAtespace:     "team-a",
 	}
 	worker.WorkerPod = ""
 	worker.WorkerPodUid = ""
@@ -791,7 +792,7 @@ func TestValidateWorker(t *testing.T) {
 		name: "KubernetesPod worker carries external identity",
 		mutate: func(w *ateapipb.Worker) {
 			w.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
-			w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1"}
+			w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1", OwnerAtespace: "team-a"}
 		},
 		wantMsg: "worker.external_slot: Forbidden",
 	}, {
@@ -808,6 +809,20 @@ func TestValidateWorker(t *testing.T) {
 			w.ExternalSlot.ExecutionIdentity = ""
 		},
 		wantMsg: "worker.external_slot.execution_identity: Required value",
+	}, {
+		name: "ExternalSlot worker missing owner atespace",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.OwnerAtespace = ""
+		},
+		wantMsg: "worker.external_slot.owner_atespace: Required value",
+	}, {
+		name: "ExternalSlot worker rejects invalid owner atespace",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.OwnerAtespace = "Team_A"
+		},
+		wantMsg: "worker.external_slot.owner_atespace: Invalid value",
 	}, {
 		name: "ExternalSlot worker carries pod identity",
 		mutate: func(w *ateapipb.Worker) {
