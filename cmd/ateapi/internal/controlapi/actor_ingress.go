@@ -322,6 +322,9 @@ func bridgeActorIngress(ctx context.Context, stream actorIngressStream, connecti
 		case <-ctx.Done():
 			return actorIngressContextStatus(ctx)
 		case result := <-received:
+			if ctx.Err() != nil {
+				return actorIngressContextStatus(ctx)
+			}
 			if result.err != nil {
 				if errors.Is(result.err, io.EOF) && clientHalfClosed {
 					received = nil
@@ -334,6 +337,9 @@ func bridgeActorIngress(ctx context.Context, stream actorIngressStream, connecti
 				return actorIngressReceiveStatus(ctx, result.err, false)
 			}
 			if err := applyActorIngressClientFrame(result.frame, connection, closeWriter, &clientHalfClosed); err != nil {
+				if ctx.Err() != nil {
+					return actorIngressContextStatus(ctx)
+				}
 				_ = sendActorIngressReset(stream)
 				return err
 			}
@@ -341,6 +347,9 @@ func bridgeActorIngress(ctx context.Context, stream actorIngressStream, connecti
 				return nil
 			}
 		case result := <-read:
+			if ctx.Err() != nil {
+				return actorIngressContextStatus(ctx)
+			}
 			switch {
 			case result.err == nil:
 				if len(result.data) == 0 || len(result.data) > maxActorIngressDataBytes {
@@ -367,7 +376,10 @@ func bridgeActorIngress(ctx context.Context, stream actorIngressStream, connecti
 				if err := sendActorIngressReset(stream); err != nil {
 					return actorIngressSendStatus(ctx)
 				}
-				return nil
+				if ctx.Err() != nil {
+					return actorIngressContextStatus(ctx)
+				}
+				return status.Error(codes.Unavailable, "Actor ingress transport failed")
 			}
 		}
 	}

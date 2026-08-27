@@ -449,8 +449,10 @@ func TestServeActorIngressDoesNotLeakDialerErrors(t *testing.T) {
 func TestServeActorIngressConcurrentStreamsWaitOnlyForOpenFence(t *testing.T) {
 	actor, worker := actorIngressTestResources()
 	st := &actorIngressTestStore{actor: actor, worker: worker}
+	firstConnection := newActorIngressTestConn()
+	secondConnection := newActorIngressTestConn()
 	dialer := &actorIngressBlockingDialer{
-		connections:  []net.Conn{newActorIngressTestConn(), newActorIngressTestConn()},
+		connections:  []net.Conn{firstConnection, secondConnection},
 		firstEntered: make(chan struct{}),
 		releaseFirst: make(chan struct{}),
 	}
@@ -459,20 +461,23 @@ func TestServeActorIngressConcurrentStreamsWaitOnlyForOpenFence(t *testing.T) {
 		t.Fatalf("BindActorIngress() error = %v", err)
 	}
 
-	serve := func(result chan<- error) {
-		result <- service.serveActorIngress(newActorIngressTestStream(
-			actorIngressOpenFrame(),
-			&ateapipb.ActorIngressFrame{Frame: &ateapipb.ActorIngressFrame_Reset_{Reset_: &ateapipb.ActorIngressReset{}}},
-		))
-	}
-	results := make(chan error, 2)
-	go serve(results)
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstReceive := make(chan *ateapipb.ActorIngressFrame, 1)
+	firstReceive <- actorIngressOpenFrame()
+	firstStream := &actorIngressTestStream{ctx: firstContext, recv: firstReceive}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- service.serveActorIngress(firstStream) }()
 	select {
 	case <-dialer.firstEntered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first ingress did not reach the provider Open fence")
 	}
-	go serve(results)
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	secondReceive := make(chan *ateapipb.ActorIngressFrame, 1)
+	secondReceive <- actorIngressOpenFrame()
+	secondStream := &actorIngressTestStream{ctx: secondContext, recv: secondReceive}
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- service.serveActorIngress(secondStream) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for st.acquires.Load() < 2 && time.Now().Before(deadline) {
@@ -482,18 +487,56 @@ func TestServeActorIngressConcurrentStreamsWaitOnlyForOpenFence(t *testing.T) {
 		t.Fatal("second ingress did not contend on the short actor Open fence")
 	}
 	close(dialer.releaseFirst)
-	for range 2 {
-		select {
-		case err := <-results:
-			if err != nil {
-				t.Fatalf("concurrent serveActorIngress() error = %v", err)
+	waitOpened := func(name string, stream *actorIngressTestStream) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			frames := stream.sentFrames()
+			if len(frames) == 1 && frames[0].GetOpened() != nil {
+				return
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("concurrent Actor ingress did not complete")
+			time.Sleep(time.Millisecond)
 		}
+		t.Fatalf("%s ingress did not receive Opened", name)
 	}
+	waitOpened("first", firstStream)
+	waitOpened("second", secondStream)
 	if dialer.calls.Load() != 2 {
 		t.Fatalf("provider dial calls = %d, want 2 independent streams", dialer.calls.Load())
+	}
+	select {
+	case err := <-firstResult:
+		t.Fatalf("first ingress ended before the second opened: %v", err)
+	default:
+	}
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second ingress ended while the first remained open: %v", err)
+	default:
+	}
+	select {
+	case <-firstConnection.closed:
+		t.Fatal("first provider connection closed before the second opened")
+	default:
+	}
+	select {
+	case <-secondConnection.closed:
+		t.Fatal("second provider connection closed while the first remained open")
+	default:
+	}
+	cancelFirst()
+	cancelSecond()
+	close(firstReceive)
+	close(secondReceive)
+	for name, result := range map[string]<-chan error{"first": firstResult, "second": secondResult} {
+		select {
+		case err := <-result:
+			if status.Code(err) != codes.Canceled {
+				t.Fatalf("canceled %s serveActorIngress() code = %v, want Canceled (err %v)", name, status.Code(err), err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("canceled %s Actor ingress did not complete", name)
+		}
 	}
 }
 
@@ -502,8 +545,9 @@ func TestBridgeActorIngressProviderErrorSendsSanitizedReset(t *testing.T) {
 	stream := newActorIngressTestStream(
 		&ateapipb.ActorIngressFrame{Frame: &ateapipb.ActorIngressFrame_HalfClose{HalfClose: &ateapipb.ActorIngressHalfClose{}}},
 	)
-	if err := bridgeActorIngress(context.Background(), stream, connection); err != nil {
-		t.Fatalf("bridgeActorIngress() error = %v", err)
+	err := bridgeActorIngress(context.Background(), stream, connection)
+	if status.Code(err) != codes.Unavailable || strings.Contains(err.Error(), "secret-peer-error") {
+		t.Fatalf("bridgeActorIngress() error = %v, want sanitized Unavailable", err)
 	}
 	frames := stream.sentFrames()
 	if len(frames) != 1 || frames[0].GetReset_() == nil || strings.Contains(frames[0].String(), "secret-peer-error") {
