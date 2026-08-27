@@ -74,6 +74,27 @@ This validator does not claim a credential, receive a stream frame, reconcile a
 Worker, or change session/channel state. `Connect` remains `UNIMPLEMENTED` and
 does not invoke it.
 
+## Server-derived Worker plan
+
+An admitted slot is translated into an immutable, non-secret Worker plan before
+any persistence operation. Substrate derives the global Worker resource name,
+per-slot execution identity, and per-registration locality identity with
+separate domain-separated SHA-256 inputs and length framing. The resulting
+lowercase base32 values satisfy the existing Worker validators and do not
+contain or concatenate caller-provided registration or slot strings.
+
+The plan copies the authenticated namespace and pool plus the admitted sandbox
+class, labels, and capacity, sets provider `ExternalSlot`, and leaves status
+unset so the authoritative CreateWorker path can initialize the Worker
+`OFFLINE`. Session generation and live routing are deliberately absent from the
+durable identity, so a reconnect resolves the same Worker incarnation. A name
+collision with different immutable provider, scope, capacity, execution, or
+locality fields fails closed; only sandbox class and labels remain mutable under
+the existing Worker contract.
+
+Planning is still side-effect free. It does not list, create, update, activate,
+drain, or delete Workers, and it does not make `Connect` available.
+
 ## Authentication implementation boundary
 
 The first broker-auth slice is private to the `ateapi` binary and is not
