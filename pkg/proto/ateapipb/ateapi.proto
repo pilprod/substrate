@@ -1308,7 +1308,7 @@ message ActorIngressFrame {
   oneof frame {
     ActorIngressOpen open = 1;
     ActorIngressOpened opened = 2;
-    bytes data = 3 [debug_redact = true];
+    bytes data = 3 [ debug_redact = true ];
     ActorIngressHalfClose half_close = 4;
     ActorIngressReset reset = 5;
   }
