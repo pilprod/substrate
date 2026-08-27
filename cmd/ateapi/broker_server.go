@@ -53,6 +53,7 @@ type externalProviderBrokerRuntime struct {
 func startExternalProviderBroker(
 	ctx context.Context,
 	store externalprovider.ExternalProviderStore,
+	sessionRuntime *externalprovider.SessionRuntime,
 	config externalProviderBrokerConfig,
 	logger *slog.Logger,
 ) (*externalProviderBrokerRuntime, error) {
@@ -62,11 +63,14 @@ func startExternalProviderBroker(
 	if store == nil {
 		return nil, errors.New("external provider store is not configured")
 	}
+	if sessionRuntime == nil {
+		return nil, errors.New("external provider session runtime is not configured")
+	}
 	serverCredentials, err := externalProviderBrokerServerCredentials(config.ServerCredentialBundle)
 	if err != nil {
 		return nil, err
 	}
-	server, err := newExternalProviderBrokerGRPCServer(store, serverCredentials, config.SessionTokenTTL, logger)
+	server, err := newExternalProviderBrokerGRPCServer(store, sessionRuntime, serverCredentials, config.SessionTokenTTL, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +87,7 @@ func (r *externalProviderBrokerRuntime) Serve() error {
 
 func newExternalProviderBrokerGRPCServer(
 	store externalprovider.ExternalProviderStore,
+	sessionRuntime *externalprovider.SessionRuntime,
 	serverCredentials credentials.TransportCredentials,
 	sessionTokenTTL time.Duration,
 	logger *slog.Logger,
@@ -90,7 +95,11 @@ func newExternalProviderBrokerGRPCServer(
 	if serverCredentials == nil {
 		return nil, errors.New("external provider broker transport credentials are required")
 	}
-	broker, err := externalprovider.NewBroker(store, sessionTokenTTL)
+	brokerOptions := make([]externalprovider.BrokerOption, 0, 1)
+	if sessionRuntime != nil {
+		brokerOptions = append(brokerOptions, externalprovider.WithSessionRuntime(sessionRuntime))
+	}
+	broker, err := externalprovider.NewBroker(store, sessionTokenTTL, brokerOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("create external provider broker: %w", err)
 	}

@@ -218,7 +218,35 @@ func main() {
 		dialerOpts = append(dialerOpts, controlapi.WithInsecureCredentials())
 	}
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts, dialerOpts...)
-	controlSrv := controlapi.NewRPCService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, *actorWorkflowDeadline, volPlugins)
+	brokerConfig := externalProviderBrokerConfig{
+		ListenAddress:          *externalProviderBrokerListenAddr,
+		ServerCredentialBundle: *externalProviderBrokerServerCredBundle,
+		SessionTokenTTL:        *externalProviderSessionTokenTTL,
+	}
+	var sessionAuthority *externalprovider.SessionAuthority
+	var workflowOptions []controlapi.ActorWorkflowOption
+	if brokerConfig.enabled() {
+		sessionAuthority, err = externalprovider.NewSessionAuthority(externalprovider.DefaultSessionRuntimeConfig())
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to create external provider session authority", err)
+		}
+		workflowOptions = append(workflowOptions, controlapi.WithExternalRouteAssignmentGuard(sessionAuthority.AssignmentGuard()))
+	}
+	controlSrv := controlapi.NewRPCService(
+		persistence,
+		workerCache,
+		actorTemplateLister,
+		workerPoolLister,
+		sandboxConfigLister,
+		csiDriverConfigLister,
+		storageClassLister,
+		ateletDialer,
+		instruments,
+		*egressGatewayAddress,
+		*actorWorkflowDeadline,
+		volPlugins,
+		workflowOptions...,
+	)
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
 	debugSrv := debugapi.NewService(persistence)
@@ -257,18 +285,28 @@ func main() {
 	ateapipb.RegisterActorIdentityServer(mux, actorIdentitySrv)
 	ateapipb.RegisterDebugServer(mux, debugSrv)
 
-	brokerConfig := externalProviderBrokerConfig{
-		ListenAddress:          *externalProviderBrokerListenAddr,
-		ServerCredentialBundle: *externalProviderBrokerServerCredBundle,
-		SessionTokenTTL:        *externalProviderSessionTokenTTL,
-	}
 	var brokerRuntime *externalProviderBrokerRuntime
 	if brokerConfig.enabled() {
 		brokerStore, ok := persistence.(externalprovider.ExternalProviderStore)
 		if !ok {
 			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
 		}
-		brokerRuntime, err = startExternalProviderBroker(ctx, brokerStore, brokerConfig, slog.Default())
+		recovery, err := externalprovider.RecoverExternalWorkersOffline(ctx, controlSrv, externalprovider.StartupSweepConfig{})
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to recover external provider Workers", err)
+		}
+		slog.InfoContext(ctx, "External provider Worker recovery completed",
+			slog.Uint64("scanned", recovery.Scanned),
+			slog.Uint64("external", recovery.External),
+			slog.Uint64("offlined", recovery.Offlined),
+			slog.Uint64("already_offline", recovery.AlreadyOffline),
+			slog.Uint64("already_draining", recovery.AlreadyDraining),
+		)
+		sessionRuntime, err := sessionAuthority.Bind(controlSrv, controlSrv)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to bind external provider session runtime", err)
+		}
+		brokerRuntime, err = startExternalProviderBroker(ctx, brokerStore, sessionRuntime, brokerConfig, slog.Default())
 		if err != nil {
 			serverboot.Fatal(ctx, "Failed to start external provider Broker", err)
 		}

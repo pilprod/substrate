@@ -29,12 +29,14 @@ var (
 	errSessionRouteNotPublished      = errors.New("external provider session route is not published")
 )
 
-// externalWorkerAvailabilityController is the ateapi-private status boundary.
+// ExternalWorkerAvailabilityController is the ateapi-private status boundary.
 // The provider stream never supplies Worker status; the control plane applies
 // the transition with its own UID/version guards and immutable-field checks.
-type externalWorkerAvailabilityController interface {
+type ExternalWorkerAvailabilityController interface {
 	SetExternalWorkerAvailability(context.Context, string, string, ateapipb.WorkerState) (*ateapipb.Worker, error)
 }
+
+type externalWorkerAvailabilityController = ExternalWorkerAvailabilityController
 
 // workerSessionRoute is a transport-neutral proof returned only after the
 // session router has sent Ready and atomically published all Worker bindings.

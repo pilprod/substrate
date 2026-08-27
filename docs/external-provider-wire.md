@@ -103,8 +103,8 @@ tombstone, holds at most the admitted 256 immutable Worker references which may
 still be `ACTIVE`. It contains no assignment, mutable labels, sandbox class, or
 client-supplied status.
 
-This boundary does not register a listener, implement `Connect`, or publish a
-route.
+The registry itself does not register a listener, receive `Connect`, or publish
+a route; the bound session authority composes it with those separate owners.
 
 ## Connect admission validation
 
@@ -139,9 +139,9 @@ result stores no protobuf message or caller-owned map and exposes only copied,
 non-secret registration, generation, slot, profile, label, and capacity data.
 
 Neither validator claims a credential, receives a stream frame, reconciles a
-Worker, or changes session/channel state. The future `Connect` owner performs
-the receive and atomic claim between the two pure steps. `Connect` remains
-`UNIMPLEMENTED` and does not invoke them.
+Worker, or changes session/channel state. `Broker.Connect` receives and
+credential-free prevalidates Hello, atomically claims the token, and passes the
+two immutable results to the coordinator.
 
 ## Server-derived Worker plan
 
@@ -241,11 +241,10 @@ This is deliberately an in-process core. The default ateapi deployment still
 runs multiple replicas. The opt-in external-provider Broker release profile
 therefore pins ateapi to one replica with `Recreate`, so only one process owns
 session routes at a time; HA requires a future distributed fencing authority.
-Startup recovery makes persisted external Workers `OFFLINE` before Broker
-readiness, and every desired Worker is preflighted `OFFLINE` on reconnect. This
-slice consumes only a narrow route-authority interface; it does not build a
-second route directory or binding index, implement `Connect`, receive or send
-stream frames, route channels, or send `ConnectReady`.
+Startup recovery makes persisted external Workers `OFFLINE` before the Broker
+listener is created, and every desired Worker is preflighted `OFFLINE` on
+reconnect. The scheduling guard and Connect lifecycle share the same registry
+and route directory; no second binding index exists.
 
 Every newly materialized `WorkerAssignment` also snapshots the selected
 Worker's server-assigned resource UID in `worker_resource_uid`. This is a
@@ -285,17 +284,16 @@ limit bounds server heartbeat probes awaiting acknowledgements. These local
 resource ceilings do not alter `ConnectReady.max_data_bytes` or the public
 channel semantics.
 
-This slice does not claim a session, run a stream loop, install a route, mutate
-a Worker, or register a listener. `Broker.Connect` remains `UNIMPLEMENTED`.
+The state machine still owns no transport, route, or Worker. The Connect owner
+applies its effects in stream order through a one-frame bounded receive pump.
 
 ## Transport-neutral session coordination
 
-The ateapi-private session coordinator now composes the admission, Worker,
-channel, route, and availability primitives without owning a socket or
-registering `Connect`. A future transport owner first receives and
-credential-free prevalidates `ConnectHello`, then atomically claims the
-one-time session token. It passes only the resulting non-secret `SessionClaim`
-and immutable prevalidated hello to the coordinator.
+The ateapi-private session coordinator composes the admission, Worker, channel,
+route, and availability primitives without owning a socket. The Broker
+transport first receives and credential-free prevalidates `ConnectHello`, then
+atomically claims the one-time session token. It passes only the resulting
+non-secret `SessionClaim` and immutable prevalidated hello to the coordinator.
 
 For one generation, the coordinator enforces this order:
 
@@ -336,11 +334,24 @@ route, registry, channel, and Worker bounds remain authoritative; the
 coordinator adds no second route map or unbounded retry.
 
 The dedicated Broker listener is TLS-only, default-disabled, and exposes only
-`ExternalProviderBroker`; `Broker.Connect` remains `UNIMPLEMENTED` and no
-stream receive/send pump or execution channel opener exists. The directory and
-lease are process-local. The opt-in Helm profile therefore uses one ateapi
-replica with `Recreate`; distributed route ownership is required before this
-mode can regain HA or zero-downtime rollout.
+`ExternalProviderBroker`. It prevalidates Hello before consuming the credential,
+sends Ready synchronously, publishes and activates through the coordinator,
+then applies post-Ready frames with at most one frame queued. EOF, cancellation,
+transport failure, protocol failure, route replacement, and unsupported effects
+all enter the same CLOSING, OFFLINE, withdraw, and fence cleanup. Handler status
+messages are fixed and the Broker never logs authorization metadata, frames,
+payloads, peer reset text, or transport error text.
+
+Heartbeat response frames are transport-complete. Execution forwarding is the
+remaining boundary: there is not yet an authority which binds server-opened
+`EXECUTION_GRPC` or `ACTOR_INGRESS` channels, or client-opened `ACTOR_EGRESS`
+channels, to the exact routed Worker and its cluster data plane. Until that
+interface exists, every effect requiring such forwarding fails the entire
+session closed with `FAILED_PRECONDITION`; no actor or execution bytes are
+accepted or silently dropped. The directory and lease are process-local. The
+opt-in Helm profile therefore uses one ateapi replica with `Recreate`;
+distributed route ownership is required before this mode can regain HA or
+zero-downtime rollout.
 
 ## Required workload provider opt-in
 
@@ -374,7 +385,6 @@ unusable and require a new enrollment; the schema never invents authority for
 them. Revoking an enrollment also revokes its registration. The schema reserves session consumption and generation fields,
 and PostgreSQL now provides an atomic session claim: it validates the current
 unexpired token, consumes it exactly once, and advances a nonzero generation
-which fences older sessions. `Connect` remains `UNIMPLEMENTED` and does not yet
-invoke that primitive. Network registration, TLS listener wiring, Worker
-mutation, channel routing, and deployment manifests are intentionally outside
-this slice.
+which fences older sessions. `Connect` invokes that primitive only after a
+valid first frame. Execution-channel forwarding remains separate from
+authentication persistence and fails closed as described above.

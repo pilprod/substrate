@@ -285,14 +285,14 @@ func TestBrokerRejectsCredentialsWithoutStoreAccess(t *testing.T) {
 	}
 }
 
-func TestConnectIsUnimplementedWithoutStoreAccess(t *testing.T) {
+func TestConnectFailsClosedWithoutRuntimeAndStoreAccess(t *testing.T) {
 	store := &fakeStore{}
 	broker, err := newBroker(store, bytes.NewReader(make([]byte, 32)), time.Minute)
 	if err != nil {
 		t.Fatalf("newBroker() error = %v", err)
 	}
-	if err := broker.Connect(nil); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("Connect() code = %v, want Unimplemented", status.Code(err))
+	if err := broker.Connect(nil); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Connect() code = %v, want FailedPrecondition", status.Code(err))
 	}
 	if store.createCalls != 0 || store.consumeCalls != 0 || store.rotateCalls != 0 || store.claimCalls != 0 || store.revokeEnrollmentCalls != 0 || store.revokeRegistrationCalls != 0 {
 		t.Fatalf("Connect accessed store: %+v", store)

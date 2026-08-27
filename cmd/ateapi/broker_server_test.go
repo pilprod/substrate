@@ -55,7 +55,7 @@ func TestExternalProviderBrokerServerIsDedicatedTLSAndMetadataOnly(t *testing.T)
 	store := &brokerServerTestStore{}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	server, err := newExternalProviderBrokerGRPCServer(store, serverCredentials, time.Minute, logger)
+	server, err := newExternalProviderBrokerGRPCServer(store, nil, serverCredentials, time.Minute, logger)
 	if err != nil {
 		t.Fatalf("newExternalProviderBrokerGRPCServer() error = %v", err)
 	}
@@ -112,8 +112,8 @@ func TestExternalProviderBrokerServerIsDedicatedTLSAndMetadataOnly(t *testing.T)
 	if err == nil {
 		_, err = stream.Recv()
 	}
-	if status.Code(err) != codes.Unimplemented {
-		t.Fatalf("Connect() code = %v, want Unimplemented", status.Code(err))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Connect() code = %v, want FailedPrecondition", status.Code(err))
 	}
 	logOutput := logs.String()
 	for _, secret := range []string{enrollmentCredential, string(response.GetRefreshCredential()), sessionCredential} {
@@ -144,14 +144,23 @@ func TestExternalProviderBrokerServerIsDedicatedTLSAndMetadataOnly(t *testing.T)
 }
 
 func TestExternalProviderBrokerServerRequiresExplicitEnablementAndTLS(t *testing.T) {
-	runtime, err := startExternalProviderBroker(context.Background(), nil, externalProviderBrokerConfig{}, nil)
+	runtime, err := startExternalProviderBroker(context.Background(), nil, nil, externalProviderBrokerConfig{}, nil)
 	if err != nil || runtime != nil {
 		t.Fatalf("disabled Broker runtime = %v, error %v; want nil, nil", runtime, err)
+	}
+	if _, err := startExternalProviderBroker(
+		context.Background(),
+		&brokerServerTestStore{},
+		nil,
+		externalProviderBrokerConfig{ListenAddress: "127.0.0.1:0", SessionTokenTTL: time.Minute},
+		nil,
+	); err == nil {
+		t.Fatal("enabled Broker accepted a missing session runtime")
 	}
 	if _, err := externalProviderBrokerServerCredentials(""); err == nil {
 		t.Fatal("externalProviderBrokerServerCredentials() accepted an empty bundle")
 	}
-	if _, err := newExternalProviderBrokerGRPCServer(&brokerServerTestStore{}, nil, time.Minute, nil); err == nil {
+	if _, err := newExternalProviderBrokerGRPCServer(&brokerServerTestStore{}, nil, nil, time.Minute, nil); err == nil {
 		t.Fatal("newExternalProviderBrokerGRPCServer() accepted missing TLS credentials")
 	}
 }

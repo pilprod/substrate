@@ -69,6 +69,7 @@ func NewRPCService(
 	egressGatewayAddress string,
 	actorWorkflowDeadline time.Duration,
 	volumePlugins map[string]volume.VolumePluginControlPlane,
+	workflowOpts ...ActorWorkflowOption,
 ) *RPCService {
 	impl := newServiceImpl(persistence, actorTemplateLister, storageClassLister)
 	s := &RPCService{
@@ -80,7 +81,7 @@ func NewRPCService(
 		instruments:           instruments,
 		volumePlugins:         volumePlugins,
 	}
-	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, actorWorkflowDeadline)
+	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, actorWorkflowDeadline, workflowOpts...)
 	return s
 }
 
