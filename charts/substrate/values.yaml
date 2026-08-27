@@ -14,8 +14,10 @@
 
 # Default values for the substrate chart.
 #
-# The chart requires ClusterTrustBundle, ClusterTrustBundleProjection,
-# PodCertificateRequest, and the certificates.k8s.io/v1beta1 API.
+# The standard profile requires ClusterTrustBundle,
+# ClusterTrustBundleProjection, PodCertificateRequest, and the
+# certificates.k8s.io/v1beta1 API. The external-control-plane-only profile
+# uses existing Kubernetes Secrets instead, for compatibility with GKE.
 
 # Set to true to have the chart create the release namespace.
 # Off by default — most helm workflows expect the namespace to already exist
@@ -24,9 +26,9 @@
 createNamespace: false
 
 # Installation topology. "standard" preserves the historical full control and
-# data plane. "external-control-plane-only" keeps ate-api-server, its dedicated
-# ExternalProviderBroker listener, and the Pod Certificate controller, while
-# omitting every in-cluster worker, network data plane, and storage backend.
+# data plane. "external-control-plane-only" keeps ate-api-server and its
+# dedicated ExternalProviderBroker listener while omitting every in-cluster
+# worker, network data plane, storage backend, and beta Pod Certificate API.
 profile: standard
 
 postgres:
@@ -82,6 +84,20 @@ externalControlPlane:
     existingSecret:
       name: ""
       key: connection-string
+  # The external profile does not use PodCertificate or ClusterTrustBundle
+  # projections. These pre-created Secrets must contain PEM material in the
+  # exact formats documented in README.md; the chart never creates them.
+  tls:
+    apiServer:
+      existingSecret:
+        name: ""
+        credentialBundleKey: server-credential-bundle.pem
+        clientCAKey: client-ca.pem
+    controller:
+      existingSecret:
+        name: ""
+        credentialBundleKey: client-credential-bundle.pem
+        serverCAKey: server-ca.pem
   networkPolicy:
     # The profile selects only ate-api-server and denies all ingress and egress
     # by default. The allow lists below are explicit NetworkPolicy peers/rules.

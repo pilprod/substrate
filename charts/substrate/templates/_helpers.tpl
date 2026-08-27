@@ -104,6 +104,27 @@ are emitted without a tag, letting `ko resolve` supply the digest at build time.
 {{- end -}}
 {{- end -}}
 
+{{/* Validate a required existing Kubernetes Secret name. */}}
+{{- define "substrate.validateExistingSecretName" -}}
+{{- $path := index . 0 -}}
+{{- $value := index . 1 | default "" -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required for profile external-control-plane-only" $path) -}}
+{{- end -}}
+{{- if or (gt (len $value) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $value)) -}}
+{{- fail (printf "%s must be a valid Kubernetes Secret name" $path) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validate a required key in a referenced Kubernetes Secret. */}}
+{{- define "substrate.validateExistingSecretKey" -}}
+{{- $path := index . 0 -}}
+{{- $value := index . 1 | default "" -}}
+{{- if or (not $value) (gt (len $value) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $value)) -}}
+{{- fail (printf "%s must be a valid Kubernetes Secret data key" $path) -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Validate cross-field topology contracts which JSON schema cannot express
 without changing the existing chart's permissive values surface.
@@ -127,16 +148,27 @@ without changing the existing chart's permissive values surface.
 {{- if .Values.postgres.connectionString -}}
 {{- fail "postgres.connectionString is forbidden for profile external-control-plane-only; reference externalControlPlane.postgres.existingSecret instead" -}}
 {{- end -}}
-{{- $secretName := .Values.externalControlPlane.postgres.existingSecret.name | default "" -}}
-{{- $secretKey := .Values.externalControlPlane.postgres.existingSecret.key | default "" -}}
-{{- if not $secretName -}}
-{{- fail "externalControlPlane.postgres.existingSecret.name is required for profile external-control-plane-only" -}}
+{{- $postgresSecret := .Values.externalControlPlane.postgres.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.postgres.existingSecret.name" $postgresSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.postgres.existingSecret.key" $postgresSecret.key) -}}
+{{- $apiTLSSecret := .Values.externalControlPlane.tls.apiServer.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.apiServer.existingSecret.name" $apiTLSSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey" $apiTLSSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.apiServer.existingSecret.clientCAKey" $apiTLSSecret.clientCAKey) -}}
+{{- if eq $apiTLSSecret.credentialBundleKey $apiTLSSecret.clientCAKey -}}
+{{- fail "externalControlPlane.tls.apiServer existing Secret credentialBundleKey and clientCAKey must differ" -}}
 {{- end -}}
-{{- if or (gt (len $secretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $secretName)) -}}
-{{- fail "externalControlPlane.postgres.existingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- $controllerTLSSecret := .Values.externalControlPlane.tls.controller.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.controller.existingSecret.name" $controllerTLSSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.controller.existingSecret.credentialBundleKey" $controllerTLSSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.controller.existingSecret.serverCAKey" $controllerTLSSecret.serverCAKey) -}}
+{{- if eq $controllerTLSSecret.credentialBundleKey $controllerTLSSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.controller existing Secret credentialBundleKey and serverCAKey must differ" -}}
 {{- end -}}
-{{- if or (not $secretKey) (gt (len $secretKey) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $secretKey)) -}}
-{{- fail "externalControlPlane.postgres.existingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- $sharedTLSSecret := eq $apiTLSSecret.name $controllerTLSSecret.name -}}
+{{- $privateKeyOverlap := or (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.credentialBundleKey) (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.serverCAKey) (eq $apiTLSSecret.clientCAKey $controllerTLSSecret.credentialBundleKey) -}}
+{{- if and $sharedTLSSecret $privateKeyOverlap -}}
+{{- fail "externalControlPlane.tls credential keys must not project a private-key bundle into both Pods when one Secret is shared" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

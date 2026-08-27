@@ -89,8 +89,9 @@ spec:
         args:
         - "--controller-mode=external-templates-only"
         - "--ateapi-conn-spec=dns:///{{ include "substrate.fullname" (list "api" .) }}.{{ .Release.Namespace }}.svc:443"
-        - "--ateapi-ca-file=/run/servicedns-ca/trust-bundle.pem"
-        - "--ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+        - "--ateapi-ca-file=/run/secrets/substrate/tls/ate-controller/server-ca.pem"
+        - "--ateapi-server-name={{ include "substrate.fullname" (list "api" .) }}.{{ .Release.Namespace }}.svc"
+        - "--ateapi-client-cert=/run/secrets/substrate/tls/ate-controller/client-credential-bundle.pem"
 {{- if .Values.otel.endpoint }}
         env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -119,23 +120,15 @@ spec:
             drop: ["ALL"]
           readOnlyRootFilesystem: true
         volumeMounts:
-        - { name: servicedns-ca, mountPath: /run/servicedns-ca, readOnly: true }
-        - { name: podidentity, mountPath: /run/podidentity.podcert.ate.dev, readOnly: true }
+        - { name: ate-controller-tls, mountPath: /run/secrets/substrate/tls/ate-controller, readOnly: true }
       volumes:
-      - name: servicedns-ca
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
+      - name: ate-controller-tls
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.controller.existingSecret.name }}
+          defaultMode: 0400
+          items:
+          - key: {{ .Values.externalControlPlane.tls.controller.existingSecret.credentialBundleKey }}
+            path: client-credential-bundle.pem
+          - key: {{ .Values.externalControlPlane.tls.controller.existingSecret.serverCAKey }}
+            path: server-ca.pem
 {{- end }}

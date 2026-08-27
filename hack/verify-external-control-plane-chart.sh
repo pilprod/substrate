@@ -31,7 +31,7 @@ helm lint --strict "${CHART}"
 helm lint --strict "${CHART}" --values "${VALUES}"
 helm template substrate "${CHART}" > "${TMP_DIR}/default.yaml"
 helm template substrate "${CHART}" --set profile=standard > "${TMP_DIR}/explicit-standard.yaml"
-helm template substrate "${CHART}" --values "${VALUES}" > "${TMP_DIR}/external.yaml"
+helm template substrate "${CHART}" --namespace ate-system --values "${VALUES}" > "${TMP_DIR}/external.yaml"
 
 if ! cmp -s "${TMP_DIR}/default.yaml" "${TMP_DIR}/explicit-standard.yaml"; then
   echo "default chart output differs from explicit profile=standard" >&2
@@ -61,6 +61,46 @@ expect_failure \
   helm template substrate "${CHART}" --set profile=external-control-plane-only \
     --set externalControlPlane.postgres.existingSecret.name=substrate-db \
     --set postgres.connectionString=postgresql://forbidden
+expect_failure \
+  "externalControlPlane.tls.apiServer.existingSecret.name is required" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db
+expect_failure \
+  "externalControlPlane.tls.apiServer.existingSecret.name must be a valid Kubernetes Secret name" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=NOT_VALID
+expect_failure \
+  "externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey must be a valid Kubernetes Secret data key" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=substrate-api-tls \
+    --set externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey=bad/key
+expect_failure \
+  "credentialBundleKey and clientCAKey must differ" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=substrate-api-tls \
+    --set externalControlPlane.tls.apiServer.existingSecret.clientCAKey=server-credential-bundle.pem
+expect_failure \
+  "externalControlPlane.tls.controller.existingSecret.name is required" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=substrate-api-tls
+expect_failure \
+  "externalControlPlane.tls.controller.existingSecret.serverCAKey must be a valid Kubernetes Secret data key" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=substrate-api-tls \
+    --set externalControlPlane.tls.controller.existingSecret.name=substrate-controller-tls \
+    --set externalControlPlane.tls.controller.existingSecret.serverCAKey=bad/key
+expect_failure \
+  "credential keys must not project a private-key bundle into both Pods" \
+  helm template substrate "${CHART}" --set profile=external-control-plane-only \
+    --set externalControlPlane.postgres.existingSecret.name=substrate-db \
+    --set externalControlPlane.tls.apiServer.existingSecret.name=shared-tls \
+    --set externalControlPlane.tls.controller.existingSecret.name=shared-tls \
+    --set externalControlPlane.tls.controller.existingSecret.credentialBundleKey=server-credential-bundle.pem
 expect_failure \
   "profile must be one of" \
   helm template substrate "${CHART}" --set profile=unknown
@@ -120,6 +160,14 @@ for forbidden in (
     "image: rustfs/",
     "app: postgres",
     "image: postgres:",
+    "apiVersion: certificates.k8s.io/v1beta1",
+    "podCertificate:",
+    "clusterTrustBundle:",
+    "podcertificaterequests",
+    "clustertrustbundles",
+    "podcertificate-controller",
+    "/run/servicedns.podcert.ate.dev",
+    "/run/podidentity.podcert.ate.dev",
 ):
     if forbidden in rendered:
         raise AssertionError(f"external control-plane profile contains forbidden text {forbidden!r}")
@@ -128,18 +176,25 @@ deployments = resources(docs, "Deployment")
 deployment_names = sorted(
     re.search(r"(?m)^  name: ([^\n]+)$", doc).group(1) for doc in deployments
 )
-if deployment_names != ["ate-api-server", "ate-controller", "podcertificate-controller"]:
+if deployment_names != ["ate-api-server", "ate-controller"]:
     raise AssertionError(f"unexpected Deployments: {deployment_names}")
 
 api = resource(docs, "Deployment", "ate-api-server")
 for required in (
     "  replicas: 1\n  strategy:\n    type: Recreate",
     "--external-provider-broker-listen-addr=0.0.0.0:8443",
-    "--external-provider-broker-server-cred-bundle=",
+    "--grpc-server-cred-bundle=/run/secrets/substrate/tls/ate-api/server-credential-bundle.pem",
+    "--external-provider-broker-server-cred-bundle=/run/secrets/substrate/tls/ate-api/server-credential-bundle.pem",
+    "--pod-identity-ca-certs=/run/secrets/substrate/tls/ate-api/client-ca.pem",
     "--postgres-connection-string-file=/run/secrets/substrate/postgres/connection-string",
     "secretName: substrate-cloud-sql",
+    "secretName: substrate-ate-api-tls",
     "key: connection-string",
     "path: connection-string",
+    "key: server-credential-bundle.pem",
+    "path: server-credential-bundle.pem",
+    "key: client-ca.pem",
+    "path: client-ca.pem",
     "defaultMode: 0400",
     "readOnlyRootFilesystem: true",
     "allowPrivilegeEscalation: false",
@@ -152,6 +207,15 @@ for required in (
     "replicas: 1",
     "--controller-mode=external-templates-only",
     "--ateapi-conn-spec=dns:///api.",
+    "--ateapi-ca-file=/run/secrets/substrate/tls/ate-controller/server-ca.pem",
+    "--ateapi-server-name=api.ate-system.svc",
+    "--ateapi-client-cert=/run/secrets/substrate/tls/ate-controller/client-credential-bundle.pem",
+    "secretName: substrate-ate-controller-tls",
+    "key: client-credential-bundle.pem",
+    "path: client-credential-bundle.pem",
+    "key: server-ca.pem",
+    "path: server-ca.pem",
+    "defaultMode: 0400",
     "readOnlyRootFilesystem: true",
     "allowPrivilegeEscalation: false",
 ):
@@ -212,4 +276,4 @@ for forbidden in ("port: 5432", "192.0.2.20/32"):
         raise AssertionError(f"controller egress NetworkPolicy permits database destination {forbidden!r}")
 PY
 
-echo "External control-plane-only profile is isolated, secret-backed, and data-plane free."
+echo "External control-plane-only profile is beta-certificate-free, secret-backed, isolated, and data-plane free."

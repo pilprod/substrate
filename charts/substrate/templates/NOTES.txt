@@ -6,12 +6,16 @@ configuration, or an external route. ate-api-server reads PostgreSQL from
 Secret/{{ .Values.externalControlPlane.postgres.existingSecret.name }} and is
 isolated together with the external-template-only controller by default-deny
 NetworkPolicy when enabled.
+
+TLS is read only from the existing Secrets referenced under
+externalControlPlane.tls. This profile does not install the Pod Certificate
+controller or require certificates.k8s.io/v1beta1 APIs.
 {{- else }}
 substrate {{ .Chart.AppVersion }} installed with mTLS and PostgreSQL
-{{- end }}
 
 REQUIRED Kubernetes feature gates:
   - ClusterTrustBundle
   - ClusterTrustBundleProjection
   - PodCertificateRequest
 The certificates.k8s.io/v1beta1 API must also be enabled.
+{{- end }}

@@ -22,6 +22,19 @@ externalControlPlane:
     existingSecret:
       name: substrate-cloud-sql
       key: connection-string
+  tls:
+    # Both Secrets are created and rotated outside this chart. Only their
+    # names and key mappings belong in Helm values; never put PEM data here.
+    apiServer:
+      existingSecret:
+        name: substrate-ate-api-tls
+        credentialBundleKey: server-credential-bundle.pem
+        clientCAKey: client-ca.pem
+    controller:
+      existingSecret:
+        name: substrate-ate-controller-tls
+        credentialBundleKey: client-credential-bundle.pem
+        serverCAKey: server-ca.pem
   networkPolicy:
     enabled: true
     allowDNS: true
@@ -42,6 +55,9 @@ externalControlPlane:
       podSelector:
         matchLabels:
           app.kubernetes.io/name: client-gateway
+    # These rules intentionally do not fake an ipBlock for the public GKE KSA
+    # issuer/JWKS hostname. Add its real, governed egress path until ate-api
+    # supports an explicit in-cluster JWKS endpoint override.
     egress:
     # Replace these documentation-only addresses with the exact private GKE
     # API endpoint and private Cloud SQL endpoint assigned to the environment.
