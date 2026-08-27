@@ -363,7 +363,7 @@ func TestBrokerConnectRedactsClaimFailureBeforeReady(t *testing.T) {
 	requireClaimInstallGateStats(t, broker.sessionRuntime.claimInstallGate, claimInstallGateStats{})
 }
 
-func TestBrokerConnectFailsClosedForUnwiredExecutionEffect(t *testing.T) {
+func TestBrokerConnectRejectsUnsupportedClientChannelWithoutDroppingSession(t *testing.T) {
 	coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim := validSessionClaim(1)
 	broker, _ := connectTestBroker(t, coordinator, func(context.Context, string, CredentialDigest) (SessionClaim, error) {
@@ -383,8 +383,13 @@ func TestBrokerConnectFailsClosedForUnwiredExecutionEffect(t *testing.T) {
 		connectTestReceive{frame: open},
 	)
 	err := broker.Connect(stream)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("Connect() code = %v, want FailedPrecondition", status.Code(err))
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	sent := stream.sentSnapshot()
+	if len(sent) != 2 || sent[0].GetReady() == nil || sent[1].GetOpenAck().GetChannelId() != 1 ||
+		sent[1].GetOpenAck().GetAccepted() || sent[1].GetOpenAck().GetErrorMessage() == "" {
+		t.Fatalf("server frames = %v, want Ready then bounded rejection", sent)
 	}
 	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
 		t.Fatalf("route stats after unsupported effect = %+v, want empty", stats)

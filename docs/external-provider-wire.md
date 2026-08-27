@@ -206,7 +206,8 @@ client-writable. The required caller order is:
 3. Initialize the stream and send `ConnectReady`.
 4. Atomically publish all route bindings and obtain the immutable publication
    proof from the route directory.
-5. Pass that proof to Worker activation.
+5. Bind the exact route and channel state to the sole live Connect transport.
+6. Pass that proof to Worker activation.
 
 Activation rejects a bare lease, an unpublished or withdrawn proof, a proof for
 another lease/generation, and any Worker tuple not authorized by the current
@@ -299,7 +300,9 @@ resource ceilings do not alter `ConnectReady.max_data_bytes` or the public
 channel semantics.
 
 The state machine still owns no transport, route, or Worker. The Connect owner
-applies its effects in stream order through a one-frame bounded receive pump.
+applies its effects in stream order through a one-frame bounded receive pump;
+the execution forwarder serializes state transitions and the corresponding
+server frames through the stream's single permitted sender.
 
 ## Transport-neutral session coordination
 
@@ -320,9 +323,11 @@ For one generation, the coordinator enforces this order:
    frame. The callback returns success only after the frame is visible to the
    peer.
 6. Publish the bindings through the existing `SessionRouteDirectory`.
-7. For a coordinator constructed together with execution forwarding, activate
-   Workers through the generation-gated Worker lifecycle. A passive transport
-   coordinator stops after publication and leaves them `OFFLINE`.
+7. For a coordinator constructed together with execution forwarding, bind the
+   exact route, channel state, and live Connect sender.
+8. Only after that binding succeeds, activate Workers through the generation-
+   gated Worker lifecycle. A passive transport coordinator stops after
+   publication and leaves them `OFFLINE`.
 
 No Worker becomes `ACTIVE` before both the Ready callback and route publication
 succeed. Admission, reconciliation, and channel-state failures never cross the
@@ -339,15 +344,18 @@ bounded conservative Worker set inherited from a fenced generation. Failed
 setup exact-removes its lease after that best-effort pass; any Workers whose
 OFFLINE write failed remain in the bounded lifecycle tombstone for a newer
 generation to preflight. A successfully established session closes in the
-opposite safety order: mark its exact route `CLOSING`, set owned Workers
-`OFFLINE`, withdraw the route, then exact-remove its lease. If OFFLINE fails
-during normal close, the closed route retains its bindings while remaining
-unavailable and the handle retains the lease for an explicit bounded retry.
+opposite safety order: unbind and close every execution channel, mark its exact
+route `CLOSING`, set owned Workers `OFFLINE`, withdraw the route, then exact-
+remove its lease. If OFFLINE fails during normal close, the closed route
+retains its bindings while remaining unavailable and the handle retains the
+lease for an explicit bounded retry.
 
-The coordinator starts no goroutine and emits no log. Its callback frame and
-all retained state contain no credential or data payload. Existing admission,
-route, registry, channel, and Worker bounds remain authoritative; the
-coordinator adds no second route map or unbounded retry.
+The coordinator emits no log. A bounded sender goroutine is the sole caller of
+`Connect.Send`, and route/transport observers terminate the generation and its
+connections. Their retained state contains no credential. Payload bytes exist
+only in bounded per-channel receive buffers and copied frames until consumed.
+Existing admission, route, registry, channel, and Worker bounds remain
+authoritative; the coordinator adds no unbounded retry.
 
 The dedicated Broker listener is TLS-only, default-disabled, and exposes only
 `ExternalProviderBroker`. It prevalidates Hello before consuming the credential,
@@ -365,34 +373,37 @@ messages are fixed and the Broker never logs
 authorization metadata, frames, payloads, peer reset text, or transport error
 text.
 
-Heartbeat response frames are transport-complete. Execution forwarding is the
-remaining boundary: there is not yet an authority which binds server-opened
-`EXECUTION_GRPC` or `ACTOR_INGRESS` channels, or client-opened `ACTOR_EGRESS`
-channels, to the exact routed Worker and its cluster data plane. Until that
-interface exists, every effect requiring such forwarding fails the entire
-session closed with `FAILED_PRECONDITION`; no actor or execution bytes are
-accepted or silently dropped. The production `SessionAuthority` therefore uses
-a passive coordinator: it reconciles slots `OFFLINE` and exercises
-Ready/route/channel/cleanup lifecycle, but never activates a Worker. A later
-constructor must bind execution forwarding and Worker activation together; a
-standalone flag cannot enable activation. The directory and lease are
-process-local. The opt-in Helm profile therefore uses one ateapi replica with
-`Recreate`; distributed route ownership is required before this mode can regain
-HA or zero-downtime rollout.
+`SessionAuthority.BindExecutionForwarding` returns the only server-side
+`ExternalExecutionDialer`. `DialContext` accepts only an `ExternalSlot`
+assignment whose Worker name, canonical resource UID, execution identity, and
+current route all match. It allocates a never-reused even channel ID, emits
+`EXECUTION_GRPC` Open, and returns a `net.Conn`-compatible byte stream only
+after an accepted OpenAck. Reads, writes, half-close, reset, deadlines, send
+queueing, and per-channel receive buffering are bounded. An ambiguous timed-
+out send fences the whole generation; `Close` uses its own bounded reset
+deadline so a live but non-reading peer cannot stall cleanup.
 
-## Required workload provider opt-in
+This slice does not bind `ACTOR_INGRESS` or `ACTOR_EGRESS`; a client-opened
+egress channel receives a bounded negative OpenAck. The ateapi binary still
+uses the passive `SessionAuthority.Bind` constructor until a composite control-
+plane gRPC dialer selects this execution dialer for `ExternalSlot` assignments.
+Consequently the current release profile continues to reconcile external slots
+`OFFLINE`; package tests exercise the explicit forwarding constructor and prove
+that it cannot activate before transport binding or clean up before unbinding.
+The directory and lease are process-local. The opt-in Helm profile therefore
+uses one ateapi replica with `Recreate`; distributed route ownership is
+required before this mode can regain HA or zero-downtime rollout.
+
+## Workload provider opt-in
 
 Capability profiles constrain an external Worker; they do not by themselves
-authorize an actor to leave Kubernetes-backed capacity. Before the broker is
-enabled, a separate API migration must add an explicit Worker provider
-constraint to ActorTemplate/Actor scheduling authority, default it to
-`KUBERNETES_POD`, propagate it into `scheduling.Constraints`, and require an
-exact match with `Worker.provider`. Only an explicit `EXTERNAL_SLOT` value may
-select these Workers. That migration necessarily updates the public ateapi
-protobuf, Kubernetes ActorTemplate API/CRD and generated code, control-api
-translation/validation, workflow constraint construction, scheduler matching,
-and their compatibility tests; it is intentionally not hidden inside this
-broker-policy slice.
+authorize an actor to leave Kubernetes-backed capacity. ActorTemplate now
+carries an explicit Worker provider constraint which defaults to
+`KUBERNETES_POD`, propagates through `scheduling.Constraints`, and must exactly
+match `Worker.provider`. Only an explicit `EXTERNAL_SLOT` value can select
+external Workers. The public ateapi protobuf, Kubernetes ActorTemplate API and
+CRD, generated clients, control-api translation, workflow constraint
+construction, and scheduler matching share that default-preserving contract.
 
 ## Authentication implementation boundary
 
@@ -409,9 +420,11 @@ atespace, worker namespace, worker pool, slot limit, and exact canonical slot
 policy plus digest, and each registration has exactly one current session
 digest. Existing development rows created before policy columns remain
 unusable and require a new enrollment; the schema never invents authority for
-them. Revoking an enrollment also revokes its registration. The schema reserves session consumption and generation fields,
-and PostgreSQL now provides an atomic session claim: it validates the current
-unexpired token, consumes it exactly once, and advances a nonzero generation
-which fences older sessions. `Connect` invokes that primitive only after a
-valid first frame. Execution-channel forwarding remains separate from
-authentication persistence and fails closed as described above.
+them. Revoking an enrollment also revokes its registration. The schema reserves
+session consumption and generation fields, and PostgreSQL provides an atomic
+session claim: it validates the current unexpired token, consumes it exactly
+once, and advances a nonzero generation which fences older sessions. `Connect`
+invokes that primitive only after a valid first frame. Execution-channel
+forwarding remains process-local and separate from authentication persistence;
+the passive binary composition leaves Workers unavailable until the composite
+execution dialer is wired.

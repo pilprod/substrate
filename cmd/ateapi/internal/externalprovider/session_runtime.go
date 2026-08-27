@@ -37,6 +37,7 @@ type SessionRuntimeConfig struct {
 	ClaimInstallGateLimits  ClaimInstallGateLimits
 	RouteLimits             SessionRouteDirectoryLimits
 	ChannelLimits           ChannelSessionLimits
+	ExecutionLimits         ExecutionForwardingLimits
 }
 
 // DefaultSessionRuntimeConfig returns conservative process-wide bounds. The
@@ -56,6 +57,7 @@ func DefaultSessionRuntimeConfig() SessionRuntimeConfig {
 			MaxOpenChannels: defaultSessionOpenChannels,
 			MaxDataBytes:    defaultSessionDataBytes,
 		},
+		ExecutionLimits: DefaultExecutionForwardingLimits(),
 	}
 }
 
@@ -67,6 +69,7 @@ type SessionAuthority struct {
 	routes           *SessionRouteDirectory
 	claimInstallGate *claimInstallGate
 	channelLimits    ChannelSessionLimits
+	executionLimits  ExecutionForwardingLimits
 
 	mu    sync.Mutex
 	bound bool
@@ -101,11 +104,16 @@ func NewSessionAuthority(config SessionRuntimeConfig) (*SessionAuthority, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: channels: %w", errInvalidSessionRuntime, err)
 	}
+	executionLimits, err := normalizeExecutionForwardingLimits(config.ExecutionLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: execution: %w", errInvalidSessionRuntime, err)
+	}
 	return &SessionAuthority{
 		registry:         registry,
 		routes:           routes,
 		claimInstallGate: claimInstallGate,
 		channelLimits:    channelLimits,
+		executionLimits:  executionLimits,
 	}, nil
 }
 
@@ -118,9 +126,10 @@ func (a *SessionAuthority) AssignmentGuard() RouteAssignmentGuard {
 	return a.routes.AssignmentGuard()
 }
 
-// Bind attaches the durable Worker operations and returns the sole Connect
-// runtime for this authority. Multiple broker runtimes must never share one
-// route authority, so a second call fails closed.
+// Bind attaches the durable Worker operations and returns a passive Connect
+// runtime. It deliberately leaves every reconciled Worker OFFLINE. Multiple
+// broker runtimes must never share one route authority, so a second call fails
+// closed.
 func (a *SessionAuthority) Bind(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
@@ -140,10 +149,42 @@ func (a *SessionAuthority) Bind(
 	// This runtime intentionally has no execution-channel forwarder yet. Keep
 	// every reconciled Worker OFFLINE until a later constructor can bind both
 	// the coordinator and that forwarding authority atomically.
-	coordinator, err := newSessionCoordinatorWithActivation(a.registry, reconciler, a.routes, lifecycle, a.channelLimits, false)
+	coordinator, err := newPassiveSessionCoordinator(a.registry, reconciler, a.routes, lifecycle, a.channelLimits)
 	if err != nil {
 		return nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}
 	a.bound = true
 	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, nil
+}
+
+// BindExecutionForwarding atomically binds Worker lifecycle and the server-
+// owned EXECUTION_GRPC data plane. Its coordinator can make reconciled Workers
+// ACTIVE only after the exact Connect route and forwarding transport are both
+// installed. The returned dialer resolves no other Worker provider.
+func (a *SessionAuthority) BindExecutionForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+) (*SessionRuntime, *ExternalExecutionDialer, error) {
+	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
+		return nil, nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.bound {
+		return nil, nil, fmt.Errorf("%w: authority is already bound", errInvalidSessionRuntime)
+	}
+	lifecycle, err := newWorkerSessionLifecycle(a.registry, availability, a.routes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
+	}
+	forwarder, err := newExecutionForwarder(a.routes, a.executionLimits)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: forwarding: %w", errInvalidSessionRuntime, err)
+	}
+	coordinator, err := newSessionCoordinatorWithForwarder(a.registry, reconciler, a.routes, lifecycle, a.channelLimits, forwarder)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
+	}
+	a.bound = true
+	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, &ExternalExecutionDialer{forwarder: forwarder}, nil
 }

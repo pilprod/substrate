@@ -360,8 +360,7 @@ func runConnectedSession(
 		}
 	}()
 
-	channels := session.channelState()
-	if channels == nil {
+	if session.channelState() == nil {
 		return status.Error(codes.Internal, "session channel state is unavailable")
 	}
 	for {
@@ -377,12 +376,17 @@ func runConnectedSession(
 			if result.err != nil {
 				return connectReceiveError(ctx, result.err, false)
 			}
-			effect, err := channels.ApplyClientFrame(result.frame)
-			if err != nil {
+			if err := session.applyClientFrame(result.frame); err != nil {
+				if ctx.Err() != nil {
+					return connectContextError(ctx)
+				}
+				if errors.Is(err, ErrChannelProtocolViolation) {
+					return status.Error(codes.InvalidArgument, "invalid session frame")
+				}
+				if session.wire != nil && session.wire.ctx.Err() != nil {
+					return status.Error(codes.Unavailable, "session transport failed")
+				}
 				return status.Error(codes.InvalidArgument, "invalid session frame")
-			}
-			if err := applyConnectEffect(stream, effect); err != nil {
-				return err
 			}
 		}
 	}
@@ -410,29 +414,6 @@ func (l *connectHandshakeLease) release() {
 		return
 	}
 	l.once.Do(func() { <-l.slots })
-}
-
-func applyConnectEffect(
-	stream grpc.BidiStreamingServer[externalproviderpb.ClientFrame, externalproviderpb.ServerFrame],
-	effect SessionEffect,
-) error {
-	switch effect := effect.(type) {
-	case *SendServerFrameEffect:
-		frame := effect.Frame()
-		if frame == nil {
-			return status.Error(codes.Internal, "session effect is invalid")
-		}
-		if err := stream.Send(frame); err != nil {
-			return status.Error(codes.Unavailable, "session transport failed")
-		}
-		return nil
-	case *ServerHeartbeatAckEffect:
-		return nil
-	case *ClientOpenEffect, *ServerOpenAckEffect, *ClientDataEffect, *ClientHalfCloseEffect, *ClientResetEffect:
-		return status.Error(codes.FailedPrecondition, "session channel forwarding is unavailable")
-	default:
-		return status.Error(codes.Internal, "session effect is unsupported")
-	}
 }
 
 func connectReceiveError(ctx context.Context, err error, first bool) error {
