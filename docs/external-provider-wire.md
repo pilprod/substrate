@@ -104,6 +104,36 @@ The reconciler neither activates current slots nor modifies slots omitted by a
 new plan: route installation and session teardown own `ACTIVE`/`OFFLINE`, while
 drain and deletion remain operator actions.
 
+## Post-Ready channel state
+
+The ateapi-private channel state machine begins only after a valid admission and
+`ConnectReady`. It snapshots the nonzero fencing generation and the complete
+admitted slot set, then validates every later client frame without receiving or
+sending on a transport. Server opens, acknowledgements, data, half-closes,
+resets, and heartbeat probes likewise return immutable effects; the future
+session router remains responsible for executing them in stream order.
+
+The state machine enforces the 1 MiB serialized frame limit, generation match,
+channel ID parity and lifetime non-reuse, opener-specific channel kinds, slot
+membership, exactly-once acknowledgements, accepted-only data and close
+transitions, independent half-closes, terminal resets, and heartbeat probe/ack
+pairing. Peer data is copied before it leaves validation, while outbound frame
+accessors return a new protobuf copy. Error and reset text must be valid UTF-8
+and at most 1024 bytes and remain explicitly untrusted. Every effect also has a
+monotonic session-local sequence so a transport owner can preserve transition
+order when server actions originate from concurrent goroutines.
+
+All mutable state is mutex-protected. `max_open_channels` bounds accepted and
+pending nonterminal channels. A separate retained-ID limit bounds the
+tombstones required to reject channel ID reuse; exhausting it requires a new
+session generation instead of allowing memory to grow indefinitely. A separate
+limit bounds server heartbeat probes awaiting acknowledgements. These local
+resource ceilings do not alter `ConnectReady.max_data_bytes` or the public
+channel semantics.
+
+This slice does not claim a session, run a stream loop, install a route, mutate
+a Worker, or register a listener. `Broker.Connect` remains `UNIMPLEMENTED`.
+
 ## Authentication implementation boundary
 
 The first broker-auth slice is private to the `ateapi` binary and is not
