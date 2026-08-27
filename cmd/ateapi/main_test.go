@@ -15,7 +15,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -30,5 +32,28 @@ func TestConnectStoreRequiresPostgresConnectionString(t *testing.T) {
 	_, err := connectStore(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "--postgres-connection-string is required") {
 		t.Fatalf("connectStore() error = %v, want missing-connection-string error", err)
+	}
+}
+
+func TestLogFlagValuesRedactsPostgresConnectionString(t *testing.T) {
+	oldDSN := *postgresConnectionString
+	oldLogger := slog.Default()
+	t.Cleanup(func() {
+		*postgresConnectionString = oldDSN
+		slog.SetDefault(oldLogger)
+	})
+
+	const secretDSN = "postgresql://audit-user:startup-log-secret@database.example/substrate"
+	*postgresConnectionString = secretDSN
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+
+	logFlagValues(context.Background())
+	logged := output.String()
+	if strings.Contains(logged, secretDSN) || strings.Contains(logged, "startup-log-secret") {
+		t.Fatalf("flag log contains PostgreSQL credentials: %s", logged)
+	}
+	if !strings.Contains(logged, `"postgres-connection-string-configured":true`) {
+		t.Fatalf("flag log lacks non-secret PostgreSQL configuration state: %s", logged)
 	}
 }

@@ -364,7 +364,9 @@ func logFlagValues(ctx context.Context) {
 		slog.String("external-provider-broker-server-cred-bundle", *externalProviderBrokerServerCredBundle),
 		slog.Duration("external-provider-session-token-ttl", *externalProviderSessionTokenTTL),
 		slog.String("authentication-config", *authenticationConfigFile),
-		slog.String("postgres-connection-string", *postgresConnectionString),
+		// The connection string commonly embeds a database password. Log only
+		// whether startup received it, never its contents.
+		slog.Bool("postgres-connection-string-configured", *postgresConnectionString != ""),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),
 		slog.String("actor-id-ca-pool", *actorIDCAPoolFile),
 		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
