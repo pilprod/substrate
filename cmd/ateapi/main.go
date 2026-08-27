@@ -300,16 +300,19 @@ func main() {
 		if !ok {
 			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
 		}
-		recovery, sessionRuntime, err := recoverAndBindExternalProviderExecution(
+		recovery, sessionRuntime, err := recoverAndBindExternalProviderDataPlanes(
 			ctx,
 			controlSrv,
 			sessionAuthority,
 			func(dialer *externalprovider.ExternalExecutionDialer) error {
 				return providerExecutionDialer.BindExternal(dialer)
 			},
+			func(dialer *externalprovider.ExternalActorIngressDialer) error {
+				return controlSrv.BindActorIngress(dialer)
+			},
 		)
 		if err != nil {
-			serverboot.Fatal(ctx, "Failed to recover and bind external provider execution", err)
+			serverboot.Fatal(ctx, "Failed to recover and bind external provider data planes", err)
 		}
 		slog.InfoContext(ctx, "External provider Worker recovery completed",
 			slog.Uint64("scanned", recovery.Scanned),

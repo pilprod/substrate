@@ -27,28 +27,33 @@ type externalProviderStartupControl interface {
 	externalprovider.ExternalWorkerAvailabilityController
 }
 
-// recoverAndBindExternalProviderExecution makes persisted external capacity
-// unavailable before publishing the in-memory execution authority. The caller
-// must complete this function before opening the Broker listener.
-func recoverAndBindExternalProviderExecution(
+// recoverAndBindExternalProviderDataPlanes makes persisted external capacity
+// unavailable before publishing the in-memory execution and Actor ingress
+// authorities. The caller must complete this function before opening either
+// the Control or Broker listener.
+func recoverAndBindExternalProviderDataPlanes(
 	ctx context.Context,
 	control externalProviderStartupControl,
 	authority *externalprovider.SessionAuthority,
-	bindExternal func(*externalprovider.ExternalExecutionDialer) error,
+	bindExecution func(*externalprovider.ExternalExecutionDialer) error,
+	bindActorIngress func(*externalprovider.ExternalActorIngressDialer) error,
 ) (externalprovider.StartupSweepResult, *externalprovider.SessionRuntime, error) {
-	if authority == nil || bindExternal == nil {
-		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("external provider session authority and execution binder are required")
+	if authority == nil || bindExecution == nil || bindActorIngress == nil {
+		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("external provider session authority and data-plane binders are required")
 	}
 	recovery, err := externalprovider.RecoverExternalWorkersOffline(ctx, control, externalprovider.StartupSweepConfig{})
 	if err != nil {
 		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("recovering external provider Workers: %w", err)
 	}
-	sessionRuntime, executionDialer, err := authority.BindExecutionForwarding(control, control)
+	sessionRuntime, executionDialer, ingressDialer, err := authority.BindProviderForwarding(control, control)
 	if err != nil {
-		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("binding external provider session execution: %w", err)
+		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("binding external provider session data planes: %w", err)
 	}
-	if err := bindExternal(executionDialer); err != nil {
+	if err := bindExecution(executionDialer); err != nil {
 		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("binding provider execution dialer: %w", err)
+	}
+	if err := bindActorIngress(ingressDialer); err != nil {
+		return externalprovider.StartupSweepResult{}, nil, fmt.Errorf("binding provider Actor ingress dialer: %w", err)
 	}
 	return recovery, sessionRuntime, nil
 }
