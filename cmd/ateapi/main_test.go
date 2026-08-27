@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,13 +28,16 @@ import (
 
 func TestConnectStoreRequiresPostgresConnectionString(t *testing.T) {
 	oldDSN := *postgresConnectionString
+	oldDSNFile := *postgresConnectionStringFile
 	t.Cleanup(func() {
 		*postgresConnectionString = oldDSN
+		*postgresConnectionStringFile = oldDSNFile
 	})
 	*postgresConnectionString = ""
+	*postgresConnectionStringFile = ""
 
 	_, err := connectStore(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "--postgres-connection-string is required") {
+	if err == nil || !strings.Contains(err.Error(), "--postgres-connection-string or --postgres-connection-string-file is required") {
 		t.Fatalf("connectStore() error = %v, want missing-connection-string error", err)
 	}
 }
@@ -60,16 +65,82 @@ func TestExternalProviderEnrollmentAdminPrincipalsResolveExactIssuerAndSubject(t
 	}
 }
 
+func TestResolvePostgresConnectionStringFromFile(t *testing.T) {
+	oldDSN := *postgresConnectionString
+	oldDSNFile := *postgresConnectionStringFile
+	t.Cleanup(func() {
+		*postgresConnectionString = oldDSN
+		*postgresConnectionStringFile = oldDSNFile
+	})
+
+	const want = "postgresql://file-user:file-secret@database.example/substrate"
+	path := filepath.Join(t.TempDir(), "connection-string")
+	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	*postgresConnectionString = ""
+	*postgresConnectionStringFile = path
+
+	got, err := resolvePostgresConnectionString()
+	if err != nil {
+		t.Fatalf("resolvePostgresConnectionString() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("resolvePostgresConnectionString() = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePostgresConnectionStringFileFailsClosed(t *testing.T) {
+	oldDSN := *postgresConnectionString
+	oldDSNFile := *postgresConnectionStringFile
+	t.Cleanup(func() {
+		*postgresConnectionString = oldDSN
+		*postgresConnectionStringFile = oldDSNFile
+	})
+
+	tests := []struct {
+		name     string
+		direct   string
+		contents []byte
+		missing  bool
+		want     string
+	}{
+		{name: "both sources", direct: "postgresql://direct.example/db", contents: []byte("postgresql://file.example/db"), want: "mutually exclusive"},
+		{name: "empty file", contents: nil, want: "is empty"},
+		{name: "NUL byte", contents: []byte("postgresql://database.example/db\x00ignored"), want: "NUL byte"},
+		{name: "oversized file", contents: bytes.Repeat([]byte("x"), maxPostgresConnectionStringBytes+1), want: "exceeds"},
+		{name: "missing file", missing: true, want: "open PostgreSQL connection string file"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "connection-string")
+			if !test.missing {
+				if err := os.WriteFile(path, test.contents, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			*postgresConnectionString = test.direct
+			*postgresConnectionStringFile = path
+			if _, err := resolvePostgresConnectionString(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("resolvePostgresConnectionString() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestLogFlagValuesRedactsPostgresConnectionString(t *testing.T) {
 	oldDSN := *postgresConnectionString
+	oldDSNFile := *postgresConnectionStringFile
 	oldLogger := slog.Default()
 	t.Cleanup(func() {
 		*postgresConnectionString = oldDSN
+		*postgresConnectionStringFile = oldDSNFile
 		slog.SetDefault(oldLogger)
 	})
 
 	const secretDSN = "postgresql://audit-user:startup-log-secret@database.example/substrate"
 	*postgresConnectionString = secretDSN
+	*postgresConnectionStringFile = ""
 	var output bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
 

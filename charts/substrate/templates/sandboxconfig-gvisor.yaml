@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
 # Cluster-wide default SandboxConfig for the gVisor (runsc) sandbox class. A
 # WorkerPool with sandboxClass gvisor (the default) and no explicit
 # sandboxConfigName resolves to this. atelet fetches the runsc binary matching
@@ -36,3 +37,4 @@ spec:
       gvisor:
         url: "gs://gvisor/releases/release/20260803/aarch64/gvisor.tar.bz2"
         sha256: "294d54dea2a18bcd2614a4b5072d6f32f0e8938f9e6e71c9e86b843c4a7b707b"
+{{- end }}

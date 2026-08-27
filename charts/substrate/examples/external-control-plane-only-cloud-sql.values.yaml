@@ -1,0 +1,79 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+profile: external-control-plane-only
+
+externalControlPlane:
+  postgres:
+    # This Secret is created and rotated outside this chart. Its
+    # "connection-string" key contains the complete PostgreSQL URI for the
+    # externally managed Cloud SQL endpoint or its separately managed proxy.
+    existingSecret:
+      name: substrate-cloud-sql
+      key: connection-string
+  networkPolicy:
+    enabled: true
+    allowDNS: true
+    apiIngress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kagent-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: kagent-controller
+    - podSelector:
+        matchLabels:
+          app: ate-controller
+    brokerIngress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: client-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: client-gateway
+    egress:
+    # Replace these documentation-only addresses with the exact private GKE
+    # API endpoint and private Cloud SQL endpoint assigned to the environment.
+    - to:
+      - ipBlock:
+          cidr: 192.0.2.10/32
+      ports:
+      - protocol: TCP
+        port: 443
+    - to:
+      - ipBlock:
+          cidr: 192.0.2.20/32
+      ports:
+      - protocol: TCP
+        port: 5432
+    controllerEgress:
+    - to:
+      - podSelector:
+          matchLabels:
+            app: ate-api-server
+      ports:
+      - protocol: TCP
+        port: 443
+    - to:
+      - ipBlock:
+          cidr: 192.0.2.10/32
+      ports:
+      - protocol: TCP
+        port: 443
+
+# The profile enables this listener even though the historical chart default
+# remains false. The port and token TTL stay configurable.
+externalProviderBroker:
+  containerPort: 8443
+  sessionTokenTTL: 5m

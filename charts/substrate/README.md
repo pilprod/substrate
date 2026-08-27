@@ -35,7 +35,8 @@ See `values.yaml` for the full set; the important keys:
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `postgres.connectionString` | `""` (in-cluster) | Override to use external PostgreSQL |
+| `profile` | `standard` | Set `external-control-plane-only` for externally connected provider slots without the in-cluster data plane |
+| `postgres.connectionString` | `""` (in-cluster) | Legacy `standard` profile override; forbidden in `external-control-plane-only` |
 | `postgres.storageSize` | `1Gi` | In-cluster PostgreSQL PVC size |
 | `rustfs.enabled` | `true` | Deploy an in-cluster S3-compatible RustFS bucket for snapshots |
 | `atelet.storageBackend` | `s3` | Default snapshot backend, wired to RustFS when `rustfs.enabled=true` |
@@ -43,6 +44,9 @@ See `values.yaml` for the full set; the important keys:
 | `externalProviderBroker.enabled` | `false` | Add a dedicated internal TLS Broker listener and API Service port |
 | `externalProviderBroker.containerPort` | `8443` | Broker listener port inside the ate-api-server Pod |
 | `externalProviderBroker.sessionTokenTTL` | `5m` | Lifetime of a one-time external provider Connect token |
+| `externalControlPlane.postgres.existingSecret.name` | `""` | Required Secret reference for `external-control-plane-only`; the chart never creates it |
+| `externalControlPlane.networkPolicy.enabled` | `true` | Selective default-deny policies for ate-api-server in the external profile |
+| `externalControlPlane.networkPolicy.controllerEgress` | `[]` | Explicit Kubernetes API and ate-api-server egress for the restricted template controller |
 | `otel.endpoint` | `""` | Set to an OTLP endpoint to export traces/metrics |
 
 Enabling `externalProviderBroker` adds a second port to the existing internal
@@ -50,9 +54,9 @@ Enabling `externalProviderBroker` adds a second port to the existing internal
 balancer. External clients need a separately governed path to that port and
 must trust the `servicedns.podcert.ate.dev` CA.
 
-`Connect` remains disabled until its live route authority is safe for the
-deployment topology. For the MVP, enabling `externalProviderBroker` also pins
-ate-api-server to one replica and switches the Deployment strategy to
+The Broker listener and its `Connect` route remain disabled by default. For the
+MVP, enabling `externalProviderBroker` also pins ate-api-server to one replica
+and switches the Deployment strategy to
 `Recreate`, so an update cannot overlap two in-memory route owners. This trades
 ate-api-server high availability and zero-downtime rollouts for single-owner
 correctness. The claim-to-registry-install gate is also process-local; a second
@@ -62,3 +66,105 @@ session fencing are distributed across replicas.
 
 Run `make verify-external-provider-broker-chart` to lint both profiles and
 assert the default and singleton render contracts.
+
+## External control-plane-only profile
+
+`profile: external-control-plane-only` is the GKE control-plane topology for
+capacity supplied through `ExternalProviderBroker`. It renders:
+
+- one `ate-api-server` replica with `Recreate`, the Control API Service, and the
+  dedicated Broker port;
+- one `ate-controller` process in `external-templates-only` mode, which marks
+  only ExternalSlot ActorTemplates Ready and registers no WorkerPool,
+  NetworkPolicy, or egress-trust reconciler;
+- the Pod Certificate controller and its RBAC;
+- NetworkPolicies selecting the ate-api-server and restricted controller Pods,
+  denying ingress and egress by default, plus explicitly configured allow
+  rules.
+
+It does not render `atelet`, `atenet`, a `WorkerPool`, local sandbox
+configuration, PostgreSQL, RustFS, a PVC, a StatefulSet, a privileged container,
+or a `hostPath`. The restricted controller has RBAC only for reading
+ActorTemplates and updating their status. It ignores KubernetesPod templates;
+the WorkerPool, local Deployment, NetworkPolicy, and egress-trust controllers
+are not registered. External slots are reconciled by ate-api-server from the
+authenticated Broker session and the referenced WorkerPool metadata.
+
+The profile implies `externalProviderBroker.enabled=true`; the historical
+`standard` default remains byte-for-byte unchanged. The internal Service is
+still headless `ClusterIP`. A Gateway, tunnel, or other externally governed
+route must be installed separately.
+
+This profile requires binaries from the same source revision as the chart:
+ate-api-server must support `--postgres-connection-string-file`, and
+ate-controller must support `--controller-mode=external-templates-only`. Set
+`image.registry` and `image.tag` to a matching published build during release.
+An older image fails startup; the chart deliberately has no fallback to a raw
+DSN value, environment variable, or the full local-worker controller set.
+
+### Required existing objects
+
+The chart deliberately does not create authentication or credential material.
+Before installing the profile, the platform owner must provision:
+
+- ConfigMap `ate-api-authentication` in the release namespace;
+- Secrets `actor-id-jwt-pool` and `actor-id-ca-pool` in the release namespace;
+- the Secret named by
+  `externalControlPlane.postgres.existingSecret.name`, with the selected key
+  containing the complete PostgreSQL connection string;
+- Secrets `service-dns-ca-pool` and `pod-identity-ca-pool` in namespace
+  `podcertificate-controller-system`, as required by the existing Pod
+  Certificate controller contract.
+
+Install the `substrate-crds` chart first. Each enrollment scope also references
+an existing WorkerPool CR as server-owned scheduling metadata. In this profile
+that CR is not reconciled into a Kubernetes Worker Deployment because the
+running controller mode does not register WorkerPool reconciliation; it must
+not be used as a local-capacity pool.
+
+The PostgreSQL key is mounted read-only at
+`/run/secrets/substrate/postgres/connection-string` with mode `0400` and passed
+to ate-api-server through `--postgres-connection-string-file`. It is never
+copied into a chart ConfigMap, environment variable, rendered Secret, or Helm
+value. Supplying `postgres.connectionString` in this profile fails rendering.
+
+### Cloud SQL values
+
+Start from
+[`examples/external-control-plane-only-cloud-sql.values.yaml`](examples/external-control-plane-only-cloud-sql.values.yaml):
+
+```bash
+helm upgrade --install substrate ./charts/substrate \
+  --namespace ate-system \
+  --values ./charts/substrate/examples/external-control-plane-only-cloud-sql.values.yaml
+```
+
+The example uses documentation-only `192.0.2.0/24` addresses. Replace them
+before installation with the exact private GKE API endpoint and private Cloud
+SQL endpoint. The pre-created `substrate-cloud-sql` Secret must expose a
+`connection-string` key. Its value is a PostgreSQL URI managed and rotated by
+the platform secret owner; it is not a value accepted by this chart.
+
+If Cloud SQL is reached through a separately managed Cloud SQL Auth Proxy or
+connector, point the URI at that endpoint and replace the database `ipBlock`
+with a namespace/pod selector for the proxy. This chart does not deploy the
+proxy or grant Google IAM permissions. For direct private-IP connections, the
+URI must carry the environment's required Cloud SQL TLS verification options.
+
+The example also assumes:
+
+- kagent calls the Control API from `kagent-system` on TCP 443;
+- the restricted template controller calls the Control API on TCP 443 and the
+  Kubernetes API on TCP 443;
+- an independently managed client gateway reaches the Broker on TCP 8443;
+- ate-api-server can reach the Kubernetes API on TCP 443, Cloud SQL on TCP
+  5432, and kube-dns on TCP/UDP 53.
+
+Change the namespace and pod selectors to the labels actually enforced in the
+target cluster. Add explicit egress rules for the configured OIDC issuer and
+OTLP endpoint when those are outside the allowed destinations. With no matching
+allow rule, the default-deny profile intentionally remains unreachable rather
+than silently broadening access.
+
+Run `make verify-external-control-plane-chart` to lint this profile and verify
+its fail-closed Secret, topology, Broker, and NetworkPolicy contracts.

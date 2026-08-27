@@ -133,6 +133,45 @@ func TestActorTemplateReconciler_Reconcile_PhaseInitial(t *testing.T) {
 	const templateUID = "test-uid-12345"
 	const expectedActorName = templateUID
 
+	t.Run("external-only mode ignores Kubernetes-backed templates", func(t *testing.T) {
+		template := &atev1alpha1.ActorTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "kubernetes-template", Namespace: "default", UID: types.UID(templateUID)},
+			Spec:       atev1alpha1.ActorTemplateSpec{WorkerProvider: atev1alpha1.WorkerProviderKubernetesPod},
+		}
+		fakeK8sClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&atev1alpha1.ActorTemplate{}).
+			WithObjects(template).
+			Build()
+		fakeAteClient := &mockControlClient{
+			createAtespaceFn: func(context.Context, *ateapipb.CreateAtespaceRequest, ...grpc.CallOption) (*ateapipb.Atespace, error) {
+				t.Fatal("external-only controller attempted a Kubernetes-backed golden lifecycle")
+				return nil, nil
+			},
+		}
+		reconciler := &ActorTemplateReconciler{
+			Client:       fakeK8sClient,
+			Scheme:       scheme,
+			AteClient:    fakeAteClient,
+			ExternalOnly: true,
+		}
+		key := types.NamespacedName{Name: template.Name, Namespace: template.Namespace}
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		if !result.IsZero() {
+			t.Fatalf("Reconcile() result = %v, want zero", result)
+		}
+		reconciled := &atev1alpha1.ActorTemplate{}
+		if err := fakeK8sClient.Get(context.Background(), key, reconciled); err != nil {
+			t.Fatalf("get ignored ActorTemplate: %v", err)
+		}
+		if reconciled.Status.Phase != atev1alpha1.PhaseInitial || len(reconciled.Status.Conditions) != 0 {
+			t.Fatalf("ignored ActorTemplate status changed: %+v", reconciled.Status)
+		}
+	})
+
 	t.Run("external slot becomes ready without golden lifecycle RPCs", func(t *testing.T) {
 		template := &atev1alpha1.ActorTemplate{
 			ObjectMeta: metav1.ObjectMeta{
@@ -159,7 +198,7 @@ func TestActorTemplateReconciler_Reconcile_PhaseInitial(t *testing.T) {
 				return nil, nil
 			},
 		}
-		reconciler := &ActorTemplateReconciler{Client: fakeK8sClient, Scheme: scheme, AteClient: fakeAteClient}
+		reconciler := &ActorTemplateReconciler{Client: fakeK8sClient, Scheme: scheme, AteClient: fakeAteClient, ExternalOnly: true}
 		ctx := context.Background()
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: template.Name, Namespace: template.Namespace}}
 

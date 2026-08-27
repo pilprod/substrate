@@ -19,10 +19,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,8 +83,9 @@ var (
 		"Lifetime of a one-time external provider Connect session token.",
 	)
 
-	authenticationConfigFile = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
-	postgresConnectionString = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
+	authenticationConfigFile     = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
+	postgresConnectionString     = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
+	postgresConnectionStringFile = pflag.String("postgres-connection-string-file", "", "File containing the PostgreSQL connection string. Mutually exclusive with --postgres-connection-string.")
 
 	actorIDJWTPoolFile   = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
 	egressGatewayAddress = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
@@ -429,7 +432,8 @@ func logFlagValues(ctx context.Context) {
 		slog.String("authentication-config", *authenticationConfigFile),
 		// The connection string commonly embeds a database password. Log only
 		// whether startup received it, never its contents.
-		slog.Bool("postgres-connection-string-configured", *postgresConnectionString != ""),
+		slog.Bool("postgres-connection-string-configured", *postgresConnectionString != "" || *postgresConnectionStringFile != ""),
+		slog.Bool("postgres-connection-string-file-configured", *postgresConnectionStringFile != ""),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),
 		slog.String("actor-id-ca-pool", *actorIDCAPoolFile),
 		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
@@ -444,17 +448,55 @@ func logFlagValues(ctx context.Context) {
 // connectStore builds the PostgreSQL-backed store.Interface. Startup fails if
 // its configuration is missing or the database can't be reached.
 func connectStore(ctx context.Context) (store.Interface, error) {
-	if *postgresConnectionString == "" {
-		return nil, fmt.Errorf("--postgres-connection-string is required")
+	connectionString, err := resolvePostgresConnectionString()
+	if err != nil {
+		return nil, err
 	}
-	if _, err := pgxpool.ParseConfig(*postgresConnectionString); err != nil {
+	if _, err := pgxpool.ParseConfig(connectionString); err != nil {
 		return nil, fmt.Errorf("parsing PostgreSQL connection string: %w", err)
 	}
-	persistence, err := connectPostgresWithRetries(ctx)
+	persistence, err := connectPostgresWithRetries(ctx, connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("setting up PostgreSQL: %w", err)
 	}
 	return persistence, nil
+}
+
+const maxPostgresConnectionStringBytes = 64 * 1024
+
+func resolvePostgresConnectionString() (string, error) {
+	if *postgresConnectionString != "" && *postgresConnectionStringFile != "" {
+		return "", fmt.Errorf("--postgres-connection-string and --postgres-connection-string-file are mutually exclusive")
+	}
+	if *postgresConnectionStringFile == "" {
+		if *postgresConnectionString == "" {
+			return "", fmt.Errorf("--postgres-connection-string or --postgres-connection-string-file is required")
+		}
+		return *postgresConnectionString, nil
+	}
+
+	file, err := os.Open(*postgresConnectionStringFile)
+	if err != nil {
+		return "", fmt.Errorf("open PostgreSQL connection string file: %w", err)
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, maxPostgresConnectionStringBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read PostgreSQL connection string file: %w", err)
+	}
+	if len(contents) > maxPostgresConnectionStringBytes {
+		return "", fmt.Errorf("PostgreSQL connection string file exceeds %d bytes", maxPostgresConnectionStringBytes)
+	}
+
+	connectionString := strings.TrimSuffix(string(contents), "\n")
+	connectionString = strings.TrimSuffix(connectionString, "\r")
+	if connectionString == "" {
+		return "", fmt.Errorf("PostgreSQL connection string file is empty")
+	}
+	if strings.ContainsRune(connectionString, '\x00') {
+		return "", fmt.Errorf("PostgreSQL connection string file contains a NUL byte")
+	}
+	return connectionString, nil
 }
 
 var (
@@ -462,10 +504,10 @@ var (
 	postgresConnectPeriod = 2 * time.Second
 )
 
-func connectPostgresWithRetries(ctx context.Context) (*atepg.Persistence, error) {
+func connectPostgresWithRetries(ctx context.Context, connectionString string) (*atepg.Persistence, error) {
 	var connectErr error
 	for attempt := 1; attempt <= postgresConnectTries; attempt++ {
-		persistence, err := atepg.Connect(ctx, *postgresConnectionString)
+		persistence, err := atepg.Connect(ctx, connectionString)
 		if err == nil {
 			return persistence, nil
 		}

@@ -106,12 +106,16 @@ helm-template:
 
 # Verify that manifests/ate-install/ matches the chart output. Used in CI.
 .PHONY: verify-helm-template
-verify-helm-template: verify-external-provider-broker-chart
+verify-helm-template: verify-external-provider-broker-chart verify-external-control-plane-chart
 	@./hack/render-manifests.sh --check
 
 .PHONY: verify-external-provider-broker-chart
 verify-external-provider-broker-chart:
 	@./hack/verify-external-provider-broker-chart.sh
+
+.PHONY: verify-external-control-plane-chart
+verify-external-control-plane-chart:
+	@./hack/verify-external-control-plane-chart.sh
 
 # Verify that the CRD chart mirrors the generated CRDs.
 .PHONY: verify-crd-chart

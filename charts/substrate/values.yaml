@@ -23,6 +23,12 @@
 # manifests/ate-install/ install path (kubectl apply).
 createNamespace: false
 
+# Installation topology. "standard" preserves the historical full control and
+# data plane. "external-control-plane-only" keeps ate-api-server, its dedicated
+# ExternalProviderBroker listener, and the Pod Certificate controller, while
+# omitting every in-cluster worker, network data plane, and storage backend.
+profile: standard
+
 postgres:
   storageSize: 1Gi
   connectionString: ""
@@ -67,6 +73,38 @@ externalProviderBroker:
   enabled: false
   containerPort: 8443
   sessionTokenTTL: 5m
+
+# Required only by profile=external-control-plane-only. The chart references a
+# pre-created Secret and never accepts or creates its value. The selected key is
+# mounted as a file rather than copied into a ConfigMap or environment variable.
+externalControlPlane:
+  postgres:
+    existingSecret:
+      name: ""
+      key: connection-string
+  networkPolicy:
+    # The profile selects only ate-api-server and denies all ingress and egress
+    # by default. The allow lists below are explicit NetworkPolicy peers/rules.
+    enabled: true
+    allowDNS: true
+    dnsNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    dnsPodSelector:
+      matchLabels:
+        k8s-app: kube-dns
+    # Arrays of NetworkPolicyPeer objects. Ports are fixed by the chart to the
+    # Control API (443) and Broker (externalProviderBroker.containerPort).
+    apiIngress: []
+    brokerIngress: []
+    # Peers allowed to scrape the external-template-only controller on 8080.
+    controllerIngress: []
+    # Array of complete NetworkPolicyEgressRule objects. At minimum, allow the
+    # Kubernetes API and the externally managed PostgreSQL endpoint.
+    egress: []
+    # Complete NetworkPolicyEgressRule objects for the controller. It needs the
+    # Kubernetes API and ate-api-server, but never PostgreSQL or provider ingress.
+    controllerEgress: []
 
 otel:
   endpoint: ""

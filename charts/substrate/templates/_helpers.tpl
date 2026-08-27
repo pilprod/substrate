@@ -103,3 +103,40 @@ are emitted without a tag, letting `ko resolve` supply the digest at build time.
 {{- printf "%s/%s" $registry $name -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Validate cross-field topology contracts which JSON schema cannot express
+without changing the existing chart's permissive values surface.
+*/}}
+{{- define "substrate.validateValues" -}}
+{{- $profile := .Values.profile | default "standard" -}}
+{{- if not (has $profile (list "standard" "external-control-plane-only")) -}}
+{{- fail (printf "profile must be one of standard or external-control-plane-only, got %q" $profile) -}}
+{{- end -}}
+{{- $brokerPort := int .Values.externalProviderBroker.containerPort -}}
+{{- if or (lt $brokerPort 1) (gt $brokerPort 65535) -}}
+{{- fail "externalProviderBroker.containerPort must be between 1 and 65535" -}}
+{{- end -}}
+{{- if eq $brokerPort 443 -}}
+{{- fail "externalProviderBroker.containerPort must differ from the Control API port 443" -}}
+{{- end -}}
+{{- if not .Values.externalProviderBroker.sessionTokenTTL -}}
+{{- fail "externalProviderBroker.sessionTokenTTL must not be empty" -}}
+{{- end -}}
+{{- if eq $profile "external-control-plane-only" -}}
+{{- if .Values.postgres.connectionString -}}
+{{- fail "postgres.connectionString is forbidden for profile external-control-plane-only; reference externalControlPlane.postgres.existingSecret instead" -}}
+{{- end -}}
+{{- $secretName := .Values.externalControlPlane.postgres.existingSecret.name | default "" -}}
+{{- $secretKey := .Values.externalControlPlane.postgres.existingSecret.key | default "" -}}
+{{- if not $secretName -}}
+{{- fail "externalControlPlane.postgres.existingSecret.name is required for profile external-control-plane-only" -}}
+{{- end -}}
+{{- if or (gt (len $secretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $secretName)) -}}
+{{- fail "externalControlPlane.postgres.existingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if or (not $secretKey) (gt (len $secretKey) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $secretKey)) -}}
+{{- fail "externalControlPlane.postgres.existingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

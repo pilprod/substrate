@@ -1,4 +1,14 @@
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+substrate {{ .Chart.AppVersion }} installed as external-control-plane-only
+
+The chart did not create PostgreSQL, provider credentials, authentication
+configuration, or an external route. ate-api-server reads PostgreSQL from
+Secret/{{ .Values.externalControlPlane.postgres.existingSecret.name }} and is
+isolated together with the external-template-only controller by default-deny
+NetworkPolicy when enabled.
+{{- else }}
 substrate {{ .Chart.AppVersion }} installed with mTLS and PostgreSQL
+{{- end }}
 
 REQUIRED Kubernetes feature gates:
   - ClusterTrustBundle

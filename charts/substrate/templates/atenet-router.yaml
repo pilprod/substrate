@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -340,3 +341,4 @@ spec:
     port: 4040
     targetPort: status
     protocol: TCP
+{{- end }}

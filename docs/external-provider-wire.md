@@ -397,16 +397,16 @@ lets gRPC cancel the real stream context, then an explicitly owned, redacted,
 bounded-retry cleanup joins the aborted Send without a handler/fence wait cycle;
 that detached branch never converts a clean EOF into a successful response.
 
-This slice does not bind `ACTOR_INGRESS` or `ACTOR_EGRESS`; a client-opened
-egress channel receives a bounded negative OpenAck. The ateapi binary still
-uses the passive `SessionAuthority.Bind` constructor until a composite control-
-plane gRPC dialer selects this execution dialer for `ExternalSlot` assignments.
-Consequently the current release profile continues to reconcile external slots
-`OFFLINE`; package tests exercise the explicit forwarding constructor and prove
-that it cannot activate before transport binding or clean up before unbinding.
-The directory and lease are process-local. The opt-in Helm profile therefore
-uses one ateapi replica with `Recreate`; distributed route ownership is
-required before this mode can regain HA or zero-downtime rollout.
+The ateapi binary binds both `EXECUTION_GRPC` and `ACTOR_INGRESS` forwarding to
+the same recovered session authority before it opens the Broker listener. An
+external Worker becomes `ACTIVE` only after Ready, route publication, execution
+binding, and Actor ingress binding all succeed. Exact Actor UID, Worker
+incarnation, assignment, owner Atespace, and live generation checks protect the
+ingress path. `ACTOR_EGRESS` remains unsupported; a client-opened egress channel
+receives a bounded negative OpenAck. The directory and lease are process-local.
+The `external-control-plane-only` Helm profile therefore uses one ateapi replica
+with `Recreate`; distributed route ownership is required before this mode can
+regain HA or zero-downtime rollout.
 
 ## Workload provider opt-in
 
@@ -443,7 +443,7 @@ them. Revoking an enrollment also revokes its registration. The schema reserves
 session consumption and generation fields, and PostgreSQL provides an atomic
 session claim: it validates the current unexpired token, consumes it exactly
 once, and advances a nonzero generation which fences older sessions. `Connect`
-invokes that primitive only after a valid first frame. Execution-channel
-forwarding remains process-local and separate from authentication persistence;
-the passive binary composition leaves Workers unavailable until the composite
-execution dialer is wired.
+invokes that primitive only after a valid first frame. Execution and Actor
+ingress forwarding remain process-local and separate from authentication
+persistence; ateapi binds both data planes to the recovered session authority
+before accepting provider connections.

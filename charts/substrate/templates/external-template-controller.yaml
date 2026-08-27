@@ -14,14 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
-{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ include "substrate.fullname" (list "ate-controller" .) }}
   namespace: {{ .Release.Namespace }}
   labels:
-    apps: ate-controller
+    app: ate-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-controller" .) }}
+rules:
+- apiGroups: ["ate.dev"]
+  resources: ["actortemplates"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["ate.dev"]
+  resources: ["actortemplates/status"]
+  verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -36,8 +48,8 @@ roleRef:
   name: {{ include "substrate.fullname" (list "ate-controller" .) }}
   apiGroup: rbac.authorization.k8s.io
 ---
-kind: Service
 apiVersion: v1
+kind: Service
 metadata:
   name: {{ include "substrate.fullname" (list "ate-controller" .) }}
   namespace: {{ .Release.Namespace }}
@@ -52,8 +64,8 @@ spec:
     targetPort: metrics
     protocol: TCP
 ---
-kind: Deployment
 apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ include "substrate.fullname" (list "ate-controller" .) }}
   namespace: {{ .Release.Namespace }}
@@ -68,15 +80,14 @@ spec:
         app: ate-controller
     spec:
       serviceAccountName: {{ include "substrate.fullname" (list "ate-controller" .) }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: ate-controller
         image: {{ include "substrate.componentImage" (list "atecontroller" .) }}
         args:
-        # The atecontroller binary defaults --ateapi-conn-spec to
-        # dns:///api.ate-system.svc:443, which is correct only for the
-        # canonical render (release name "substrate" in namespace
-        # "ate-system"). Pass the chart-resolved Service so the controller
-        # dials the right backend when substrate is installed as a subchart.
+        - "--controller-mode=external-templates-only"
         - "--ateapi-conn-spec=dns:///{{ include "substrate.fullname" (list "api" .) }}.{{ .Release.Namespace }}.svc:443"
         - "--ateapi-ca-file=/run/servicedns-ca/trust-bundle.pem"
         - "--ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
@@ -92,9 +103,24 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: healthz
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         volumeMounts:
         - { name: servicedns-ca, mountPath: /run/servicedns-ca, readOnly: true }
-        - { name: podidentity,   mountPath: /run/podidentity.podcert.ate.dev, readOnly: true }
+        - { name: podidentity, mountPath: /run/podidentity.podcert.ate.dev, readOnly: true }
       volumes:
       - name: servicedns-ca
         projected:

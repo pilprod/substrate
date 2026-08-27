@@ -50,7 +50,8 @@ const (
 
 type ActorTemplateReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme       *runtime.Scheme
+	ExternalOnly bool
 
 	AteClient ateapipb.ControlClient
 }
@@ -79,6 +80,9 @@ func (r *ActorTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Handle deletion
 	if !at.GetDeletionTimestamp().IsZero() {
+		return ctrl.Result{}, nil
+	}
+	if r.ExternalOnly && at.Spec.WorkerProvider != atev1alpha1.WorkerProviderExternalSlot {
 		return ctrl.Result{}, nil
 	}
 
