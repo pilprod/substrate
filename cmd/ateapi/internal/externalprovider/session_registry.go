@@ -267,6 +267,35 @@ func (r *sessionRegistry) withCurrentLease(lease *sessionLease, operation func(*
 	return operation(lifecycle, current)
 }
 
+// withRegistrationLifecycle serializes an operator lifecycle mutation with
+// install, activation, cleanup, and removal for one registration. Unlike
+// withCurrentLease, the caller intentionally does not possess a session lease:
+// it must visit both the current generation and a no-current lifecycle
+// tombstone retaining conservative Worker ownership. Callers must also hold
+// the registration's claim-install gate so a durable claim cannot install a
+// newer generation after this lookup.
+func (r *sessionRegistry) withRegistrationLifecycle(registrationUID string, operation func(*sessionLifecycleState, sessionEntry) error) error {
+	if r == nil || operation == nil || !IsValidIdentity(registrationUID) {
+		return errSessionNotCurrent
+	}
+
+	lifecycle, _ := r.acquireLifecycle(registrationUID, false)
+	if lifecycle == nil {
+		return errSessionNotCurrent
+	}
+
+	lifecycle.mu.Lock()
+	defer func() {
+		r.releaseLifecycleLocked(registrationUID, lifecycle)
+		lifecycle.mu.Unlock()
+	}()
+
+	r.mu.RLock()
+	current := r.sessions[registrationUID]
+	r.mu.RUnlock()
+	return operation(lifecycle, current)
+}
+
 // acquireLifecycle pins the current per-registration lifecycle before
 // releasing the global map lock. This prevents reclamation and same-key pointer
 // recreation while the caller waits for lifecycle.mu.

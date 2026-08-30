@@ -15,9 +15,11 @@
 package externalprovider
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 const (
@@ -28,7 +30,26 @@ const (
 	defaultSessionDataBytes     uint32 = 64 << 10
 )
 
-var errInvalidSessionRuntime = errors.New("invalid external provider session runtime")
+var (
+	errInvalidSessionRuntime    = errors.New("invalid external provider session runtime")
+	errSessionAuthorityNotBound = errors.New("external provider session authority is not bound")
+)
+
+const registrationRevocationCleanupTimeout = 10 * time.Second
+
+// RegistrationRevocationStore is the durable boundary required by live
+// registration revocation. SessionAuthority keeps this operation under the
+// same per-registration gate as Connect claim/install.
+type RegistrationRevocationStore interface {
+	RevokeExternalProviderRegistration(context.Context, string) error
+}
+
+// RegistrationSessionRevoker is the admin service boundary for durable and
+// live revocation. Implementations must not return success until the current
+// route, forwarding channels, and Worker availability have been fenced.
+type RegistrationSessionRevoker interface {
+	RevokeExternalProviderRegistration(context.Context, RegistrationRevocationStore, string) error
+}
 
 // SessionRuntimeConfig explicitly bounds every in-memory authority used by
 // live external provider sessions.
@@ -73,6 +94,9 @@ type SessionAuthority struct {
 
 	mu    sync.Mutex
 	bound bool
+	// coordinator is published under mu at the same instant as bound. Admin
+	// revocation reads it only after Bind has completed successfully.
+	coordinator *sessionCoordinator
 }
 
 // SessionRuntime is the Connect-side view of one bound SessionAuthority. Every
@@ -153,6 +177,7 @@ func (a *SessionAuthority) Bind(
 	if err != nil {
 		return nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}
+	a.coordinator = coordinator
 	a.bound = true
 	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, nil
 }
@@ -213,9 +238,49 @@ func (a *SessionAuthority) bindForwarding(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
 	}
+	a.coordinator = coordinator
 	a.bound = true
 	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate},
 		&ExternalExecutionDialer{forwarder: forwarder},
 		&ExternalActorIngressDialer{forwarder: forwarder},
 		nil
+}
+
+// RevokeExternalProviderRegistration serializes durable revocation with the
+// exact Connect claim/install gate, persists authority loss first, and then
+// synchronously fences the current in-memory generation. Once persistence has
+// committed, cleanup uses an internal bounded context so client cancellation
+// cannot leave a revoked provider routable.
+func (a *SessionAuthority) RevokeExternalProviderRegistration(
+	ctx context.Context,
+	store RegistrationRevocationStore,
+	registrationUID string,
+) error {
+	if a == nil || ctx == nil || store == nil || !IsValidIdentity(registrationUID) {
+		return errInvalidSessionRuntime
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	coordinator := a.coordinator
+	bound := a.bound
+	a.mu.Unlock()
+	if !bound || coordinator == nil || coordinator.lifecycle == nil || a.claimInstallGate == nil {
+		return errSessionAuthorityNotBound
+	}
+
+	gate, err := a.claimInstallGate.acquire(ctx, registrationUID)
+	if err != nil {
+		return err
+	}
+	defer gate.release()
+
+	if err := store.RevokeExternalProviderRegistration(ctx, registrationUID); err != nil {
+		return err
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registrationRevocationCleanupTimeout)
+	defer cancel()
+	return coordinator.lifecycle.revokeCurrent(cleanupCtx, registrationUID)
 }

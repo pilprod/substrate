@@ -67,13 +67,14 @@ yet, so only configure providers whose users should have full control-plane
 access, including `DebugClear`.
 
 `externalProviderEnrollmentAdmins` is a narrow exception: it authorizes only
-`ExternalProviderAdmin.CreateExternalProviderEnrollment`, and only for an
+`ExternalProviderAdmin.CreateExternalProviderEnrollment` and
+`ExternalProviderAdmin.RevokeExternalProviderRegistration`, and only for an
 exact tuple of configured provider name, that provider's verified issuer, and
 JWT `sub`. An omitted or empty list authorizes nobody. mTLS identities are not
-implicitly enrollment administrators. The default installation helper grants
-the `ate-client` ServiceAccount because `kubectl-ate` mints a short-lived token
-for that exact subject; Kubernetes RBAC still controls who may request that
-ServiceAccount token.
+implicitly external-provider administrators. The default installation helper
+grants the `ate-client` ServiceAccount because `kubectl-ate` mints a short-lived
+token for that exact subject; Kubernetes RBAC still controls who may request
+that ServiceAccount token.
 
 ## Google Cloud CLI tokens
 

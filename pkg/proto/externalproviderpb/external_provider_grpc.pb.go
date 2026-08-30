@@ -251,7 +251,8 @@ var ExternalProviderBroker_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName = "/externalprovider.ExternalProviderAdmin/CreateExternalProviderEnrollment"
+	ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName   = "/externalprovider.ExternalProviderAdmin/CreateExternalProviderEnrollment"
+	ExternalProviderAdmin_RevokeExternalProviderRegistration_FullMethodName = "/externalprovider.ExternalProviderAdmin/RevokeExternalProviderRegistration"
 )
 
 // ExternalProviderAdminClient is the client API for ExternalProviderAdmin service.
@@ -267,6 +268,10 @@ type ExternalProviderAdminClient interface {
 	// credential. The credential is returned exactly once and cannot be looked
 	// up again; only its digest is retained by the server.
 	CreateExternalProviderEnrollment(ctx context.Context, in *CreateExternalProviderEnrollmentRequest, opts ...grpc.CallOption) (*CreateExternalProviderEnrollmentResponse, error)
+	// RevokeExternalProviderRegistration durably invalidates one registration
+	// and synchronously fences its live session, route, and Workers before the
+	// call succeeds.
+	RevokeExternalProviderRegistration(ctx context.Context, in *RevokeExternalProviderRegistrationRequest, opts ...grpc.CallOption) (*RevokeExternalProviderRegistrationResponse, error)
 }
 
 type externalProviderAdminClient struct {
@@ -287,6 +292,16 @@ func (c *externalProviderAdminClient) CreateExternalProviderEnrollment(ctx conte
 	return out, nil
 }
 
+func (c *externalProviderAdminClient) RevokeExternalProviderRegistration(ctx context.Context, in *RevokeExternalProviderRegistrationRequest, opts ...grpc.CallOption) (*RevokeExternalProviderRegistrationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeExternalProviderRegistrationResponse)
+	err := c.cc.Invoke(ctx, ExternalProviderAdmin_RevokeExternalProviderRegistration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExternalProviderAdminServer is the server API for ExternalProviderAdmin service.
 // All implementations must embed UnimplementedExternalProviderAdminServer
 // for forward compatibility.
@@ -300,6 +315,10 @@ type ExternalProviderAdminServer interface {
 	// credential. The credential is returned exactly once and cannot be looked
 	// up again; only its digest is retained by the server.
 	CreateExternalProviderEnrollment(context.Context, *CreateExternalProviderEnrollmentRequest) (*CreateExternalProviderEnrollmentResponse, error)
+	// RevokeExternalProviderRegistration durably invalidates one registration
+	// and synchronously fences its live session, route, and Workers before the
+	// call succeeds.
+	RevokeExternalProviderRegistration(context.Context, *RevokeExternalProviderRegistrationRequest) (*RevokeExternalProviderRegistrationResponse, error)
 	mustEmbedUnimplementedExternalProviderAdminServer()
 }
 
@@ -312,6 +331,9 @@ type UnimplementedExternalProviderAdminServer struct{}
 
 func (UnimplementedExternalProviderAdminServer) CreateExternalProviderEnrollment(context.Context, *CreateExternalProviderEnrollmentRequest) (*CreateExternalProviderEnrollmentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateExternalProviderEnrollment not implemented")
+}
+func (UnimplementedExternalProviderAdminServer) RevokeExternalProviderRegistration(context.Context, *RevokeExternalProviderRegistrationRequest) (*RevokeExternalProviderRegistrationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeExternalProviderRegistration not implemented")
 }
 func (UnimplementedExternalProviderAdminServer) mustEmbedUnimplementedExternalProviderAdminServer() {}
 func (UnimplementedExternalProviderAdminServer) testEmbeddedByValue()                               {}
@@ -352,6 +374,24 @@ func _ExternalProviderAdmin_CreateExternalProviderEnrollment_Handler(srv interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExternalProviderAdmin_RevokeExternalProviderRegistration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeExternalProviderRegistrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExternalProviderAdminServer).RevokeExternalProviderRegistration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExternalProviderAdmin_RevokeExternalProviderRegistration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExternalProviderAdminServer).RevokeExternalProviderRegistration(ctx, req.(*RevokeExternalProviderRegistrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExternalProviderAdmin_ServiceDesc is the grpc.ServiceDesc for ExternalProviderAdmin service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -362,6 +402,10 @@ var ExternalProviderAdmin_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateExternalProviderEnrollment",
 			Handler:    _ExternalProviderAdmin_CreateExternalProviderEnrollment_Handler,
+		},
+		{
+			MethodName: "RevokeExternalProviderRegistration",
+			Handler:    _ExternalProviderAdmin_RevokeExternalProviderRegistration_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

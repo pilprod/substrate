@@ -293,6 +293,86 @@ func (x *CreateExternalProviderEnrollmentResponse) GetScope() *ExternalProviderE
 	return nil
 }
 
+type RevokeExternalProviderRegistrationRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RegistrationUid string                 `protobuf:"bytes,1,opt,name=registration_uid,json=registrationUid,proto3" json:"registration_uid,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RevokeExternalProviderRegistrationRequest) Reset() {
+	*x = RevokeExternalProviderRegistrationRequest{}
+	mi := &file_external_provider_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeExternalProviderRegistrationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeExternalProviderRegistrationRequest) ProtoMessage() {}
+
+func (x *RevokeExternalProviderRegistrationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeExternalProviderRegistrationRequest.ProtoReflect.Descriptor instead.
+func (*RevokeExternalProviderRegistrationRequest) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RevokeExternalProviderRegistrationRequest) GetRegistrationUid() string {
+	if x != nil {
+		return x.RegistrationUid
+	}
+	return ""
+}
+
+type RevokeExternalProviderRegistrationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeExternalProviderRegistrationResponse) Reset() {
+	*x = RevokeExternalProviderRegistrationResponse{}
+	mi := &file_external_provider_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeExternalProviderRegistrationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeExternalProviderRegistrationResponse) ProtoMessage() {}
+
+func (x *RevokeExternalProviderRegistrationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeExternalProviderRegistrationResponse.ProtoReflect.Descriptor instead.
+func (*RevokeExternalProviderRegistrationResponse) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{4}
+}
+
 // EnrollRequest is intentionally empty. The enrollment credential is carried
 // only in gRPC authorization metadata.
 type EnrollRequest struct {
@@ -303,7 +383,7 @@ type EnrollRequest struct {
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_external_provider_proto_msgTypes[3]
+	mi := &file_external_provider_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -315,7 +395,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[3]
+	mi := &file_external_provider_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -328,7 +408,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{3}
+	return file_external_provider_proto_rawDescGZIP(), []int{5}
 }
 
 type EnrollResponse struct {
@@ -351,7 +431,7 @@ type EnrollResponse struct {
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_external_provider_proto_msgTypes[4]
+	mi := &file_external_provider_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +443,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[4]
+	mi := &file_external_provider_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +456,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{4}
+	return file_external_provider_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *EnrollResponse) GetRegistrationUid() string {
@@ -411,7 +491,7 @@ type MintSessionTokenRequest struct {
 
 func (x *MintSessionTokenRequest) Reset() {
 	*x = MintSessionTokenRequest{}
-	mi := &file_external_provider_proto_msgTypes[5]
+	mi := &file_external_provider_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +503,7 @@ func (x *MintSessionTokenRequest) String() string {
 func (*MintSessionTokenRequest) ProtoMessage() {}
 
 func (x *MintSessionTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[5]
+	mi := &file_external_provider_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +516,7 @@ func (x *MintSessionTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintSessionTokenRequest.ProtoReflect.Descriptor instead.
 func (*MintSessionTokenRequest) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{5}
+	return file_external_provider_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *MintSessionTokenRequest) GetRegistrationUid() string {
@@ -466,7 +546,7 @@ type MintSessionTokenResponse struct {
 
 func (x *MintSessionTokenResponse) Reset() {
 	*x = MintSessionTokenResponse{}
-	mi := &file_external_provider_proto_msgTypes[6]
+	mi := &file_external_provider_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -478,7 +558,7 @@ func (x *MintSessionTokenResponse) String() string {
 func (*MintSessionTokenResponse) ProtoMessage() {}
 
 func (x *MintSessionTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[6]
+	mi := &file_external_provider_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -491,7 +571,7 @@ func (x *MintSessionTokenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintSessionTokenResponse.ProtoReflect.Descriptor instead.
 func (*MintSessionTokenResponse) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{6}
+	return file_external_provider_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *MintSessionTokenResponse) GetSessionToken() []byte {
@@ -545,7 +625,7 @@ type ClientFrame struct {
 
 func (x *ClientFrame) Reset() {
 	*x = ClientFrame{}
-	mi := &file_external_provider_proto_msgTypes[7]
+	mi := &file_external_provider_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -557,7 +637,7 @@ func (x *ClientFrame) String() string {
 func (*ClientFrame) ProtoMessage() {}
 
 func (x *ClientFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[7]
+	mi := &file_external_provider_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -570,7 +650,7 @@ func (x *ClientFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientFrame.ProtoReflect.Descriptor instead.
 func (*ClientFrame) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{7}
+	return file_external_provider_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ClientFrame) GetSessionGeneration() uint64 {
@@ -724,7 +804,7 @@ type ServerFrame struct {
 
 func (x *ServerFrame) Reset() {
 	*x = ServerFrame{}
-	mi := &file_external_provider_proto_msgTypes[8]
+	mi := &file_external_provider_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +816,7 @@ func (x *ServerFrame) String() string {
 func (*ServerFrame) ProtoMessage() {}
 
 func (x *ServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[8]
+	mi := &file_external_provider_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +829,7 @@ func (x *ServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerFrame.ProtoReflect.Descriptor instead.
 func (*ServerFrame) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{8}
+	return file_external_provider_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ServerFrame) GetSessionGeneration() uint64 {
@@ -907,7 +987,7 @@ type ConnectHello struct {
 
 func (x *ConnectHello) Reset() {
 	*x = ConnectHello{}
-	mi := &file_external_provider_proto_msgTypes[9]
+	mi := &file_external_provider_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +999,7 @@ func (x *ConnectHello) String() string {
 func (*ConnectHello) ProtoMessage() {}
 
 func (x *ConnectHello) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[9]
+	mi := &file_external_provider_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1012,7 @@ func (x *ConnectHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectHello.ProtoReflect.Descriptor instead.
 func (*ConnectHello) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{9}
+	return file_external_provider_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ConnectHello) GetRegistrationUid() string {
@@ -991,7 +1071,7 @@ type ExternalSlot struct {
 
 func (x *ExternalSlot) Reset() {
 	*x = ExternalSlot{}
-	mi := &file_external_provider_proto_msgTypes[10]
+	mi := &file_external_provider_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1003,7 +1083,7 @@ func (x *ExternalSlot) String() string {
 func (*ExternalSlot) ProtoMessage() {}
 
 func (x *ExternalSlot) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[10]
+	mi := &file_external_provider_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1016,7 +1096,7 @@ func (x *ExternalSlot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalSlot.ProtoReflect.Descriptor instead.
 func (*ExternalSlot) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{10}
+	return file_external_provider_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ExternalSlot) GetSlotId() string {
@@ -1068,7 +1148,7 @@ type SlotCapabilityPolicy struct {
 
 func (x *SlotCapabilityPolicy) Reset() {
 	*x = SlotCapabilityPolicy{}
-	mi := &file_external_provider_proto_msgTypes[11]
+	mi := &file_external_provider_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1160,7 @@ func (x *SlotCapabilityPolicy) String() string {
 func (*SlotCapabilityPolicy) ProtoMessage() {}
 
 func (x *SlotCapabilityPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[11]
+	mi := &file_external_provider_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1173,7 @@ func (x *SlotCapabilityPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SlotCapabilityPolicy.ProtoReflect.Descriptor instead.
 func (*SlotCapabilityPolicy) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{11}
+	return file_external_provider_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SlotCapabilityPolicy) GetVersion() uint32 {
@@ -1132,7 +1212,7 @@ type SlotProfile struct {
 
 func (x *SlotProfile) Reset() {
 	*x = SlotProfile{}
-	mi := &file_external_provider_proto_msgTypes[12]
+	mi := &file_external_provider_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1144,7 +1224,7 @@ func (x *SlotProfile) String() string {
 func (*SlotProfile) ProtoMessage() {}
 
 func (x *SlotProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[12]
+	mi := &file_external_provider_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1157,7 +1237,7 @@ func (x *SlotProfile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SlotProfile.ProtoReflect.Descriptor instead.
 func (*SlotProfile) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{12}
+	return file_external_provider_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SlotProfile) GetProfileId() string {
@@ -1211,7 +1291,7 @@ type ConnectReady struct {
 
 func (x *ConnectReady) Reset() {
 	*x = ConnectReady{}
-	mi := &file_external_provider_proto_msgTypes[13]
+	mi := &file_external_provider_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1303,7 @@ func (x *ConnectReady) String() string {
 func (*ConnectReady) ProtoMessage() {}
 
 func (x *ConnectReady) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[13]
+	mi := &file_external_provider_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1316,7 @@ func (x *ConnectReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectReady.ProtoReflect.Descriptor instead.
 func (*ConnectReady) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{13}
+	return file_external_provider_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ConnectReady) GetMaxOpenChannels() uint32 {
@@ -1277,7 +1357,7 @@ type OpenChannel struct {
 
 func (x *OpenChannel) Reset() {
 	*x = OpenChannel{}
-	mi := &file_external_provider_proto_msgTypes[14]
+	mi := &file_external_provider_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1289,7 +1369,7 @@ func (x *OpenChannel) String() string {
 func (*OpenChannel) ProtoMessage() {}
 
 func (x *OpenChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[14]
+	mi := &file_external_provider_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1302,7 +1382,7 @@ func (x *OpenChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenChannel.ProtoReflect.Descriptor instead.
 func (*OpenChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{14}
+	return file_external_provider_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *OpenChannel) GetChannelId() uint64 {
@@ -1342,7 +1422,7 @@ type ActorEgressOpen struct {
 
 func (x *ActorEgressOpen) Reset() {
 	*x = ActorEgressOpen{}
-	mi := &file_external_provider_proto_msgTypes[15]
+	mi := &file_external_provider_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1354,7 +1434,7 @@ func (x *ActorEgressOpen) String() string {
 func (*ActorEgressOpen) ProtoMessage() {}
 
 func (x *ActorEgressOpen) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[15]
+	mi := &file_external_provider_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1367,7 +1447,7 @@ func (x *ActorEgressOpen) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActorEgressOpen.ProtoReflect.Descriptor instead.
 func (*ActorEgressOpen) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{15}
+	return file_external_provider_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ActorEgressOpen) GetCertificateSigningRequestDer() []byte {
@@ -1397,7 +1477,7 @@ type OpenChannelAck struct {
 
 func (x *OpenChannelAck) Reset() {
 	*x = OpenChannelAck{}
-	mi := &file_external_provider_proto_msgTypes[16]
+	mi := &file_external_provider_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1409,7 +1489,7 @@ func (x *OpenChannelAck) String() string {
 func (*OpenChannelAck) ProtoMessage() {}
 
 func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[16]
+	mi := &file_external_provider_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1422,7 +1502,7 @@ func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenChannelAck.ProtoReflect.Descriptor instead.
 func (*OpenChannelAck) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{16}
+	return file_external_provider_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *OpenChannelAck) GetChannelId() uint64 {
@@ -1464,7 +1544,7 @@ type ActorEgressOpenAck struct {
 
 func (x *ActorEgressOpenAck) Reset() {
 	*x = ActorEgressOpenAck{}
-	mi := &file_external_provider_proto_msgTypes[17]
+	mi := &file_external_provider_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1476,7 +1556,7 @@ func (x *ActorEgressOpenAck) String() string {
 func (*ActorEgressOpenAck) ProtoMessage() {}
 
 func (x *ActorEgressOpenAck) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[17]
+	mi := &file_external_provider_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1489,7 +1569,7 @@ func (x *ActorEgressOpenAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActorEgressOpenAck.ProtoReflect.Descriptor instead.
 func (*ActorEgressOpenAck) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{17}
+	return file_external_provider_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ActorEgressOpenAck) GetCertificateChainDer() [][]byte {
@@ -1528,7 +1608,7 @@ type ChannelData struct {
 
 func (x *ChannelData) Reset() {
 	*x = ChannelData{}
-	mi := &file_external_provider_proto_msgTypes[18]
+	mi := &file_external_provider_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1540,7 +1620,7 @@ func (x *ChannelData) String() string {
 func (*ChannelData) ProtoMessage() {}
 
 func (x *ChannelData) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[18]
+	mi := &file_external_provider_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1553,7 +1633,7 @@ func (x *ChannelData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelData.ProtoReflect.Descriptor instead.
 func (*ChannelData) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{18}
+	return file_external_provider_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ChannelData) GetChannelId() uint64 {
@@ -1581,7 +1661,7 @@ type HalfCloseChannel struct {
 
 func (x *HalfCloseChannel) Reset() {
 	*x = HalfCloseChannel{}
-	mi := &file_external_provider_proto_msgTypes[19]
+	mi := &file_external_provider_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1593,7 +1673,7 @@ func (x *HalfCloseChannel) String() string {
 func (*HalfCloseChannel) ProtoMessage() {}
 
 func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[19]
+	mi := &file_external_provider_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1606,7 +1686,7 @@ func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HalfCloseChannel.ProtoReflect.Descriptor instead.
 func (*HalfCloseChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{19}
+	return file_external_provider_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HalfCloseChannel) GetChannelId() uint64 {
@@ -1633,7 +1713,7 @@ type ResetChannel struct {
 
 func (x *ResetChannel) Reset() {
 	*x = ResetChannel{}
-	mi := &file_external_provider_proto_msgTypes[20]
+	mi := &file_external_provider_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1645,7 +1725,7 @@ func (x *ResetChannel) String() string {
 func (*ResetChannel) ProtoMessage() {}
 
 func (x *ResetChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[20]
+	mi := &file_external_provider_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1658,7 +1738,7 @@ func (x *ResetChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetChannel.ProtoReflect.Descriptor instead.
 func (*ResetChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{20}
+	return file_external_provider_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ResetChannel) GetChannelId() uint64 {
@@ -1696,7 +1776,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_external_provider_proto_msgTypes[21]
+	mi := &file_external_provider_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1708,7 +1788,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[21]
+	mi := &file_external_provider_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1721,7 +1801,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{21}
+	return file_external_provider_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Heartbeat) GetNonce() uint64 {
@@ -1759,7 +1839,10 @@ const file_external_provider_proto_rawDesc = "" +
 	"\x15enrollment_credential\x18\x02 \x01(\fB\x03\x80\x01\x01R\x14enrollmentCredential\x129\n" +
 	"\n" +
 	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12G\n" +
-	"\x05scope\x18\x04 \x01(\v21.externalprovider.ExternalProviderEnrollmentScopeR\x05scope\"\x0f\n" +
+	"\x05scope\x18\x04 \x01(\v21.externalprovider.ExternalProviderEnrollmentScopeR\x05scope\"V\n" +
+	")RevokeExternalProviderRegistrationRequest\x12)\n" +
+	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\",\n" +
+	"*RevokeExternalProviderRegistrationResponse\"\x0f\n" +
 	"\rEnrollRequest\"\xb8\x01\n" +
 	"\x0eEnrollResponse\x12)\n" +
 	"\x10registration_uid\x18\x01 \x01(\tR\x0fregistrationUid\x122\n" +
@@ -1869,9 +1952,10 @@ const file_external_provider_proto_rawDesc = "" +
 	"\x16ExternalProviderBroker\x12M\n" +
 	"\x06Enroll\x12\x1f.externalprovider.EnrollRequest\x1a .externalprovider.EnrollResponse\"\x00\x12k\n" +
 	"\x10MintSessionToken\x12).externalprovider.MintSessionTokenRequest\x1a*.externalprovider.MintSessionTokenResponse\"\x00\x12M\n" +
-	"\aConnect\x12\x1d.externalprovider.ClientFrame\x1a\x1d.externalprovider.ServerFrame\"\x00(\x010\x012\xb5\x01\n" +
+	"\aConnect\x12\x1d.externalprovider.ClientFrame\x1a\x1d.externalprovider.ServerFrame\"\x00(\x010\x012\xd9\x02\n" +
 	"\x15ExternalProviderAdmin\x12\x9b\x01\n" +
-	" CreateExternalProviderEnrollment\x129.externalprovider.CreateExternalProviderEnrollmentRequest\x1a:.externalprovider.CreateExternalProviderEnrollmentResponse\"\x00BCZAgithub.com/agent-substrate/substrate/pkg/proto/externalproviderpbb\x06proto3"
+	" CreateExternalProviderEnrollment\x129.externalprovider.CreateExternalProviderEnrollmentRequest\x1a:.externalprovider.CreateExternalProviderEnrollmentResponse\"\x00\x12\xa1\x01\n" +
+	"\"RevokeExternalProviderRegistration\x12;.externalprovider.RevokeExternalProviderRegistrationRequest\x1a<.externalprovider.RevokeExternalProviderRegistrationResponse\"\x00BCZAgithub.com/agent-substrate/substrate/pkg/proto/externalproviderpbb\x06proto3"
 
 var (
 	file_external_provider_proto_rawDescOnce sync.Once
@@ -1886,79 +1970,83 @@ func file_external_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_external_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_external_provider_proto_goTypes = []any{
-	(ChannelKind)(0),                                 // 0: externalprovider.ChannelKind
-	(*ExternalProviderEnrollmentScope)(nil),          // 1: externalprovider.ExternalProviderEnrollmentScope
-	(*CreateExternalProviderEnrollmentRequest)(nil),  // 2: externalprovider.CreateExternalProviderEnrollmentRequest
-	(*CreateExternalProviderEnrollmentResponse)(nil), // 3: externalprovider.CreateExternalProviderEnrollmentResponse
-	(*EnrollRequest)(nil),                            // 4: externalprovider.EnrollRequest
-	(*EnrollResponse)(nil),                           // 5: externalprovider.EnrollResponse
-	(*MintSessionTokenRequest)(nil),                  // 6: externalprovider.MintSessionTokenRequest
-	(*MintSessionTokenResponse)(nil),                 // 7: externalprovider.MintSessionTokenResponse
-	(*ClientFrame)(nil),                              // 8: externalprovider.ClientFrame
-	(*ServerFrame)(nil),                              // 9: externalprovider.ServerFrame
-	(*ConnectHello)(nil),                             // 10: externalprovider.ConnectHello
-	(*ExternalSlot)(nil),                             // 11: externalprovider.ExternalSlot
-	(*SlotCapabilityPolicy)(nil),                     // 12: externalprovider.SlotCapabilityPolicy
-	(*SlotProfile)(nil),                              // 13: externalprovider.SlotProfile
-	(*ConnectReady)(nil),                             // 14: externalprovider.ConnectReady
-	(*OpenChannel)(nil),                              // 15: externalprovider.OpenChannel
-	(*ActorEgressOpen)(nil),                          // 16: externalprovider.ActorEgressOpen
-	(*OpenChannelAck)(nil),                           // 17: externalprovider.OpenChannelAck
-	(*ActorEgressOpenAck)(nil),                       // 18: externalprovider.ActorEgressOpenAck
-	(*ChannelData)(nil),                              // 19: externalprovider.ChannelData
-	(*HalfCloseChannel)(nil),                         // 20: externalprovider.HalfCloseChannel
-	(*ResetChannel)(nil),                             // 21: externalprovider.ResetChannel
-	(*Heartbeat)(nil),                                // 22: externalprovider.Heartbeat
-	nil,                                              // 23: externalprovider.ExternalSlot.LabelsEntry
-	nil,                                              // 24: externalprovider.SlotProfile.LabelsEntry
-	(*durationpb.Duration)(nil),                      // 25: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),                    // 26: google.protobuf.Timestamp
-	(*ateapipb.WorkerCapacity)(nil),                  // 27: ateapi.WorkerCapacity
+	(ChannelKind)(0),                                   // 0: externalprovider.ChannelKind
+	(*ExternalProviderEnrollmentScope)(nil),            // 1: externalprovider.ExternalProviderEnrollmentScope
+	(*CreateExternalProviderEnrollmentRequest)(nil),    // 2: externalprovider.CreateExternalProviderEnrollmentRequest
+	(*CreateExternalProviderEnrollmentResponse)(nil),   // 3: externalprovider.CreateExternalProviderEnrollmentResponse
+	(*RevokeExternalProviderRegistrationRequest)(nil),  // 4: externalprovider.RevokeExternalProviderRegistrationRequest
+	(*RevokeExternalProviderRegistrationResponse)(nil), // 5: externalprovider.RevokeExternalProviderRegistrationResponse
+	(*EnrollRequest)(nil),                              // 6: externalprovider.EnrollRequest
+	(*EnrollResponse)(nil),                             // 7: externalprovider.EnrollResponse
+	(*MintSessionTokenRequest)(nil),                    // 8: externalprovider.MintSessionTokenRequest
+	(*MintSessionTokenResponse)(nil),                   // 9: externalprovider.MintSessionTokenResponse
+	(*ClientFrame)(nil),                                // 10: externalprovider.ClientFrame
+	(*ServerFrame)(nil),                                // 11: externalprovider.ServerFrame
+	(*ConnectHello)(nil),                               // 12: externalprovider.ConnectHello
+	(*ExternalSlot)(nil),                               // 13: externalprovider.ExternalSlot
+	(*SlotCapabilityPolicy)(nil),                       // 14: externalprovider.SlotCapabilityPolicy
+	(*SlotProfile)(nil),                                // 15: externalprovider.SlotProfile
+	(*ConnectReady)(nil),                               // 16: externalprovider.ConnectReady
+	(*OpenChannel)(nil),                                // 17: externalprovider.OpenChannel
+	(*ActorEgressOpen)(nil),                            // 18: externalprovider.ActorEgressOpen
+	(*OpenChannelAck)(nil),                             // 19: externalprovider.OpenChannelAck
+	(*ActorEgressOpenAck)(nil),                         // 20: externalprovider.ActorEgressOpenAck
+	(*ChannelData)(nil),                                // 21: externalprovider.ChannelData
+	(*HalfCloseChannel)(nil),                           // 22: externalprovider.HalfCloseChannel
+	(*ResetChannel)(nil),                               // 23: externalprovider.ResetChannel
+	(*Heartbeat)(nil),                                  // 24: externalprovider.Heartbeat
+	nil,                                                // 25: externalprovider.ExternalSlot.LabelsEntry
+	nil,                                                // 26: externalprovider.SlotProfile.LabelsEntry
+	(*durationpb.Duration)(nil),                        // 27: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),                      // 28: google.protobuf.Timestamp
+	(*ateapipb.WorkerCapacity)(nil),                    // 29: ateapi.WorkerCapacity
 }
 var file_external_provider_proto_depIdxs = []int32{
-	12, // 0: externalprovider.ExternalProviderEnrollmentScope.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
+	14, // 0: externalprovider.ExternalProviderEnrollmentScope.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
 	1,  // 1: externalprovider.CreateExternalProviderEnrollmentRequest.scope:type_name -> externalprovider.ExternalProviderEnrollmentScope
-	25, // 2: externalprovider.CreateExternalProviderEnrollmentRequest.ttl:type_name -> google.protobuf.Duration
-	26, // 3: externalprovider.CreateExternalProviderEnrollmentResponse.expires_at:type_name -> google.protobuf.Timestamp
+	27, // 2: externalprovider.CreateExternalProviderEnrollmentRequest.ttl:type_name -> google.protobuf.Duration
+	28, // 3: externalprovider.CreateExternalProviderEnrollmentResponse.expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: externalprovider.CreateExternalProviderEnrollmentResponse.scope:type_name -> externalprovider.ExternalProviderEnrollmentScope
-	12, // 5: externalprovider.EnrollResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
-	26, // 6: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 7: externalprovider.MintSessionTokenResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
-	10, // 8: externalprovider.ClientFrame.hello:type_name -> externalprovider.ConnectHello
-	15, // 9: externalprovider.ClientFrame.open:type_name -> externalprovider.OpenChannel
-	17, // 10: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	19, // 11: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
-	20, // 12: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	21, // 13: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
-	22, // 14: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
-	14, // 15: externalprovider.ServerFrame.ready:type_name -> externalprovider.ConnectReady
-	15, // 16: externalprovider.ServerFrame.open:type_name -> externalprovider.OpenChannel
-	17, // 17: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	19, // 18: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
-	20, // 19: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	21, // 20: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
-	22, // 21: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
-	11, // 22: externalprovider.ConnectHello.slots:type_name -> externalprovider.ExternalSlot
-	23, // 23: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
-	27, // 24: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
-	13, // 25: externalprovider.SlotCapabilityPolicy.profiles:type_name -> externalprovider.SlotProfile
-	24, // 26: externalprovider.SlotProfile.labels:type_name -> externalprovider.SlotProfile.LabelsEntry
-	27, // 27: externalprovider.SlotProfile.capacity:type_name -> ateapi.WorkerCapacity
+	14, // 5: externalprovider.EnrollResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
+	28, // 6: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	14, // 7: externalprovider.MintSessionTokenResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
+	12, // 8: externalprovider.ClientFrame.hello:type_name -> externalprovider.ConnectHello
+	17, // 9: externalprovider.ClientFrame.open:type_name -> externalprovider.OpenChannel
+	19, // 10: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	21, // 11: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
+	22, // 12: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	23, // 13: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
+	24, // 14: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	16, // 15: externalprovider.ServerFrame.ready:type_name -> externalprovider.ConnectReady
+	17, // 16: externalprovider.ServerFrame.open:type_name -> externalprovider.OpenChannel
+	19, // 17: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	21, // 18: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
+	22, // 19: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	23, // 20: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
+	24, // 21: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	13, // 22: externalprovider.ConnectHello.slots:type_name -> externalprovider.ExternalSlot
+	25, // 23: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
+	29, // 24: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
+	15, // 25: externalprovider.SlotCapabilityPolicy.profiles:type_name -> externalprovider.SlotProfile
+	26, // 26: externalprovider.SlotProfile.labels:type_name -> externalprovider.SlotProfile.LabelsEntry
+	29, // 27: externalprovider.SlotProfile.capacity:type_name -> ateapi.WorkerCapacity
 	0,  // 28: externalprovider.OpenChannel.kind:type_name -> externalprovider.ChannelKind
-	16, // 29: externalprovider.OpenChannel.actor_egress:type_name -> externalprovider.ActorEgressOpen
-	18, // 30: externalprovider.OpenChannelAck.actor_egress:type_name -> externalprovider.ActorEgressOpenAck
-	4,  // 31: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
-	6,  // 32: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
-	8,  // 33: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
+	18, // 29: externalprovider.OpenChannel.actor_egress:type_name -> externalprovider.ActorEgressOpen
+	20, // 30: externalprovider.OpenChannelAck.actor_egress:type_name -> externalprovider.ActorEgressOpenAck
+	6,  // 31: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
+	8,  // 32: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
+	10, // 33: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
 	2,  // 34: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:input_type -> externalprovider.CreateExternalProviderEnrollmentRequest
-	5,  // 35: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
-	7,  // 36: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
-	9,  // 37: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
-	3,  // 38: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:output_type -> externalprovider.CreateExternalProviderEnrollmentResponse
-	35, // [35:39] is the sub-list for method output_type
-	31, // [31:35] is the sub-list for method input_type
+	4,  // 35: externalprovider.ExternalProviderAdmin.RevokeExternalProviderRegistration:input_type -> externalprovider.RevokeExternalProviderRegistrationRequest
+	7,  // 36: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
+	9,  // 37: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
+	11, // 38: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
+	3,  // 39: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:output_type -> externalprovider.CreateExternalProviderEnrollmentResponse
+	5,  // 40: externalprovider.ExternalProviderAdmin.RevokeExternalProviderRegistration:output_type -> externalprovider.RevokeExternalProviderRegistrationResponse
+	36, // [36:41] is the sub-list for method output_type
+	31, // [31:36] is the sub-list for method input_type
 	31, // [31:31] is the sub-list for extension type_name
 	31, // [31:31] is the sub-list for extension extendee
 	0,  // [0:31] is the sub-list for field type_name
@@ -1969,7 +2057,7 @@ func file_external_provider_proto_init() {
 	if File_external_provider_proto != nil {
 		return
 	}
-	file_external_provider_proto_msgTypes[7].OneofWrappers = []any{
+	file_external_provider_proto_msgTypes[9].OneofWrappers = []any{
 		(*ClientFrame_Hello)(nil),
 		(*ClientFrame_Open)(nil),
 		(*ClientFrame_OpenAck)(nil),
@@ -1978,7 +2066,7 @@ func file_external_provider_proto_init() {
 		(*ClientFrame_Reset_)(nil),
 		(*ClientFrame_Heartbeat)(nil),
 	}
-	file_external_provider_proto_msgTypes[8].OneofWrappers = []any{
+	file_external_provider_proto_msgTypes[10].OneofWrappers = []any{
 		(*ServerFrame_Ready)(nil),
 		(*ServerFrame_Open)(nil),
 		(*ServerFrame_OpenAck)(nil),
@@ -1993,7 +2081,7 @@ func file_external_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_external_provider_proto_rawDesc), len(file_external_provider_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

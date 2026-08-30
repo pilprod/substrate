@@ -27,6 +27,11 @@ import (
 var (
 	errInvalidWorkerSessionLifecycle = errors.New("invalid external provider Worker session lifecycle")
 	errSessionRouteNotPublished      = errors.New("external provider session route is not published")
+
+	// ErrExternalProviderRegistrationRevoked fences every live data plane for
+	// an operator-revoked registration. It contains no operator or credential
+	// material and is safe to use only as an internal cancellation cause.
+	ErrExternalProviderRegistrationRevoked = errors.New("external provider registration was revoked")
 )
 
 // ExternalWorkerAvailabilityController is the ateapi-private status boundary.
@@ -127,6 +132,18 @@ func (l *workerSessionLifecycle) currentRoute(lease *sessionLease) workerSession
 		CurrentRoute(*sessionLease) workerSessionRoute
 	}); ok {
 		return authority.CurrentRoute(lease)
+	}
+	return nil
+}
+
+func (l *workerSessionLifecycle) retainedRoute(registrationUID string) workerSessionRoute {
+	if directory, ok := l.routes.(*SessionRouteDirectory); ok {
+		return directory.routeForRegistration(registrationUID)
+	}
+	if authority, ok := l.routes.(interface {
+		CurrentRouteForRegistration(string) workerSessionRoute
+	}); ok {
+		return authority.CurrentRouteForRegistration(registrationUID)
 	}
 	return nil
 }
@@ -338,6 +355,74 @@ func (l *workerSessionLifecycle) cleanupUnpublished(ctx context.Context, lease *
 		return workerCleanupResult{superseded: true}, nil
 	}
 	return cleanup, err
+}
+
+// revokeCurrent closes whichever generation is current for registrationUID,
+// makes its conservatively owned Workers OFFLINE, withdraws its route, and
+// exact-removes the lease. The caller must hold the matching claim-install
+// gate for the whole operation. That external gate prevents a previously
+// authenticated claim from installing after durable revocation.
+//
+// Cancellation happens before any fallible OFFLINE transition. A failed
+// cleanup therefore leaves a retryable, non-routable lease and never permits
+// an establishment already past durable claim to publish after revocation.
+func (l *workerSessionLifecycle) revokeCurrent(ctx context.Context, registrationUID string) error {
+	if l == nil || ctx == nil || !IsValidIdentity(registrationUID) {
+		return errInvalidWorkerSessionLifecycle
+	}
+
+	var revoked *sessionLease
+	err := l.registry.withRegistrationLifecycle(registrationUID, func(state *sessionLifecycleState, current sessionEntry) error {
+		revoked = current.lease
+		var route workerSessionRoute
+		if current.lease != nil {
+			route = l.currentRoute(current.lease)
+		} else {
+			route = l.retainedRoute(registrationUID)
+		}
+		closed := false
+		if route != nil {
+			closed = l.routes.Close(route)
+			if !closed && routeLiveError(route) == nil {
+				current.cancel(ErrExternalProviderRegistrationRevoked)
+				state.reclaimEligible = false
+				return errSessionRouteNotPublished
+			}
+		}
+		if current.cancel != nil {
+			current.cancel(ErrExternalProviderRegistrationRevoked)
+		}
+
+		cleanup, cleanupErr := l.offline(ctx, state.ownedWorkers)
+		state.ownedWorkers = cloneSessionWorkerRefs(cleanup.pending)
+		if cleanupErr != nil {
+			state.reclaimEligible = false
+			return fmt.Errorf("offlining revoked external Workers: %w", cleanupErr)
+		}
+		if closed && !l.routes.Withdraw(route) {
+			state.reclaimEligible = false
+			return errSessionRouteNotPublished
+		}
+		state.ownedWorkers = nil
+		state.reclaimEligible = true
+		return nil
+	})
+	if errors.Is(err, errSessionNotCurrent) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if revoked == nil {
+		return nil
+	}
+	if l.registry.remove(registrationUID, revoked.sessionGeneration(), revoked, true) {
+		return nil
+	}
+	if current, exists := l.registry.lookup(registrationUID, revoked.sessionGeneration()); exists && current == revoked {
+		return errSessionRemoved
+	}
+	return nil
 }
 
 func routeLease(route workerSessionRoute) *sessionLease {

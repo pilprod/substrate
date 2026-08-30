@@ -617,6 +617,24 @@ func (d *SessionRouteDirectory) routeForLease(lease *sessionLease) *SessionRoute
 	return entry.route
 }
 
+// routeForRegistration returns the exact route still indexed for a
+// registration even when failed cleanup has already removed its session
+// lease. The returned pointer is only a lifecycle-cleanup candidate. Callers
+// must hold the registration lifecycle gate and the external claim-install
+// gate before closing or withdrawing it.
+func (d *SessionRouteDirectory) routeForRegistration(registrationUID string) *SessionRoute {
+	if d == nil || !IsValidIdentity(registrationUID) {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	entry, exists := d.routes[registrationUID]
+	if !exists || entry.route == nil || entry.route.RegistrationUID() != registrationUID {
+		return nil
+	}
+	return entry.route
+}
+
 // SessionRouteDirectoryStats is a non-secret point-in-time capacity snapshot.
 type SessionRouteDirectoryStats struct {
 	Routes   uint32

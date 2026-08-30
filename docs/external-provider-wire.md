@@ -19,6 +19,13 @@ engines, endpoints, or routes.
    is repeated in a frame. Token expiry is checked only at this handshake and
    does not terminate an already accepted stream.
 
+An authorized operator can terminate an accepted stream with
+`ExternalProviderAdmin.RevokeExternalProviderRegistration`. The control plane
+serializes that call with Connect claim/install, commits durable credential
+revocation first, then synchronously fences the current execution, Actor
+ingress, and Actor egress channels and makes its Workers `OFFLINE`. Client RPC
+cancellation after the database commit cannot skip that in-memory fence.
+
 All metadata uses `Bearer <token>`. Returned credential fields contain unpadded
 base64url token bytes without the `Bearer ` prefix. These credentials are scoped
 to `ExternalProviderBroker` and do not authorize the general Control API.
@@ -542,12 +549,19 @@ construction, and scheduler matching share that default-preserving contract.
 
 The credential issuer remains private to the `ateapi` binary. The primary,
 authenticated ate-api listener exposes only a narrow `ExternalProviderAdmin`
-wrapper for issuance; it requires an exact, explicitly configured JWT provider,
-issuer, and subject before parsing the requested scope. An empty allowlist
-fails closed. `ExternalProviderAdmin` is never registered on the dedicated
-public Broker listener, whose service set remains `ExternalProviderBroker`
-only. The admin response returns a stable, non-secret enrollment UID for
-operator lookup or revocation plus a `debug_redact` credential exactly once.
+wrapper for enrollment issuance and registration revocation; it requires an
+exact, explicitly configured JWT provider, issuer, and subject before parsing
+the requested scope or target UID. An empty allowlist fails closed.
+`ExternalProviderAdmin` is never registered on the dedicated public Broker
+listener, whose service set remains `ExternalProviderBroker` only. The create
+response returns a stable, non-secret enrollment UID for operator lookup plus a
+`debug_redact` credential exactly once. Operators can invoke the live revocation
+boundary with:
+
+```sh
+kubectl ate admin revoke external-provider-registration REGISTRATION_UID
+```
+
 Enrollment credentials are valid for at most 24 hours;
 session credentials are valid for at most 15 minutes. Both expiries and all
 revocation timestamps use the PostgreSQL clock.

@@ -16,6 +16,7 @@ package externalprovider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"time"
@@ -48,16 +49,20 @@ type enrollmentAdminPrincipalKey struct {
 type EnrollmentAdminServer struct {
 	externalproviderpb.UnimplementedExternalProviderAdminServer
 	issuer     *Issuer
+	store      ExternalProviderStore
+	revoker    RegistrationSessionRevoker
 	authorized map[enrollmentAdminPrincipalKey]struct{}
 }
 
 var _ externalproviderpb.ExternalProviderAdminServer = (*EnrollmentAdminServer)(nil)
 
-// NewEnrollmentAdminServer creates a fail-closed enrollment admin service.
-// With no authorized principals, every call is denied and no store is needed.
-func NewEnrollmentAdminServer(store ExternalProviderStore, authorized []EnrollmentAdminPrincipal) (*EnrollmentAdminServer, error) {
+// NewEnrollmentAdminServer creates a fail-closed external provider admin
+// service. With no authorized principals, every call is denied and no store
+// or live-session revoker is needed.
+func NewEnrollmentAdminServer(store ExternalProviderStore, revoker RegistrationSessionRevoker, authorized []EnrollmentAdminPrincipal) (*EnrollmentAdminServer, error) {
 	server := &EnrollmentAdminServer{
 		authorized: make(map[enrollmentAdminPrincipalKey]struct{}, len(authorized)),
+		revoker:    revoker,
 	}
 	for index, candidate := range authorized {
 		if candidate.Provider == "" || candidate.Issuer == "" || candidate.Subject == "" {
@@ -75,6 +80,7 @@ func NewEnrollmentAdminServer(store ExternalProviderStore, authorized []Enrollme
 	if store == nil {
 		return nil, fmt.Errorf("external provider enrollment admin store is required when principals are authorized")
 	}
+	server.store = store
 	server.issuer = NewIssuer(store)
 	return server, nil
 }
@@ -108,17 +114,56 @@ func (s *EnrollmentAdminServer) CreateExternalProviderEnrollment(ctx context.Con
 	}, nil
 }
 
+// RevokeExternalProviderRegistration authorizes before inspecting the target.
+// When a live SessionAuthority is configured, it owns durable revocation and
+// the synchronous route/transport/Worker fence under one registration gate.
+func (s *EnrollmentAdminServer) RevokeExternalProviderRegistration(ctx context.Context, request *externalproviderpb.RevokeExternalProviderRegistrationRequest) (*externalproviderpb.RevokeExternalProviderRegistrationResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	registrationUID := ""
+	if request != nil {
+		registrationUID = request.GetRegistrationUid()
+	}
+	if !IsValidIdentity(registrationUID) {
+		return nil, status.Error(codes.InvalidArgument, "registration UID is invalid")
+	}
+
+	var err error
+	if s.revoker == nil {
+		err = s.store.RevokeExternalProviderRegistration(ctx, registrationUID)
+	} else {
+		err = s.revoker.RevokeExternalProviderRegistration(ctx, s.store, registrationUID)
+	}
+	if err == nil {
+		return &externalproviderpb.RevokeExternalProviderRegistrationResponse{}, nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return nil, status.Error(codes.NotFound, "external provider registration was not found")
+	}
+	if errors.Is(err, errSessionAuthorityNotBound) {
+		return nil, status.Error(codes.FailedPrecondition, "external provider session authority is unavailable")
+	}
+	if errors.Is(err, errClaimInstallGateFull) {
+		return nil, status.Error(codes.ResourceExhausted, "external provider session authority is busy")
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err()
+	}
+	return nil, status.Error(codes.Internal, "failed to revoke external provider registration")
+}
+
 func (s *EnrollmentAdminServer) authorize(ctx context.Context) error {
 	caller, ok := principal.FromContext(ctx)
 	if !ok {
 		return status.Error(codes.Unauthenticated, "authentication is required")
 	}
 	if caller.Kind != principal.KindJWT {
-		return status.Error(codes.PermissionDenied, "caller is not permitted to issue external provider enrollments")
+		return status.Error(codes.PermissionDenied, "caller is not permitted to administer external providers")
 	}
 	key := enrollmentAdminPrincipalKey{provider: caller.Provider, issuer: caller.Issuer, subject: caller.ID}
 	if _, allowed := s.authorized[key]; !allowed {
-		return status.Error(codes.PermissionDenied, "caller is not permitted to issue external provider enrollments")
+		return status.Error(codes.PermissionDenied, "caller is not permitted to administer external providers")
 	}
 	if s.issuer == nil {
 		return status.Error(codes.FailedPrecondition, "external provider enrollment issuer is not configured")

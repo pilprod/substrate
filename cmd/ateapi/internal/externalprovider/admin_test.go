@@ -37,11 +37,28 @@ const (
 	testAdminSubject  = "operator-a"
 )
 
+type fakeRegistrationSessionRevoker struct {
+	calls int
+	uid   string
+	store RegistrationRevocationStore
+	err   error
+}
+
+func (f *fakeRegistrationSessionRevoker) RevokeExternalProviderRegistration(_ context.Context, store RegistrationRevocationStore, registrationUID string) error {
+	f.calls++
+	f.uid = registrationUID
+	f.store = store
+	if f.err != nil {
+		return f.err
+	}
+	return store.RevokeExternalProviderRegistration(context.Background(), registrationUID)
+}
+
 func TestEnrollmentAdminAuthorizesExactJWTPrincipalBeforeValidation(t *testing.T) {
 	store := &fakeStore{create: func(_ context.Context, uid string, _ CredentialDigest, scope Scope, _ time.Duration) (Enrollment, error) {
 		return Enrollment{UID: uid, Scope: scope, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}}
-	server, err := NewEnrollmentAdminServer(store, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+	server, err := NewEnrollmentAdminServer(store, nil, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +86,7 @@ func TestEnrollmentAdminAuthorizesExactJWTPrincipalBeforeValidation(t *testing.T
 		t.Fatalf("unauthorized calls reached store %d times", store.createCalls)
 	}
 
-	disabled, err := NewEnrollmentAdminServer(nil, nil)
+	disabled, err := NewEnrollmentAdminServer(nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +105,7 @@ func TestEnrollmentAdminIssuesExactScopedEnrollment(t *testing.T) {
 		storedScope = scope
 		return Enrollment{UID: uid, Scope: scope, ExpiresAt: expiresAt}, nil
 	}}
-	server, err := NewEnrollmentAdminServer(store, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+	server, err := NewEnrollmentAdminServer(store, nil, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +127,66 @@ func TestEnrollmentAdminIssuesExactScopedEnrollment(t *testing.T) {
 	}
 	if got := response.GetScope(); got.GetOwnerAtespace() != "tenant-a" || got.GetWorkerNamespace() != "external-workers" || got.GetWorkerPool() != "local-agents" || got.GetMaxSlots() != 2 {
 		t.Fatalf("response scope = %+v", got)
+	}
+}
+
+func TestEnrollmentAdminRevocationAuthorizesBeforeTargetStoreAndFence(t *testing.T) {
+	store := &fakeStore{revokeRegistration: func(context.Context, string) error { return nil }}
+	revoker := &fakeRegistrationSessionRevoker{}
+	server, err := NewEnrollmentAdminServer(store, revoker, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &externalproviderpb.RevokeExternalProviderRegistrationRequest{RegistrationUid: "registration-a"}
+	tests := []struct {
+		name string
+		ctx  context.Context
+		code codes.Code
+	}{
+		{name: "unauthenticated", ctx: context.Background(), code: codes.Unauthenticated},
+		{name: "wrong subject", ctx: adminContext("other"), code: codes.PermissionDenied},
+		{name: "wrong provider", ctx: principal.InjectContext(context.Background(), principal.PrincipalInfo{Kind: principal.KindJWT, Provider: "other", Issuer: testAdminIssuer, ID: testAdminSubject}), code: codes.PermissionDenied},
+		{name: "wrong issuer", ctx: principal.InjectContext(context.Background(), principal.PrincipalInfo{Kind: principal.KindJWT, Provider: testAdminProvider, Issuer: "https://other.example", ID: testAdminSubject}), code: codes.PermissionDenied},
+		{name: "mTLS is not implicitly admin", ctx: principal.InjectContext(context.Background(), principal.PrincipalInfo{Kind: principal.KindMTLS, ID: testAdminSubject}), code: codes.PermissionDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := server.RevokeExternalProviderRegistration(test.ctx, request); status.Code(err) != test.code {
+				t.Fatalf("RevokeExternalProviderRegistration() code = %v, want %v", status.Code(err), test.code)
+			}
+		})
+	}
+	if revoker.calls != 0 || store.revokeRegistrationCalls != 0 {
+		t.Fatalf("unauthorized revocation reached revoker/store: revoker=%d store=%d", revoker.calls, store.revokeRegistrationCalls)
+	}
+
+	if _, err := server.RevokeExternalProviderRegistration(adminContext(testAdminSubject), nil); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("invalid target error = %v, want InvalidArgument", err)
+	}
+	if revoker.calls != 0 || store.revokeRegistrationCalls != 0 {
+		t.Fatalf("invalid target reached revoker/store: revoker=%d store=%d", revoker.calls, store.revokeRegistrationCalls)
+	}
+
+	response, err := server.RevokeExternalProviderRegistration(adminContext(testAdminSubject), request)
+	if err != nil || response == nil {
+		t.Fatalf("authorized revoke = (%v, %v)", response, err)
+	}
+	if revoker.calls != 1 || store.revokeRegistrationCalls != 1 || revoker.uid != "registration-a" || revoker.store != store {
+		t.Fatalf("authorized revoke calls = revoker:%d store:%d uid:%q authority-store:%T", revoker.calls, store.revokeRegistrationCalls, revoker.uid, revoker.store)
+	}
+}
+
+func TestEnrollmentAdminRevocationMapsAuthorityFailuresWithoutLeakingCause(t *testing.T) {
+	secretCause := errors.New("database included secret-refresh-credential")
+	store := &fakeStore{revokeRegistration: func(context.Context, string) error { return nil }}
+	revoker := &fakeRegistrationSessionRevoker{err: secretCause}
+	server, err := NewEnrollmentAdminServer(store, revoker, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.RevokeExternalProviderRegistration(adminContext(testAdminSubject), &externalproviderpb.RevokeExternalProviderRegistrationRequest{RegistrationUid: "registration-a"})
+	if status.Code(err) != codes.Internal || strings.Contains(err.Error(), "secret-refresh-credential") || strings.Contains(err.Error(), "database included") {
+		t.Fatalf("revocation error was not sanitized: %v", err)
 	}
 }
 
@@ -135,7 +212,7 @@ func TestEnrollmentAdminRejectsInvalidScopeAndTTL(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := &fakeStore{}
-			server, err := NewEnrollmentAdminServer(store, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+			server, err := NewEnrollmentAdminServer(store, nil, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -157,7 +234,7 @@ func TestEnrollmentAdminDoesNotExposeCredentialThroughErrors(t *testing.T) {
 	store := &fakeStore{create: func(context.Context, string, CredentialDigest, Scope, time.Duration) (Enrollment, error) {
 		return Enrollment{}, errors.New("store accidentally included " + string(credential))
 	}}
-	server, err := NewEnrollmentAdminServer(store, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
+	server, err := NewEnrollmentAdminServer(store, nil, []EnrollmentAdminPrincipal{{Provider: testAdminProvider, Issuer: testAdminIssuer, Subject: testAdminSubject}})
 	if err != nil {
 		t.Fatal(err)
 	}

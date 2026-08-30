@@ -77,8 +77,10 @@ func TestExternalProviderBrokerDescriptor(t *testing.T) {
 	if admin == nil || admin.FullName() != "externalprovider.ExternalProviderAdmin" {
 		t.Fatalf("ExternalProviderAdmin service = %v", admin)
 	}
-	if got, want := admin.Methods().Len(), 1; got != want || admin.Methods().ByName("CreateExternalProviderEnrollment") == nil {
-		t.Fatalf("ExternalProviderAdmin methods = %v, want CreateExternalProviderEnrollment", admin.Methods())
+	if got, want := admin.Methods().Len(), 2; got != want ||
+		admin.Methods().ByName("CreateExternalProviderEnrollment") == nil ||
+		admin.Methods().ByName("RevokeExternalProviderRegistration") == nil {
+		t.Fatalf("ExternalProviderAdmin methods = %v, want CreateExternalProviderEnrollment and RevokeExternalProviderRegistration", admin.Methods())
 	}
 
 	capacity := (&ExternalSlot{}).ProtoReflect().Descriptor().Fields().ByName("capacity").Message()
@@ -159,6 +161,7 @@ func TestRequestMessagesCarryNoCredentialFields(t *testing.T) {
 
 	for _, message := range []protoreflect.MessageDescriptor{
 		(&CreateExternalProviderEnrollmentRequest{}).ProtoReflect().Descriptor(),
+		(&RevokeExternalProviderRegistrationRequest{}).ProtoReflect().Descriptor(),
 		(&EnrollRequest{}).ProtoReflect().Descriptor(),
 		(&MintSessionTokenRequest{}).ProtoReflect().Descriptor(),
 		(&ClientFrame{}).ProtoReflect().Descriptor(),
@@ -242,7 +245,7 @@ func TestPublishedSchemaBaseline(t *testing.T) {
 	}
 	sum := sha256.Sum256(wireDescriptor)
 	got := hex.EncodeToString(sum[:])
-	const want = "c8284eceb6636e10e7d4d4bbf4fb408c6da26bec17184ee5019806b12510ae85"
+	const want = "458e081b1acde43bb9e5127677a50209cfc820ce6bbd3254a47198ee647f8b0f"
 	if got != want {
 		t.Fatalf("wire descriptor SHA-256 = %q, want %q", got, want)
 	}

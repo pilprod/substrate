@@ -288,6 +288,7 @@ func main() {
 	externalProviderStore, _ := persistence.(externalprovider.ExternalProviderStore)
 	externalProviderAdminSrv, err := externalprovider.NewEnrollmentAdminServer(
 		externalProviderStore,
+		sessionAuthority,
 		externalProviderEnrollmentAdminPrincipals(authenticationConfig),
 	)
 	if err != nil {

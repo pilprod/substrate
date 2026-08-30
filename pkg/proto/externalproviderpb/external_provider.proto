@@ -60,6 +60,11 @@ service ExternalProviderAdmin {
   // credential. The credential is returned exactly once and cannot be looked
   // up again; only its digest is retained by the server.
   rpc CreateExternalProviderEnrollment(CreateExternalProviderEnrollmentRequest) returns (CreateExternalProviderEnrollmentResponse) {}
+
+  // RevokeExternalProviderRegistration durably invalidates one registration
+  // and synchronously fences its live session, route, and Workers before the
+  // call succeeds.
+  rpc RevokeExternalProviderRegistration(RevokeExternalProviderRegistrationRequest) returns (RevokeExternalProviderRegistrationResponse) {}
 }
 
 message ExternalProviderEnrollmentScope {
@@ -89,6 +94,12 @@ message CreateExternalProviderEnrollmentResponse {
   google.protobuf.Timestamp expires_at = 3;
   ExternalProviderEnrollmentScope scope = 4;
 }
+
+message RevokeExternalProviderRegistrationRequest {
+  string registration_uid = 1;
+}
+
+message RevokeExternalProviderRegistrationResponse {}
 
 // EnrollRequest is intentionally empty. The enrollment credential is carried
 // only in gRPC authorization metadata.
