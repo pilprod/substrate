@@ -892,8 +892,10 @@ type ConnectHello struct {
 	// last character.
 	RegistrationUid string          `protobuf:"bytes,1,opt,name=registration_uid,json=registrationUid,proto3" json:"registration_uid,omitempty"`
 	Slots           []*ExternalSlot `protobuf:"bytes,2,rep,name=slots,proto3" json:"slots,omitempty"`
-	// protocol_version MUST equal 2. Unsupported versions reject the whole
-	// Connect handshake before any Worker or channel state is changed.
+	// protocol_version MUST equal 2 or 3. Version 3 adds the actor-egress
+	// credential bootstrap. Version 2 remains accepted for execution and
+	// ingress compatibility, but every client-opened ACTOR_EGRESS channel is
+	// rejected because it cannot carry generation-bound actor credentials.
 	ProtocolVersion uint32 `protobuf:"varint,3,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// slot_policy_digest MUST equal the lowercase SHA-256 digest issued for the
 	// authenticated registration. It prevents a client from silently using a
@@ -1260,10 +1262,15 @@ func (x *ConnectReady) GetMaxDataBytes() uint32 {
 // The receiver MUST answer exactly once with OpenChannelAck before either side
 // sends ChannelData, HalfCloseChannel, or ResetChannel for the channel.
 type OpenChannel struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChannelId     uint64                 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	Kind          ChannelKind            `protobuf:"varint,2,opt,name=kind,proto3,enum=externalprovider.ChannelKind" json:"kind,omitempty"`
-	SlotId        string                 `protobuf:"bytes,3,opt,name=slot_id,json=slotId,proto3" json:"slot_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ChannelId uint64                 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	Kind      ChannelKind            `protobuf:"varint,2,opt,name=kind,proto3,enum=externalprovider.ChannelKind" json:"kind,omitempty"`
+	SlotId    string                 `protobuf:"bytes,3,opt,name=slot_id,json=slotId,proto3" json:"slot_id,omitempty"`
+	// actor_egress is required only for a protocol-v3, client-opened
+	// ACTOR_EGRESS channel and forbidden for every other kind/version. The CSR
+	// contributes only its public key; all certificate identity is
+	// server-derived. It is bounded to 16 KiB by the receiver.
+	ActorEgress   *ActorEgressOpen `protobuf:"bytes,4,opt,name=actor_egress,json=actorEgress,proto3" json:"actor_egress,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1319,6 +1326,57 @@ func (x *OpenChannel) GetSlotId() string {
 	return ""
 }
 
+func (x *OpenChannel) GetActorEgress() *ActorEgressOpen {
+	if x != nil {
+		return x.ActorEgress
+	}
+	return nil
+}
+
+type ActorEgressOpen struct {
+	state                        protoimpl.MessageState `protogen:"open.v1"`
+	CertificateSigningRequestDer []byte                 `protobuf:"bytes,1,opt,name=certificate_signing_request_der,json=certificateSigningRequestDer,proto3" json:"certificate_signing_request_der,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
+}
+
+func (x *ActorEgressOpen) Reset() {
+	*x = ActorEgressOpen{}
+	mi := &file_external_provider_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActorEgressOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActorEgressOpen) ProtoMessage() {}
+
+func (x *ActorEgressOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActorEgressOpen.ProtoReflect.Descriptor instead.
+func (*ActorEgressOpen) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ActorEgressOpen) GetCertificateSigningRequestDer() []byte {
+	if x != nil {
+		return x.CertificateSigningRequestDer
+	}
+	return nil
+}
+
 // OpenChannelAck accepts or rejects a peer's OpenChannel.
 type OpenChannelAck struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -1328,14 +1386,18 @@ type OpenChannelAck struct {
 	Accepted bool `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	// error_message is bounded to 1024 UTF-8 bytes, must not contain secrets, and
 	// is untrusted peer text that receivers must not log without sanitizing.
-	ErrorMessage  string `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	ErrorMessage string `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// actor_egress is required only when accepting a protocol-v3 ACTOR_EGRESS
+	// channel and forbidden on rejection and for every other channel kind. The
+	// leaf is first. No private key, gateway address, or destination is present.
+	ActorEgress   *ActorEgressOpenAck `protobuf:"bytes,4,opt,name=actor_egress,json=actorEgress,proto3" json:"actor_egress,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OpenChannelAck) Reset() {
 	*x = OpenChannelAck{}
-	mi := &file_external_provider_proto_msgTypes[15]
+	mi := &file_external_provider_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1347,7 +1409,7 @@ func (x *OpenChannelAck) String() string {
 func (*OpenChannelAck) ProtoMessage() {}
 
 func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[15]
+	mi := &file_external_provider_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1360,7 +1422,7 @@ func (x *OpenChannelAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenChannelAck.ProtoReflect.Descriptor instead.
 func (*OpenChannelAck) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{15}
+	return file_external_provider_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *OpenChannelAck) GetChannelId() uint64 {
@@ -1384,6 +1446,73 @@ func (x *OpenChannelAck) GetErrorMessage() string {
 	return ""
 }
 
+func (x *OpenChannelAck) GetActorEgress() *ActorEgressOpenAck {
+	if x != nil {
+		return x.ActorEgress
+	}
+	return nil
+}
+
+type ActorEgressOpenAck struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	CertificateChainDer   [][]byte               `protobuf:"bytes,1,rep,name=certificate_chain_der,json=certificateChainDer,proto3" json:"certificate_chain_der,omitempty"`
+	GatewayServerName     string                 `protobuf:"bytes,2,opt,name=gateway_server_name,json=gatewayServerName,proto3" json:"gateway_server_name,omitempty"`
+	GatewayTrustBundlePem []byte                 `protobuf:"bytes,3,opt,name=gateway_trust_bundle_pem,json=gatewayTrustBundlePem,proto3" json:"gateway_trust_bundle_pem,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *ActorEgressOpenAck) Reset() {
+	*x = ActorEgressOpenAck{}
+	mi := &file_external_provider_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActorEgressOpenAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActorEgressOpenAck) ProtoMessage() {}
+
+func (x *ActorEgressOpenAck) ProtoReflect() protoreflect.Message {
+	mi := &file_external_provider_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActorEgressOpenAck.ProtoReflect.Descriptor instead.
+func (*ActorEgressOpenAck) Descriptor() ([]byte, []int) {
+	return file_external_provider_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ActorEgressOpenAck) GetCertificateChainDer() [][]byte {
+	if x != nil {
+		return x.CertificateChainDer
+	}
+	return nil
+}
+
+func (x *ActorEgressOpenAck) GetGatewayServerName() string {
+	if x != nil {
+		return x.GatewayServerName
+	}
+	return ""
+}
+
+func (x *ActorEgressOpenAck) GetGatewayTrustBundlePem() []byte {
+	if x != nil {
+		return x.GatewayTrustBundlePem
+	}
+	return nil
+}
+
 // ChannelData carries the next ordered bytes for an accepted channel. Either
 // peer may send it. data MUST be nonempty and no larger than
 // ConnectReady.max_data_bytes. Sending data before a successful OpenChannelAck,
@@ -1399,7 +1528,7 @@ type ChannelData struct {
 
 func (x *ChannelData) Reset() {
 	*x = ChannelData{}
-	mi := &file_external_provider_proto_msgTypes[16]
+	mi := &file_external_provider_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1411,7 +1540,7 @@ func (x *ChannelData) String() string {
 func (*ChannelData) ProtoMessage() {}
 
 func (x *ChannelData) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[16]
+	mi := &file_external_provider_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1424,7 +1553,7 @@ func (x *ChannelData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelData.ProtoReflect.Descriptor instead.
 func (*ChannelData) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{16}
+	return file_external_provider_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ChannelData) GetChannelId() uint64 {
@@ -1452,7 +1581,7 @@ type HalfCloseChannel struct {
 
 func (x *HalfCloseChannel) Reset() {
 	*x = HalfCloseChannel{}
-	mi := &file_external_provider_proto_msgTypes[17]
+	mi := &file_external_provider_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1593,7 @@ func (x *HalfCloseChannel) String() string {
 func (*HalfCloseChannel) ProtoMessage() {}
 
 func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[17]
+	mi := &file_external_provider_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1606,7 @@ func (x *HalfCloseChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HalfCloseChannel.ProtoReflect.Descriptor instead.
 func (*HalfCloseChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{17}
+	return file_external_provider_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HalfCloseChannel) GetChannelId() uint64 {
@@ -1504,7 +1633,7 @@ type ResetChannel struct {
 
 func (x *ResetChannel) Reset() {
 	*x = ResetChannel{}
-	mi := &file_external_provider_proto_msgTypes[18]
+	mi := &file_external_provider_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1516,7 +1645,7 @@ func (x *ResetChannel) String() string {
 func (*ResetChannel) ProtoMessage() {}
 
 func (x *ResetChannel) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[18]
+	mi := &file_external_provider_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1529,7 +1658,7 @@ func (x *ResetChannel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetChannel.ProtoReflect.Descriptor instead.
 func (*ResetChannel) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{18}
+	return file_external_provider_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ResetChannel) GetChannelId() uint64 {
@@ -1567,7 +1696,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_external_provider_proto_msgTypes[19]
+	mi := &file_external_provider_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1579,7 +1708,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_external_provider_proto_msgTypes[19]
+	mi := &file_external_provider_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1592,7 +1721,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_external_provider_proto_rawDescGZIP(), []int{19}
+	return file_external_provider_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Heartbeat) GetNonce() uint64 {
@@ -1698,17 +1827,25 @@ const file_external_provider_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"`\n" +
 	"\fConnectReady\x12*\n" +
 	"\x11max_open_channels\x18\x01 \x01(\rR\x0fmaxOpenChannels\x12$\n" +
-	"\x0emax_data_bytes\x18\x02 \x01(\rR\fmaxDataBytes\"x\n" +
+	"\x0emax_data_bytes\x18\x02 \x01(\rR\fmaxDataBytes\"\xbe\x01\n" +
 	"\vOpenChannel\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\x04R\tchannelId\x121\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x1d.externalprovider.ChannelKindR\x04kind\x12\x17\n" +
-	"\aslot_id\x18\x03 \x01(\tR\x06slotId\"u\n" +
+	"\aslot_id\x18\x03 \x01(\tR\x06slotId\x12D\n" +
+	"\factor_egress\x18\x04 \x01(\v2!.externalprovider.ActorEgressOpenR\vactorEgress\"]\n" +
+	"\x0fActorEgressOpen\x12J\n" +
+	"\x1fcertificate_signing_request_der\x18\x01 \x01(\fB\x03\x80\x01\x01R\x1ccertificateSigningRequestDer\"\xbe\x01\n" +
 	"\x0eOpenChannelAck\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\x04R\tchannelId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12(\n" +
-	"\rerror_message\x18\x03 \x01(\tB\x03\x80\x01\x01R\ferrorMessage\"E\n" +
+	"\rerror_message\x18\x03 \x01(\tB\x03\x80\x01\x01R\ferrorMessage\x12G\n" +
+	"\factor_egress\x18\x04 \x01(\v2$.externalprovider.ActorEgressOpenAckR\vactorEgress\"\xbb\x01\n" +
+	"\x12ActorEgressOpenAck\x127\n" +
+	"\x15certificate_chain_der\x18\x01 \x03(\fB\x03\x80\x01\x01R\x13certificateChainDer\x12.\n" +
+	"\x13gateway_server_name\x18\x02 \x01(\tR\x11gatewayServerName\x12<\n" +
+	"\x18gateway_trust_bundle_pem\x18\x03 \x01(\fB\x03\x80\x01\x01R\x15gatewayTrustBundlePem\"E\n" +
 	"\vChannelData\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\x04R\tchannelId\x12\x17\n" +
@@ -1749,7 +1886,7 @@ func file_external_provider_proto_rawDescGZIP() []byte {
 }
 
 var file_external_provider_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_external_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_external_provider_proto_goTypes = []any{
 	(ChannelKind)(0),                                 // 0: externalprovider.ChannelKind
 	(*ExternalProviderEnrollmentScope)(nil),          // 1: externalprovider.ExternalProviderEnrollmentScope
@@ -1767,60 +1904,64 @@ var file_external_provider_proto_goTypes = []any{
 	(*SlotProfile)(nil),                              // 13: externalprovider.SlotProfile
 	(*ConnectReady)(nil),                             // 14: externalprovider.ConnectReady
 	(*OpenChannel)(nil),                              // 15: externalprovider.OpenChannel
-	(*OpenChannelAck)(nil),                           // 16: externalprovider.OpenChannelAck
-	(*ChannelData)(nil),                              // 17: externalprovider.ChannelData
-	(*HalfCloseChannel)(nil),                         // 18: externalprovider.HalfCloseChannel
-	(*ResetChannel)(nil),                             // 19: externalprovider.ResetChannel
-	(*Heartbeat)(nil),                                // 20: externalprovider.Heartbeat
-	nil,                                              // 21: externalprovider.ExternalSlot.LabelsEntry
-	nil,                                              // 22: externalprovider.SlotProfile.LabelsEntry
-	(*durationpb.Duration)(nil),                      // 23: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),                    // 24: google.protobuf.Timestamp
-	(*ateapipb.WorkerCapacity)(nil),                  // 25: ateapi.WorkerCapacity
+	(*ActorEgressOpen)(nil),                          // 16: externalprovider.ActorEgressOpen
+	(*OpenChannelAck)(nil),                           // 17: externalprovider.OpenChannelAck
+	(*ActorEgressOpenAck)(nil),                       // 18: externalprovider.ActorEgressOpenAck
+	(*ChannelData)(nil),                              // 19: externalprovider.ChannelData
+	(*HalfCloseChannel)(nil),                         // 20: externalprovider.HalfCloseChannel
+	(*ResetChannel)(nil),                             // 21: externalprovider.ResetChannel
+	(*Heartbeat)(nil),                                // 22: externalprovider.Heartbeat
+	nil,                                              // 23: externalprovider.ExternalSlot.LabelsEntry
+	nil,                                              // 24: externalprovider.SlotProfile.LabelsEntry
+	(*durationpb.Duration)(nil),                      // 25: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),                    // 26: google.protobuf.Timestamp
+	(*ateapipb.WorkerCapacity)(nil),                  // 27: ateapi.WorkerCapacity
 }
 var file_external_provider_proto_depIdxs = []int32{
 	12, // 0: externalprovider.ExternalProviderEnrollmentScope.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
 	1,  // 1: externalprovider.CreateExternalProviderEnrollmentRequest.scope:type_name -> externalprovider.ExternalProviderEnrollmentScope
-	23, // 2: externalprovider.CreateExternalProviderEnrollmentRequest.ttl:type_name -> google.protobuf.Duration
-	24, // 3: externalprovider.CreateExternalProviderEnrollmentResponse.expires_at:type_name -> google.protobuf.Timestamp
+	25, // 2: externalprovider.CreateExternalProviderEnrollmentRequest.ttl:type_name -> google.protobuf.Duration
+	26, // 3: externalprovider.CreateExternalProviderEnrollmentResponse.expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: externalprovider.CreateExternalProviderEnrollmentResponse.scope:type_name -> externalprovider.ExternalProviderEnrollmentScope
 	12, // 5: externalprovider.EnrollResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
-	24, // 6: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	26, // 6: externalprovider.MintSessionTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
 	12, // 7: externalprovider.MintSessionTokenResponse.slot_policy:type_name -> externalprovider.SlotCapabilityPolicy
 	10, // 8: externalprovider.ClientFrame.hello:type_name -> externalprovider.ConnectHello
 	15, // 9: externalprovider.ClientFrame.open:type_name -> externalprovider.OpenChannel
-	16, // 10: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	17, // 11: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
-	18, // 12: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	19, // 13: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
-	20, // 14: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	17, // 10: externalprovider.ClientFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	19, // 11: externalprovider.ClientFrame.data:type_name -> externalprovider.ChannelData
+	20, // 12: externalprovider.ClientFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	21, // 13: externalprovider.ClientFrame.reset:type_name -> externalprovider.ResetChannel
+	22, // 14: externalprovider.ClientFrame.heartbeat:type_name -> externalprovider.Heartbeat
 	14, // 15: externalprovider.ServerFrame.ready:type_name -> externalprovider.ConnectReady
 	15, // 16: externalprovider.ServerFrame.open:type_name -> externalprovider.OpenChannel
-	16, // 17: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
-	17, // 18: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
-	18, // 19: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
-	19, // 20: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
-	20, // 21: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
+	17, // 17: externalprovider.ServerFrame.open_ack:type_name -> externalprovider.OpenChannelAck
+	19, // 18: externalprovider.ServerFrame.data:type_name -> externalprovider.ChannelData
+	20, // 19: externalprovider.ServerFrame.half_close:type_name -> externalprovider.HalfCloseChannel
+	21, // 20: externalprovider.ServerFrame.reset:type_name -> externalprovider.ResetChannel
+	22, // 21: externalprovider.ServerFrame.heartbeat:type_name -> externalprovider.Heartbeat
 	11, // 22: externalprovider.ConnectHello.slots:type_name -> externalprovider.ExternalSlot
-	21, // 23: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
-	25, // 24: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
+	23, // 23: externalprovider.ExternalSlot.labels:type_name -> externalprovider.ExternalSlot.LabelsEntry
+	27, // 24: externalprovider.ExternalSlot.capacity:type_name -> ateapi.WorkerCapacity
 	13, // 25: externalprovider.SlotCapabilityPolicy.profiles:type_name -> externalprovider.SlotProfile
-	22, // 26: externalprovider.SlotProfile.labels:type_name -> externalprovider.SlotProfile.LabelsEntry
-	25, // 27: externalprovider.SlotProfile.capacity:type_name -> ateapi.WorkerCapacity
+	24, // 26: externalprovider.SlotProfile.labels:type_name -> externalprovider.SlotProfile.LabelsEntry
+	27, // 27: externalprovider.SlotProfile.capacity:type_name -> ateapi.WorkerCapacity
 	0,  // 28: externalprovider.OpenChannel.kind:type_name -> externalprovider.ChannelKind
-	4,  // 29: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
-	6,  // 30: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
-	8,  // 31: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
-	2,  // 32: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:input_type -> externalprovider.CreateExternalProviderEnrollmentRequest
-	5,  // 33: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
-	7,  // 34: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
-	9,  // 35: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
-	3,  // 36: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:output_type -> externalprovider.CreateExternalProviderEnrollmentResponse
-	33, // [33:37] is the sub-list for method output_type
-	29, // [29:33] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	16, // 29: externalprovider.OpenChannel.actor_egress:type_name -> externalprovider.ActorEgressOpen
+	18, // 30: externalprovider.OpenChannelAck.actor_egress:type_name -> externalprovider.ActorEgressOpenAck
+	4,  // 31: externalprovider.ExternalProviderBroker.Enroll:input_type -> externalprovider.EnrollRequest
+	6,  // 32: externalprovider.ExternalProviderBroker.MintSessionToken:input_type -> externalprovider.MintSessionTokenRequest
+	8,  // 33: externalprovider.ExternalProviderBroker.Connect:input_type -> externalprovider.ClientFrame
+	2,  // 34: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:input_type -> externalprovider.CreateExternalProviderEnrollmentRequest
+	5,  // 35: externalprovider.ExternalProviderBroker.Enroll:output_type -> externalprovider.EnrollResponse
+	7,  // 36: externalprovider.ExternalProviderBroker.MintSessionToken:output_type -> externalprovider.MintSessionTokenResponse
+	9,  // 37: externalprovider.ExternalProviderBroker.Connect:output_type -> externalprovider.ServerFrame
+	3,  // 38: externalprovider.ExternalProviderAdmin.CreateExternalProviderEnrollment:output_type -> externalprovider.CreateExternalProviderEnrollmentResponse
+	35, // [35:39] is the sub-list for method output_type
+	31, // [31:35] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_external_provider_proto_init() }
@@ -1852,7 +1993,7 @@ func file_external_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_external_provider_proto_rawDesc), len(file_external_provider_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   22,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

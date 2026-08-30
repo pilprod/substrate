@@ -199,8 +199,10 @@ message ConnectHello {
   string registration_uid = 1;
   repeated ExternalSlot slots = 2;
 
-  // protocol_version MUST equal 2. Unsupported versions reject the whole
-  // Connect handshake before any Worker or channel state is changed.
+  // protocol_version MUST equal 2 or 3. Version 3 adds the actor-egress
+  // credential bootstrap. Version 2 remains accepted for execution and
+  // ingress compatibility, but every client-opened ACTOR_EGRESS channel is
+  // rejected because it cannot carry generation-bound actor credentials.
   uint32 protocol_version = 3;
 
   // slot_policy_digest MUST equal the lowercase SHA-256 digest issued for the
@@ -288,6 +290,16 @@ message OpenChannel {
   uint64 channel_id = 1;
   ChannelKind kind = 2;
   string slot_id = 3;
+
+  // actor_egress is required only for a protocol-v3, client-opened
+  // ACTOR_EGRESS channel and forbidden for every other kind/version. The CSR
+  // contributes only its public key; all certificate identity is
+  // server-derived. It is bounded to 16 KiB by the receiver.
+  ActorEgressOpen actor_egress = 4;
+}
+
+message ActorEgressOpen {
+  bytes certificate_signing_request_der = 1 [ debug_redact = true ];
 }
 
 // OpenChannelAck accepts or rejects a peer's OpenChannel.
@@ -301,6 +313,17 @@ message OpenChannelAck {
   // error_message is bounded to 1024 UTF-8 bytes, must not contain secrets, and
   // is untrusted peer text that receivers must not log without sanitizing.
   string error_message = 3 [ debug_redact = true ];
+
+  // actor_egress is required only when accepting a protocol-v3 ACTOR_EGRESS
+  // channel and forbidden on rejection and for every other channel kind. The
+  // leaf is first. No private key, gateway address, or destination is present.
+  ActorEgressOpenAck actor_egress = 4;
+}
+
+message ActorEgressOpenAck {
+  repeated bytes certificate_chain_der = 1 [ debug_redact = true ];
+  string gateway_server_name = 2;
+  bytes gateway_trust_bundle_pem = 3 [ debug_redact = true ];
 }
 
 // ChannelData carries the next ordered bytes for an accepted channel. Either

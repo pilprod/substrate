@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,11 +17,13 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"slices"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 )
 
 func TestRecoverAndBindExternalProviderDataPlanesOrdersRecoveryBeforeBinding(t *testing.T) {
@@ -33,7 +35,7 @@ func TestRecoverAndBindExternalProviderDataPlanesOrdersRecoveryBeforeBinding(t *
 	}
 	binder := &startupExecutionBinderRecorder{events: &events}
 
-	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, binder.BindExternal, binder.BindActorIngress)
+	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, control, binder.BindExternal, binder.BindActorIngress)
 	if err != nil {
 		t.Fatalf("recoverAndBindExternalProviderDataPlanes() error = %v", err)
 	}
@@ -61,14 +63,14 @@ func TestRecoverAndBindExternalProviderDataPlanesDoesNotPublishAfterRecoveryFail
 	}
 	binder := &startupExecutionBinderRecorder{events: &events}
 
-	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, binder.BindExternal, binder.BindActorIngress)
+	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, control, binder.BindExternal, binder.BindActorIngress)
 	if !errors.Is(err, wantErr) || runtime != nil || recovery != (externalprovider.StartupSweepResult{}) {
 		t.Fatalf("failed recovery startup = (%+v, %v, %v), want empty/nil/recovery error", recovery, runtime, err)
 	}
 	if !slices.Equal(events, []string{"recover"}) || binder.dialer != nil || binder.ingress != nil {
 		t.Fatalf("failed recovery published data-plane authority: events=%v execution=%v ingress=%v", events, binder.dialer, binder.ingress)
 	}
-	if sessionRuntime, executionDialer, ingressDialer, err := authority.BindProviderForwarding(control, control); err != nil || sessionRuntime == nil || executionDialer == nil || ingressDialer == nil {
+	if sessionRuntime, executionDialer, ingressDialer, err := authority.BindProviderForwarding(control, control, control); err != nil || sessionRuntime == nil || executionDialer == nil || ingressDialer == nil {
 		t.Fatalf("authority was consumed before successful recovery: (%v, %v, %v, %v)", sessionRuntime, executionDialer, ingressDialer, err)
 	}
 }
@@ -82,7 +84,7 @@ func TestRecoverAndBindExternalProviderDataPlanesFailsClosedOnIngressBind(t *tes
 	}
 	binder := &startupExecutionBinderRecorder{events: &events, ingressErr: errors.New("ingress unavailable")}
 
-	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, binder.BindExternal, binder.BindActorIngress)
+	recovery, runtime, err := recoverAndBindExternalProviderDataPlanes(context.Background(), control, authority, control, binder.BindExternal, binder.BindActorIngress)
 	if err == nil || runtime != nil || recovery != (externalprovider.StartupSweepResult{}) {
 		t.Fatalf("failed ingress bind startup = (%+v, %v, %v), want empty/nil/error", recovery, runtime, err)
 	}
@@ -110,6 +112,10 @@ func (*startupControlRecorder) ReconcileExternalWorkers(context.Context, *extern
 
 func (*startupControlRecorder) SetExternalWorkerAvailability(context.Context, string, string, ateapipb.WorkerState) (*ateapipb.Worker, error) {
 	return nil, errors.New("unexpected availability mutation for empty startup inventory")
+}
+
+func (*startupControlRecorder) OpenActorEgress(context.Context, externalprovider.SessionWorkerBinding, uint64, []byte) (net.Conn, *externalproviderpb.ActorEgressOpenAck, error) {
+	return nil, nil, errors.New("unexpected Actor egress open during startup binding")
 }
 
 type startupExecutionBinderRecorder struct {

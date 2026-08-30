@@ -87,8 +87,11 @@ var (
 	postgresConnectionString     = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
 	postgresConnectionStringFile = pflag.String("postgres-connection-string-file", "", "File containing the PostgreSQL connection string. Mutually exclusive with --postgres-connection-string.")
 
-	actorIDJWTPoolFile   = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
-	egressGatewayAddress = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
+	actorIDJWTPoolFile           = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
+	egressGatewayAddress         = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
+	egressGatewayServerName      = pflag.String("egress-gateway-server-name", "", "Exact TLS server name for the egress gateway. Required for external-provider Actor egress.")
+	egressGatewayTrustBundle     = pflag.String("egress-gateway-trust-bundle", "", "PEM CA bundle used by external-provider runtimes to verify the egress gateway.")
+	egressGatewayAteapiPrincipal = pflag.String("egress-gateway-ateapi-principal", "", "Exact mTLS SPIFFE principal allowed to authorize external Actor egress CONNECTs.")
 
 	actorIDCAPoolFile      = pflag.String("actor-id-ca-pool", "", "The file that contains the CA pool for signing actor JWTs")
 	podIdentityCACerts     = pflag.String("pod-identity-ca-certs", "", "The file that contains the pod-identity CA bundle, used both for verifying client certificates presented to the gRPC server and for verifying atelet serving certificates when dialing atelet. If empty, client-cert verification is disabled and atelet dials will fail.")
@@ -262,6 +265,25 @@ func main() {
 	)
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
+	if brokerConfig.enabled() {
+		externalActorCA, err := actoridentity.NewExternalCertificateAuthority(*actorIDCAPoolFile)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to configure external Actor certificate authority", err)
+		}
+		gatewayTrustPEM, err := os.ReadFile(*egressGatewayTrustBundle)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to read external Actor egress gateway trust bundle", err)
+		}
+		if err := controlSrv.ConfigureExternalActorEgress(controlapi.ExternalActorEgressConfiguration{
+			CertificateAuthority:     externalActorCA,
+			RouteAuthorizer:          sessionAuthority.ActorEgressAuthorizer(),
+			GatewayServerName:        *egressGatewayServerName,
+			GatewayTrustBundlePEM:    gatewayTrustPEM,
+			ExpectedGatewayPrincipal: *egressGatewayAteapiPrincipal,
+		}); err != nil {
+			serverboot.Fatal(ctx, "Failed to configure external Actor egress", err)
+		}
+	}
 	debugSrv := debugapi.NewService(persistence)
 	externalProviderStore, _ := persistence.(externalprovider.ExternalProviderStore)
 	externalProviderAdminSrv, err := externalprovider.NewEnrollmentAdminServer(
@@ -317,6 +339,7 @@ func main() {
 			ctx,
 			controlSrv,
 			sessionAuthority,
+			controlSrv,
 			func(dialer *externalprovider.ExternalExecutionDialer) error {
 				return providerExecutionDialer.BindExternal(dialer)
 			},
@@ -436,6 +459,10 @@ func logFlagValues(ctx context.Context) {
 		slog.Bool("postgres-connection-string-file-configured", *postgresConnectionStringFile != ""),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),
 		slog.String("actor-id-ca-pool", *actorIDCAPoolFile),
+		slog.String("egress-gateway-address", *egressGatewayAddress),
+		slog.String("egress-gateway-server-name", *egressGatewayServerName),
+		slog.String("egress-gateway-trust-bundle", *egressGatewayTrustBundle),
+		slog.String("egress-gateway-ateapi-principal", *egressGatewayAteapiPrincipal),
 		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
 		slog.String("atelet-client-cred-bundle", *ateletClientCredBundle),
 		slog.Bool("atelet-insecure", *ateletInsecure),

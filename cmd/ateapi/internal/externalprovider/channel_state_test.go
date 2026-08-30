@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -60,12 +61,17 @@ func newChannelTestState(t *testing.T, edit func(*ChannelSessionLimits)) *Channe
 }
 
 func clientOpenFrame(generation, channelID uint64, kind externalproviderpb.ChannelKind, slotID string) *externalproviderpb.ClientFrame {
+	var actorEgress *externalproviderpb.ActorEgressOpen
+	if kind == externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS {
+		actorEgress = &externalproviderpb.ActorEgressOpen{CertificateSigningRequestDer: []byte("test-csr")}
+	}
 	return &externalproviderpb.ClientFrame{
 		SessionGeneration: generation,
 		Frame: &externalproviderpb.ClientFrame_Open{Open: &externalproviderpb.OpenChannel{
-			ChannelId: channelID,
-			Kind:      kind,
-			SlotId:    slotID,
+			ChannelId:   channelID,
+			Kind:        kind,
+			SlotId:      slotID,
+			ActorEgress: actorEgress,
 		}},
 	}
 }
@@ -153,8 +159,16 @@ func acceptClientChannel(t *testing.T, state *ChannelSessionState, channelID uin
 	if _, err := state.ApplyClientFrame(clientOpenFrame(state.Generation(), channelID, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS, "slot-b")); err != nil {
 		t.Fatalf("ApplyClientFrame(open) error = %v", err)
 	}
-	if _, err := state.AcknowledgeClientOpen(channelID, true, ""); err != nil {
-		t.Fatalf("AcknowledgeClientOpen() error = %v", err)
+	if _, err := state.AcknowledgeClientActorEgress(channelID, testActorEgressCredential()); err != nil {
+		t.Fatalf("AcknowledgeClientActorEgress() error = %v", err)
+	}
+}
+
+func testActorEgressCredential() *externalproviderpb.ActorEgressOpenAck {
+	return &externalproviderpb.ActorEgressOpenAck{
+		CertificateChainDer:   [][]byte{[]byte("leaf")},
+		GatewayServerName:     "egress.test",
+		GatewayTrustBundlePem: []byte("trust"),
 	}
 }
 
@@ -308,6 +322,71 @@ func TestClientOpenValidationAndNoReuse(t *testing.T) {
 	requireOperationError(t, err)
 }
 
+func TestActorEgressProtocolVersionCredentialGate(t *testing.T) {
+	newState := func(t *testing.T, protocol uint32) *ChannelSessionState {
+		t.Helper()
+		frame := validClientFrame()
+		frame.GetHello().ProtocolVersion = protocol
+		admission, err := ValidateConnectAdmission(validSessionClaim(1), frame)
+		if err != nil {
+			t.Fatalf("ValidateConnectAdmission() error = %v", err)
+		}
+		state, err := NewChannelSessionState(admission, ChannelSessionLimits{MaxOpenChannels: 2, MaxDataBytes: 64})
+		if err != nil {
+			t.Fatalf("NewChannelSessionState() error = %v", err)
+		}
+		return state
+	}
+
+	t.Run("v2 can only be rejected", func(t *testing.T) {
+		state := newState(t, connectProtocolVersionV2)
+		open := clientOpenFrame(state.Generation(), 1, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS, "slot-a")
+		open.GetOpen().ActorEgress = nil
+		effect, err := state.ApplyClientFrame(open)
+		if err != nil {
+			t.Fatalf("ApplyClientFrame() error = %v", err)
+		}
+		opened, ok := effect.(*ClientOpenEffect)
+		if !ok || len(opened.ActorEgressCSR()) != 0 {
+			t.Fatalf("v2 open effect = %#v, want credential-free effect", effect)
+		}
+		if _, err := state.AcknowledgeClientOpen(1, true, ""); !errors.Is(err, ErrInvalidChannelOperation) {
+			t.Fatalf("generic accept error = %v, want ErrInvalidChannelOperation", err)
+		}
+		if _, err := state.AcknowledgeClientActorEgress(1, testActorEgressCredential()); !errors.Is(err, ErrInvalidChannelOperation) {
+			t.Fatalf("credential accept error = %v, want ErrInvalidChannelOperation", err)
+		}
+		ack, err := state.AcknowledgeClientOpen(1, false, "protocol v3 is required")
+		if err != nil || ack.Frame().GetOpenAck().GetAccepted() || ack.Frame().GetOpenAck().GetActorEgress() != nil {
+			t.Fatalf("bounded v2 rejection = (%v, %v)", ack, err)
+		}
+	})
+
+	t.Run("v2 forbids CSR", func(t *testing.T) {
+		state := newState(t, connectProtocolVersionV2)
+		if _, err := state.ApplyClientFrame(clientOpenFrame(state.Generation(), 1, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS, "slot-a")); !errors.Is(err, ErrChannelProtocolViolation) {
+			t.Fatalf("v2 CSR error = %v, want ErrChannelProtocolViolation", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		csr  []byte
+	}{
+		{name: "missing", csr: nil},
+		{name: "oversized", csr: make([]byte, maxActorEgressCSRBytes+1)},
+	} {
+		t.Run("v3 "+test.name+" CSR", func(t *testing.T) {
+			state := newState(t, connectProtocolVersionV3)
+			open := clientOpenFrame(state.Generation(), 1, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS, "slot-a")
+			open.GetOpen().GetActorEgress().CertificateSigningRequestDer = test.csr
+			if _, err := state.ApplyClientFrame(open); !errors.Is(err, ErrChannelProtocolViolation) {
+				t.Fatalf("v3 CSR error = %v, want ErrChannelProtocolViolation", err)
+			}
+		})
+	}
+}
+
 func TestClientFrameEnvelopeRules(t *testing.T) {
 	state := newChannelTestState(t, nil)
 	generation := state.Generation()
@@ -405,11 +484,11 @@ func TestOpenAckPairingAndExactlyOnce(t *testing.T) {
 				requireOperationError(t, err)
 			})
 		}
-		effect, err := state.AcknowledgeClientOpen(1, true, "")
+		effect, err := state.AcknowledgeClientActorEgress(1, testActorEgressCredential())
 		if err != nil {
-			t.Fatalf("AcknowledgeClientOpen(valid accept) error = %v", err)
+			t.Fatalf("AcknowledgeClientActorEgress(valid accept) error = %v", err)
 		}
-		if ack := effect.Frame().GetOpenAck(); ack.GetChannelId() != 1 || !ack.GetAccepted() || ack.GetErrorMessage() != "" {
+		if ack := effect.Frame().GetOpenAck(); ack.GetChannelId() != 1 || !ack.GetAccepted() || ack.GetErrorMessage() != "" || ack.GetActorEgress() == nil {
 			t.Errorf("server ack frame = %v", ack)
 		}
 		_, err = state.AcknowledgeClientOpen(1, true, "")
@@ -623,6 +702,132 @@ func TestResetValidationTerminalizesAcceptedChannels(t *testing.T) {
 			t.Fatal("client reset before ack succeeded")
 		}
 	})
+}
+
+func TestServerResetToleratesCrossedClientTerminalFrames(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		frames func(uint64) []*externalproviderpb.ClientFrame
+	}{
+		{
+			name: "half-close then reset",
+			frames: func(generation uint64) []*externalproviderpb.ClientFrame {
+				return []*externalproviderpb.ClientFrame{
+					clientHalfCloseFrame(generation, 1),
+					clientResetFrame(generation, 1, uint32(codes.Canceled), "crossed reset"),
+				}
+			},
+		},
+		{
+			name: "reset then half-close",
+			frames: func(generation uint64) []*externalproviderpb.ClientFrame {
+				return []*externalproviderpb.ClientFrame{
+					clientResetFrame(generation, 1, uint32(codes.Canceled), "crossed reset"),
+					clientHalfCloseFrame(generation, 1),
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newChannelTestState(t, nil)
+			acceptClientChannel(t, state, 1)
+			if _, err := state.ResetServerChannel(1, uint32(codes.Canceled), "server reset"); err != nil {
+				t.Fatalf("ResetServerChannel() error = %v", err)
+			}
+			for _, frame := range test.frames(state.Generation()) {
+				effect, err := state.ApplyClientFrame(frame)
+				if err != nil {
+					t.Fatalf("ApplyClientFrame(crossed terminal) error = %v", err)
+				}
+				crossed, ok := effect.(*ClientTerminalRaceEffect)
+				if !ok || crossed.ChannelID() != 1 {
+					t.Fatalf("crossed terminal effect = %#v, want channel 1", effect)
+				}
+			}
+			if got := state.Stats().NonterminalChannels; got != 0 {
+				t.Fatalf("NonterminalChannels = %d, want 0", got)
+			}
+			if _, err := state.ApplyClientFrame(clientHalfCloseFrame(state.Generation(), 1)); err == nil {
+				t.Fatal("duplicate crossed HalfClose succeeded")
+			}
+			if _, err := state.ApplyClientFrame(clientResetFrame(state.Generation(), 1, uint32(codes.Canceled), "duplicate")); err == nil {
+				t.Fatal("duplicate crossed Reset succeeded")
+			}
+			if _, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 1, []byte("late data"))); err == nil {
+				t.Fatal("Data after server Reset succeeded")
+			}
+		})
+	}
+
+	t.Run("malformed crossed reset remains invalid", func(t *testing.T) {
+		state := newChannelTestState(t, nil)
+		acceptClientChannel(t, state, 1)
+		if _, err := state.ResetServerChannel(1, uint32(codes.Canceled), "server reset"); err != nil {
+			t.Fatalf("ResetServerChannel() error = %v", err)
+		}
+		if _, err := state.ApplyClientFrame(clientResetFrame(state.Generation(), 1, 0, "malformed")); err == nil {
+			t.Fatal("malformed crossed Reset succeeded")
+		}
+	})
+}
+
+func TestServerResetToleratesOneCrossedClientDataFrame(t *testing.T) {
+	state := newChannelTestState(t, nil)
+	acceptClientChannel(t, state, 1)
+	if _, err := state.ResetServerChannel(1, uint32(codes.Canceled), "server reset"); err != nil {
+		t.Fatalf("ResetServerChannel() error = %v", err)
+	}
+	effect, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 1, []byte("crossed data")))
+	if err != nil {
+		t.Fatalf("ApplyClientFrame(crossed Data) error = %v", err)
+	}
+	crossed, ok := effect.(*ClientTerminalRaceEffect)
+	if !ok || crossed.ChannelID() != 1 {
+		t.Fatalf("crossed Data effect = %#v, want channel 1", effect)
+	}
+	if got := state.Stats().NonterminalChannels; got != 0 {
+		t.Fatalf("NonterminalChannels = %d, want 0", got)
+	}
+	if _, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 1, []byte("duplicate"))); err == nil {
+		t.Fatal("second Data after server Reset succeeded")
+	}
+	if _, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 1, nil)); err == nil {
+		t.Fatal("empty Data after server Reset succeeded")
+	}
+	if _, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 3, []byte("unknown"))); err == nil {
+		t.Fatal("Data for unknown channel after server Reset succeeded")
+	}
+}
+
+func TestCompletedHalfClosesTolerateCrossedClientReset(t *testing.T) {
+	state := newChannelTestState(t, nil)
+	acceptClientChannel(t, state, 1)
+	if _, err := state.ApplyClientFrame(clientHalfCloseFrame(state.Generation(), 1)); err != nil {
+		t.Fatalf("ApplyClientFrame(HalfClose) error = %v", err)
+	}
+	if _, err := state.HalfCloseServerChannel(1); err != nil {
+		t.Fatalf("HalfCloseServerChannel() error = %v", err)
+	}
+	if got := state.Stats().NonterminalChannels; got != 0 {
+		t.Fatalf("NonterminalChannels = %d, want 0", got)
+	}
+	effect, err := state.ApplyClientFrame(clientResetFrame(state.Generation(), 1, uint32(codes.Canceled), "crossed completed half-closes"))
+	if err != nil {
+		t.Fatalf("ApplyClientFrame(crossed Reset) error = %v", err)
+	}
+	crossed, ok := effect.(*ClientTerminalRaceEffect)
+	if !ok || crossed.ChannelID() != 1 {
+		t.Fatalf("crossed Reset effect = %#v, want channel 1", effect)
+	}
+	if _, err := state.ApplyClientFrame(clientResetFrame(state.Generation(), 1, uint32(codes.Canceled), "duplicate")); err == nil {
+		t.Fatal("duplicate crossed Reset succeeded")
+	}
+	if _, err := state.ApplyClientFrame(clientResetFrame(state.Generation(), 1, 0, "malformed")); err == nil {
+		t.Fatal("malformed crossed Reset succeeded")
+	}
+	if _, err := state.ApplyClientFrame(clientDataFrame(state.Generation(), 1, []byte("late data"))); err == nil {
+		t.Fatal("Data after completed HalfClose pair succeeded")
+	}
 }
 
 func TestHeartbeatNonceAndAcknowledgementRules(t *testing.T) {

@@ -397,16 +397,135 @@ lets gRPC cancel the real stream context, then an explicitly owned, redacted,
 bounded-retry cleanup joins the aborted Send without a handler/fence wait cycle;
 that detached branch never converts a clean EOF into a successful response.
 
-The ateapi binary binds both `EXECUTION_GRPC` and `ACTOR_INGRESS` forwarding to
-the same recovered session authority before it opens the Broker listener. An
-external Worker becomes `ACTIVE` only after Ready, route publication, execution
-binding, and Actor ingress binding all succeed. Exact Actor UID, Worker
-incarnation, assignment, owner Atespace, and live generation checks protect the
-ingress path. `ACTOR_EGRESS` remains unsupported; a client-opened egress channel
-receives a bounded negative OpenAck. The directory and lease are process-local.
-The `external-control-plane-only` Helm profile therefore uses one ateapi replica
-with `Recreate`; distributed route ownership is required before this mode can
-regain HA or zero-downtime rollout.
+The ateapi binary binds `EXECUTION_GRPC`, `ACTOR_INGRESS`, and the server-owned
+`ACTOR_EGRESS` gateway path to the same recovered session authority before it
+opens the Broker listener. An external Worker becomes `ACTIVE` only after Ready,
+route publication, execution binding, Actor ingress binding, and Actor egress
+authority binding all succeed. For a client-opened `ACTOR_EGRESS` channel,
+ateapi derives the immutable slot/Worker incarnation and live generation from
+the authenticated session, re-reads the Worker's inverse Actor assignment and
+the exact running Actor under the Actor lifecycle lease, then dials only the
+cluster egress gateway configured on ateapi. A wrong slot or stale generation is
+a protocol violation; a missing or changed assignment receives a bounded
+negative OpenAck. The client cannot put an Actor, Worker, gateway, destination,
+or route in `OpenChannel`. Accepted streams retain the existing bounded queues,
+half-close/reset behavior, generation fence, and cancellation cleanup.
+
+This completes the server-side transport, short-lived credential, route-fence,
+and gateway authorization layer. Transparent egress still requires the local
+runtime to generate the CSR key in memory and run the existing actor-scoped
+mTLS atunnel client over the accepted `ACTOR_EGRESS` byte channel. Forwarding
+unauthenticated application TCP directly would bypass the gateway's Actor
+identity policy, so it is deliberately not added. The runtime must not turn the
+gateway or destination into an `OpenChannel` field.
+
+### ExternalSlot actor-egress credential contract (protocol v3)
+
+The existing actor certificate cannot safely be reused as the ExternalSlot
+credential contract. It contains `ActorIdentity`, but it does not bind the
+certificate to an external-provider registration, slot, Worker incarnation, or
+session generation. The gateway's current online `GetActor` check therefore
+cannot reject a certificate replayed after provider-session replacement while
+the same Actor remains running. A shorter certificate lifetime reduces that
+window but does not close it.
+
+Protocol v3 adds only these kind-specific messages to the existing channel
+frames:
+
+```protobuf
+message ActorEgressOpen {
+  bytes certificate_signing_request_der = 1;
+}
+
+message ActorEgressOpenAck {
+  repeated bytes certificate_chain_der = 1; // leaf first
+  string gateway_server_name = 2;
+  bytes gateway_trust_bundle_pem = 3;
+}
+
+// Present only for a client-opened ACTOR_EGRESS channel.
+ActorEgressOpen actor_egress = 4; // OpenChannel
+
+// Present only for an accepted ACTOR_EGRESS channel.
+ActorEgressOpenAck actor_egress = 4; // OpenChannelAck
+```
+
+The CSR is bounded to 16 KiB, must have a valid self-signature, and contributes
+only its public key. ateapi constructs the subject, usages, validity, and all
+extensions from server state; CSR subjects, SANs, requested extensions, and
+attributes are ignored or rejected. The provider does not submit an expected
+Actor UID or any Actor, Worker, registration, generation, gateway, destination,
+or route identity. The private key is generated and retained only in the local
+runtime's memory. CSR and acknowledgement credential fields are explicitly
+redacted from protobuf/debug logging even though they contain no private key.
+
+The acknowledgement contains no gateway address or destination. ateapi dials
+the already configured gateway for the channel and derives the TLS server name
+and trust bundle from server configuration. The local atunnel client performs
+TLS over that accepted byte channel and verifies the returned chain, leaf public
+key, validity, identity extensions, gateway server name, and gateway trust.
+Protocol v2 always receives a bounded negative `OpenAck` for `ACTOR_EGRESS` and
+cannot reach the gateway. Only protocol v3 can accept the channel, and its
+accepted acknowledgement must contain the complete credential metadata above.
+
+The actor-identity signer must add a signed, versioned
+`ExternalRouteBinding` X.509 extension containing exactly the server-derived
+registration UID, slot ID, Worker resource UID, session generation, and Worker
+execution identity. The existing `ActorIdentity` extension remains the source
+of Actor name and UID and keeps purpose `ATUNNEL`. The external certificate is a
+non-CA client-auth leaf with a fixed maximum lifetime of five minutes. The
+atelet-only `ActorIdentity.MintCert` authorization boundary remains unchanged;
+an internal signer is factored out only after ateapi has validated the external
+route and reciprocal Actor/Worker assignment under the Actor lifecycle lease.
+
+Expiry alone is not the generation fence. Every egress CONNECT carrying an
+`ExternalRouteBinding` must invoke a new fail-closed internal ateapi operation,
+`AuthorizeExternalActorEgress`, with the verified peer leaf certificate rather
+than caller-populated identity fields. ateapi independently verifies the actor
+chain, validity, client-auth usage, purpose, and both signed extensions. It then
+requires the binding's execution identity, registration UID, slot ID, Worker
+UID, and generation to resolve to the exact current process-local
+`SessionRoute`; under the lifecycle lease it re-reads the same ACTIVE Worker and
+its reciprocal RUNNING Actor assignment and compares the certified Actor UID.
+The operation returns authorization only, with uniform denial errors and no
+route or identity disclosure. It is not exposed on the public Broker listener,
+and its caller must authenticate as the configured atenet egress gateway rather
+than merely reach the Control API.
+
+Route withdrawal on provider disconnect or generation replacement makes this
+online check fail immediately, including before certificate expiry. Reusing a
+certificate while the same route and assignment remain current grants no more
+authority than the connected provider already has; replay after disconnect,
+replacement, expiry, Worker or Actor change is denied. The single-replica,
+`Recreate` ownership constraint remains until SessionRoute authorization is
+distributed or gateway validation is routed to the owning ateapi process.
+
+ateapi takes the gateway address, TLS server name, trust-bundle path, and exact
+atenet mTLS principal only from startup configuration. The standard profile
+uses its service-DNS and PodIdentity projections. The
+`external-control-plane-only` profile renders atenet-egress and requires
+explicit existing Secrets for the gateway serving identity/trust and its
+separate ateapi client identity/trust. Actor CA roots and gateway server roots
+are different trust purposes and are never substituted for one another. The
+profile's API `client-ca.pem` authenticates the controller and atenet clients of
+ateapi; it is not authority for the gateway's serving certificate. Missing or
+invalid trust, serving name, principal, issuer, or route authority prevents
+ateapi startup rather than silently disabling the online fence.
+
+Required negative coverage includes missing, malformed, oversized, or
+bad-signature CSRs; a CSR attempting to choose identity or certificate
+extensions; absent or malformed route bindings; wrong registration, slot,
+Worker UID, execution identity, Actor UID, purpose, gateway caller, or trust
+root; stale generation; replaced or non-running assignments; not-yet-valid and
+expired leaves; replay after route withdrawal; and disconnect while issuance or
+authorization is in flight. Tests must also prove that private keys never cross
+the wire or enter route/session state and that credential-bearing frames are
+redacted from logs.
+
+The directory and lease are process-local. The `external-control-plane-only`
+Helm profile therefore uses one ateapi replica with `Recreate`; distributed
+route ownership is required before this mode can regain HA or zero-downtime
+rollout.
 
 ## Workload provider opt-in
 
@@ -443,7 +562,7 @@ them. Revoking an enrollment also revokes its registration. The schema reserves
 session consumption and generation fields, and PostgreSQL provides an atomic
 session claim: it validates the current unexpired token, consumes it exactly
 once, and advances a nonzero generation which fences older sessions. `Connect`
-invokes that primitive only after a valid first frame. Execution and Actor
-ingress forwarding remain process-local and separate from authentication
-persistence; ateapi binds both data planes to the recovered session authority
-before accepting provider connections.
+invokes that primitive only after a valid first frame. Execution, Actor ingress,
+and Actor egress forwarding remain process-local and separate from
+authentication persistence; ateapi binds all three data planes to the recovered
+session authority before accepting provider connections.

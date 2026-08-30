@@ -16,9 +16,11 @@ package controlapi
 
 import (
 	"context"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -39,6 +41,13 @@ type RPCService struct {
 	impl                  serviceStore
 	actorIngressStore     actorIngressStore
 	actorIngressDialer    ActorIngressByteDialer
+	actorEgressGateway    string
+	actorEgressDial       func(context.Context, string, string) (net.Conn, error)
+	actorEgressCA         externalActorCertificateAuthority
+	actorEgressRoutes     externalprovider.ExternalActorEgressRouteAuthorizer
+	actorEgressServerName string
+	actorEgressTrustPEM   []byte
+	actorEgressPrincipal  string
 	workerCache           *workercache.Cache
 	dialer                workerExecutionDialer
 	workerPoolLister      listersv1alpha1.WorkerPoolLister
@@ -77,6 +86,8 @@ func NewRPCService(
 	s := &RPCService{
 		impl:                  impl,
 		actorIngressStore:     impl,
+		actorEgressGateway:    egressGatewayAddress,
+		actorEgressDial:       (&net.Dialer{}).DialContext,
 		workerCache:           workerCache,
 		workerPoolLister:      workerPoolLister,
 		csiDriverConfigLister: csiDriverConfigLister,

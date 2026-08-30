@@ -70,7 +70,7 @@ func validClientFrame() *externalproviderpb.ClientFrame {
 	return &externalproviderpb.ClientFrame{
 		Frame: &externalproviderpb.ClientFrame_Hello{Hello: &externalproviderpb.ConnectHello{
 			RegistrationUid:  "registration-a",
-			ProtocolVersion:  connectProtocolVersion,
+			ProtocolVersion:  connectProtocolVersionV3,
 			SlotPolicyDigest: claim.Registration.Scope.SlotPolicy.DigestHex(),
 			Slots:            []*externalproviderpb.ExternalSlot{validExternalSlot("slot-a")},
 		}},
@@ -218,7 +218,7 @@ func TestValidateConnectAdmissionRejectsInvalidClaimAndFirstFrame(t *testing.T) 
 		{name: "missing frame member", path: "frame", edit: func(frame *externalproviderpb.ClientFrame) { frame.Frame = nil }},
 		{name: "nil hello", path: "frame", edit: func(frame *externalproviderpb.ClientFrame) { frame.Frame = &externalproviderpb.ClientFrame_Hello{} }},
 		{name: "protocol zero", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 0 }},
-		{name: "unsupported protocol", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 3 }},
+		{name: "unsupported protocol", path: "protocol_version", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().ProtocolVersion = 4 }},
 		{name: "registration mismatch", path: "registration_uid", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().RegistrationUid = "registration-b" }},
 		{name: "no slots", path: "frame.hello.slots", edit: func(frame *externalproviderpb.ClientFrame) { frame.GetHello().Slots = nil }},
 		{name: "over authenticated slot limit", path: "frame.hello.slots", edit: func(frame *externalproviderpb.ClientFrame) {

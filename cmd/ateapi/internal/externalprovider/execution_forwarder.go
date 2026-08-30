@@ -68,6 +68,11 @@ var (
 	// ErrExternalExecutionChannelIDsExhausted reports that this generation has
 	// no unused even channel IDs left. A newer generation is required.
 	ErrExternalExecutionChannelIDsExhausted = errors.New("external execution channel IDs are exhausted")
+
+	// ErrExternalActorEgressUnavailable reports that a client-opened Actor
+	// egress stream cannot be bound to an exact current Actor assignment and
+	// the server-configured cluster gateway.
+	ErrExternalActorEgressUnavailable = errors.New("external Actor egress is unavailable")
 )
 
 // ExecutionForwardingLimits bounds every queue owned by the execution data
@@ -372,15 +377,24 @@ func (d *ExternalActorIngressDialer) DialContext(ctx context.Context, assignment
 	return d.forwarder.dial(ctx, assignment, externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_INGRESS)
 }
 
+// ActorEgressGateway binds one protocol-v3 client-opened ACTOR_EGRESS channel
+// to the server-owned cluster networking path and issues its generation-bound
+// actor credential. The immutable Worker binding and generation are derived
+// from the authenticated live session; the CSR contributes only a public key.
+type ActorEgressGateway interface {
+	OpenActorEgress(context.Context, SessionWorkerBinding, uint64, []byte) (net.Conn, *externalproviderpb.ActorEgressOpenAck, error)
+}
+
 type executionForwarder struct {
-	routes *SessionRouteDirectory
-	limits ExecutionForwardingLimits
+	routes      *SessionRouteDirectory
+	limits      ExecutionForwardingLimits
+	actorEgress ActorEgressGateway
 
 	mu       sync.RWMutex
 	sessions map[*SessionRoute]*executionSession
 }
 
-func newExecutionForwarder(routes *SessionRouteDirectory, limits ExecutionForwardingLimits) (*executionForwarder, error) {
+func newExecutionForwarder(routes *SessionRouteDirectory, limits ExecutionForwardingLimits, actorEgress ...ActorEgressGateway) (*executionForwarder, error) {
 	if routes == nil || routes.registry == nil {
 		return nil, fmt.Errorf("%w: route authority is required", ErrInvalidExecutionForwardingConfig)
 	}
@@ -388,10 +402,18 @@ func newExecutionForwarder(routes *SessionRouteDirectory, limits ExecutionForwar
 	if err != nil {
 		return nil, err
 	}
+	var gateway ActorEgressGateway
+	if len(actorEgress) > 1 {
+		return nil, fmt.Errorf("%w: at most one Actor egress gateway is allowed", ErrInvalidExecutionForwardingConfig)
+	}
+	if len(actorEgress) == 1 {
+		gateway = actorEgress[0]
+	}
 	return &executionForwarder{
-		routes:   routes,
-		limits:   normalized,
-		sessions: make(map[*SessionRoute]*executionSession),
+		routes:      routes,
+		limits:      normalized,
+		actorEgress: gateway,
+		sessions:    make(map[*SessionRoute]*executionSession),
 	}, nil
 }
 
@@ -733,11 +755,7 @@ func (s *executionSession) applyEffectLocked(effect SessionEffect) error {
 	case *ServerHeartbeatAckEffect:
 		return nil
 	case *ClientOpenEffect:
-		ack, err := s.channels.AcknowledgeClientOpen(effect.ChannelID(), false, "channel kind is unavailable")
-		if err != nil {
-			return err
-		}
-		return s.wire.sendFrame(s.ctx, ack.Frame())
+		return s.openActorEgressLocked(effect)
 	case *ServerOpenAckEffect:
 		connection := s.connection(effect.ChannelID())
 		if connection == nil {
@@ -779,9 +797,142 @@ func (s *executionSession) applyEffectLocked(effect SessionEffect) error {
 		s.removeConnection(effect.ChannelID(), connection)
 		connection.fail(ErrExternalExecutionUnavailable)
 		return nil
+	case *ClientTerminalRaceEffect:
+		return nil
 	default:
 		return ErrExternalExecutionUnavailable
 	}
+}
+
+func (s *executionSession) openActorEgressLocked(effect *ClientOpenEffect) error {
+	if effect == nil || effect.Kind() != externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS {
+		return ErrExternalExecutionUnavailable
+	}
+	binding, found := s.bindingForSlot(effect.SlotID())
+	csr := effect.ActorEgressCSR()
+	if !found || len(csr) == 0 || s.forwarder.actorEgress == nil || s.liveBindingError(binding) != nil {
+		return s.rejectActorEgressLocked(effect.ChannelID())
+	}
+
+	// The gateway receives only server-derived identity. It must complete its
+	// authoritative Worker/Actor checks and fixed gateway dial before the peer
+	// sees an accepted OpenAck, so no bytes can cross an unproven assignment.
+	gateway, credential, err := s.forwarder.actorEgress.OpenActorEgress(s.ctx, binding, s.route.Generation(), csr)
+	if err != nil || gateway == nil || credential == nil {
+		if gateway != nil {
+			_ = gateway.Close()
+		}
+		return s.rejectActorEgressLocked(effect.ChannelID())
+	}
+	if s.liveBindingError(binding) != nil {
+		_ = gateway.Close()
+		return ErrExternalExecutionUnavailable
+	}
+	connection, err := s.allocateClientConnection(effect.ChannelID(), binding)
+	if err != nil {
+		_ = gateway.Close()
+		return err
+	}
+	ack, err := s.channels.AcknowledgeClientActorEgress(effect.ChannelID(), credential)
+	if err == nil {
+		err = s.wire.sendFrame(s.ctx, ack.Frame())
+	}
+	if err != nil {
+		s.removeConnection(connection.channelID, connection)
+		connection.fail(err)
+		_ = gateway.Close()
+		return err
+	}
+	go bridgeActorEgress(connection, gateway)
+	return nil
+}
+
+func (s *executionSession) rejectActorEgressLocked(channelID uint64) error {
+	ack, err := s.channels.AcknowledgeClientOpen(channelID, false, "actor egress is unavailable")
+	if err != nil {
+		return err
+	}
+	return s.wire.sendFrame(s.ctx, ack.Frame())
+}
+
+func (s *executionSession) bindingForSlot(slotID string) (SessionWorkerBinding, bool) {
+	if s == nil || s.route == nil || slotID == "" {
+		return SessionWorkerBinding{}, false
+	}
+	for _, binding := range s.route.bindings {
+		if binding.SlotID() == slotID {
+			return binding, true
+		}
+	}
+	return SessionWorkerBinding{}, false
+}
+
+func (s *executionSession) allocateClientConnection(channelID uint64, binding SessionWorkerBinding) (*executionConn, error) {
+	if channelID == 0 || channelID%2 == 0 {
+		return nil, ErrExternalExecutionUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.conns[channelID]; exists {
+		return nil, ErrExternalExecutionUnavailable
+	}
+	connection := newExecutionConn(s, channelID, binding, s.forwarder.limits.ReceiveQueueDepth)
+	s.conns[channelID] = connection
+	return connection, nil
+}
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// bridgeActorEgress preserves independent half-closes while ensuring either a
+// channel reset, route cancellation, or gateway failure closes both pumps.
+// executionConn's bounded receive queue remains the backpressure boundary for
+// provider-to-gateway traffic.
+func bridgeActorEgress(channel *executionConn, gateway net.Conn) {
+	if channel == nil || gateway == nil {
+		if gateway != nil {
+			_ = gateway.Close()
+		}
+		return
+	}
+	results := make(chan error, 2)
+	copyHalf := func(destination net.Conn, source net.Conn) {
+		_, err := io.Copy(destination, source)
+		if err == nil {
+			writer, ok := destination.(closeWriter)
+			if !ok {
+				err = ErrExternalActorEgressUnavailable
+			} else {
+				err = writer.CloseWrite()
+			}
+		}
+		results <- err
+	}
+	go copyHalf(gateway, channel)
+	go copyHalf(channel, gateway)
+	closed := false
+	closeBoth := func() {
+		if closed {
+			return
+		}
+		closed = true
+		_ = gateway.Close()
+		_ = channel.Close()
+	}
+	remaining := 2
+	for remaining > 0 {
+		select {
+		case err := <-results:
+			remaining--
+			if err != nil {
+				closeBoth()
+			}
+		case <-channel.session.done():
+			closeBoth()
+		}
+	}
+	closeBoth()
 }
 
 func (s *executionSession) resetLocked(connection *executionConn, code codes.Code, reason string, cause error) error {

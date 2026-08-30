@@ -35,6 +35,7 @@ const (
 	maximumRememberedChannelLimit uint32 = 1 << 20
 	defaultPendingHeartbeatLimit  uint32 = 64
 	maximumPendingHeartbeatLimit  uint32 = 65535
+	maxActorEgressCSRBytes               = 16 << 10
 )
 
 var (
@@ -73,6 +74,7 @@ type ChannelSessionState struct {
 	mu sync.Mutex
 
 	generation uint64
+	protocol   uint32
 	slotIDs    []string
 	slots      map[string]struct{}
 	limits     ChannelSessionLimits
@@ -100,12 +102,15 @@ const (
 )
 
 type channelState struct {
-	origin           channelOrigin
-	phase            channelPhase
-	kind             externalproviderpb.ChannelKind
-	slotID           string
-	serverHalfClosed bool
-	clientHalfClosed bool
+	origin                         channelOrigin
+	phase                          channelPhase
+	kind                           externalproviderpb.ChannelKind
+	slotID                         string
+	serverHalfClosed               bool
+	clientHalfClosed               bool
+	serverReset                    bool
+	clientResetSeen                bool
+	clientDataAfterServerResetSeen bool
 }
 
 // ChannelSessionStats is a non-secret point-in-time snapshot.
@@ -150,9 +155,10 @@ func (e *SendServerFrameEffect) Frame() *externalproviderpb.ServerFrame {
 // ACTOR_EGRESS channel. AcknowledgeClientOpen completes that decision.
 type ClientOpenEffect struct {
 	effectBase
-	channelID uint64
-	kind      externalproviderpb.ChannelKind
-	slotID    string
+	channelID      uint64
+	kind           externalproviderpb.ChannelKind
+	slotID         string
+	actorEgressCSR []byte
 }
 
 func (*ClientOpenEffect) isSessionEffect() {}
@@ -160,6 +166,7 @@ func (*ClientOpenEffect) isSessionEffect() {}
 func (e *ClientOpenEffect) ChannelID() uint64                    { return e.channelID }
 func (e *ClientOpenEffect) Kind() externalproviderpb.ChannelKind { return e.kind }
 func (e *ClientOpenEffect) SlotID() string                       { return e.slotID }
+func (e *ClientOpenEffect) ActorEgressCSR() []byte               { return slices.Clone(e.actorEgressCSR) }
 
 // ServerOpenAckEffect reports the client's exactly-once decision for a
 // server-opened channel. ErrorMessage is bounded, valid UTF-8, untrusted text.
@@ -212,6 +219,20 @@ func (e *ClientResetEffect) ChannelID() uint64 { return e.channelID }
 func (e *ClientResetEffect) GRPCCode() uint32  { return e.grpcCode }
 func (e *ClientResetEffect) Reason() string    { return e.reason }
 
+// ClientTerminalRaceEffect reports one bounded client frame which crossed a
+// server Reset, or a terminal frame which crossed the final server HalfClose
+// for the same channel. The channel is already terminal, so the transport
+// owner deliberately performs no forwarding work. Retaining this as an
+// ordered effect keeps the state machine's one-successful-frame/one-effect
+// contract without reopening the channel.
+type ClientTerminalRaceEffect struct {
+	effectBase
+	channelID uint64
+}
+
+func (*ClientTerminalRaceEffect) isSessionEffect()    {}
+func (e *ClientTerminalRaceEffect) ChannelID() uint64 { return e.channelID }
+
 // ServerHeartbeatAckEffect reports completion of one outstanding server probe.
 type ServerHeartbeatAckEffect struct {
 	effectBase
@@ -254,6 +275,7 @@ func NewChannelSessionState(admission *ConnectAdmission, limits ChannelSessionLi
 
 	return &ChannelSessionState{
 		generation:        admission.Generation(),
+		protocol:          admission.ProtocolVersion(),
 		slotIDs:           slotIDs,
 		slots:             slotSet,
 		limits:            limits,
@@ -356,6 +378,22 @@ func (s *ChannelSessionState) AcknowledgeClientOpen(channelID uint64, accepted b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.acknowledgeClientOpenLocked(channelID, accepted, errorMessage, nil)
+}
+
+// AcknowledgeClientActorEgress accepts one protocol-v3 ACTOR_EGRESS channel
+// with the server-issued leaf-first chain and fixed gateway verification
+// material. It never accepts an address, destination, or private key.
+func (s *ChannelSessionState) AcknowledgeClientActorEgress(channelID uint64, credential *externalproviderpb.ActorEgressOpenAck) (*SendServerFrameEffect, error) {
+	if s == nil {
+		return nil, invalidChannelOperation("state", "is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acknowledgeClientOpenLocked(channelID, true, "", credential)
+}
+
+func (s *ChannelSessionState) acknowledgeClientOpenLocked(channelID uint64, accepted bool, errorMessage string, credential *externalproviderpb.ActorEgressOpenAck) (*SendServerFrameEffect, error) {
 	channel, err := s.localChannelLocked(channelID, channelOriginClient, channelAwaitingServerAck)
 	if err != nil {
 		return nil, err
@@ -363,10 +401,23 @@ func (s *ChannelSessionState) AcknowledgeClientOpen(channelID uint64, accepted b
 	if err := validateAckPairing(accepted, errorMessage); err != nil {
 		return nil, invalidChannelOperation("open_ack", err.Error())
 	}
+	if accepted {
+		if s.protocol != connectProtocolVersionV3 || channel.kind != externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS || credential == nil ||
+			len(credential.GetCertificateChainDer()) == 0 || credential.GetGatewayServerName() == "" || len(credential.GetGatewayTrustBundlePem()) == 0 {
+			return nil, invalidChannelOperation("open_ack.actor_egress", "valid protocol-v3 credentials are required")
+		}
+	} else if credential != nil {
+		return nil, invalidChannelOperation("open_ack.actor_egress", "must be absent on rejection")
+	}
+	var clonedCredential *externalproviderpb.ActorEgressOpenAck
+	if credential != nil {
+		clonedCredential = proto.Clone(credential).(*externalproviderpb.ActorEgressOpenAck)
+	}
 	frame, err := s.serverFrame(&externalproviderpb.ServerFrame{Frame: &externalproviderpb.ServerFrame_OpenAck{OpenAck: &externalproviderpb.OpenChannelAck{
 		ChannelId:    channelID,
 		Accepted:     accepted,
 		ErrorMessage: errorMessage,
+		ActorEgress:  clonedCredential,
 	}}})
 	if err != nil {
 		return nil, err
@@ -469,6 +520,7 @@ func (s *ChannelSessionState) ResetServerChannel(channelID uint64, grpcCode uint
 	if err := s.stampEffectLocked(effect); err != nil {
 		return nil, err
 	}
+	channel.serverReset = true
 	s.terminalizeLocked(channel)
 	return effect, nil
 }
@@ -562,7 +614,25 @@ func (s *ChannelSessionState) applyClientOpenLocked(open *externalproviderpb.Ope
 	if err := s.validateNewChannelLocked(open.GetChannelId(), channelOriginClient, open.GetKind(), open.GetSlotId()); err != nil {
 		return nil, asProtocolViolation(err)
 	}
-	effect := &ClientOpenEffect{channelID: open.GetChannelId(), kind: open.GetKind(), slotID: open.GetSlotId()}
+	var csr []byte
+	switch s.protocol {
+	case connectProtocolVersionV2:
+		if open.GetActorEgress() != nil {
+			return nil, protocolViolation("frame.open.actor_egress", "is forbidden by protocol version 2")
+		}
+	case connectProtocolVersionV3:
+		actorEgress := open.GetActorEgress()
+		if actorEgress == nil {
+			return nil, protocolViolation("frame.open.actor_egress", "is required by protocol version 3")
+		}
+		if len(actorEgress.GetCertificateSigningRequestDer()) == 0 || len(actorEgress.GetCertificateSigningRequestDer()) > maxActorEgressCSRBytes {
+			return nil, protocolViolation("frame.open.actor_egress.certificate_signing_request_der", "length must be in 1..16384")
+		}
+		csr = slices.Clone(actorEgress.GetCertificateSigningRequestDer())
+	default:
+		return nil, protocolViolation("protocol_version", "is not supported")
+	}
+	effect := &ClientOpenEffect{channelID: open.GetChannelId(), kind: open.GetKind(), slotID: open.GetSlotId(), actorEgressCSR: csr}
 	if err := s.stampEffectLocked(effect); err != nil {
 		return nil, err
 	}
@@ -584,6 +654,9 @@ func (s *ChannelSessionState) applyClientAckLocked(ack *externalproviderpb.OpenC
 	if err := validateAckPairing(ack.GetAccepted(), ack.GetErrorMessage()); err != nil {
 		return nil, protocolViolation("frame.open_ack", err.Error())
 	}
+	if ack.GetActorEgress() != nil {
+		return nil, protocolViolation("frame.open_ack.actor_egress", "is forbidden for server-opened channels")
+	}
 	effect := &ServerOpenAckEffect{channelID: ack.GetChannelId(), accepted: ack.GetAccepted(), errorMessage: ack.GetErrorMessage()}
 	if err := s.stampEffectLocked(effect); err != nil {
 		return nil, err
@@ -597,15 +670,31 @@ func (s *ChannelSessionState) applyClientAckLocked(ack *externalproviderpb.OpenC
 }
 
 func (s *ChannelSessionState) applyClientDataLocked(data *externalproviderpb.ChannelData) (SessionEffect, error) {
+	if len(data.GetData()) == 0 || uint64(len(data.GetData())) > uint64(s.limits.MaxDataBytes) {
+		return nil, protocolViolation("frame.data.data", "length must be in 1..max_data_bytes")
+	}
 	channel, err := s.peerAcceptedChannelLocked(data.GetChannelId())
 	if err != nil {
-		return nil, err
+		channel = s.channels[data.GetChannelId()]
+		// Protocol v3 has no Reset acknowledgement. Preserve a bounded preview
+		// allowance for the single synchronous client send which can cross a
+		// server Reset; a second frame remains a session protocol violation.
+		if channel == nil || channel.phase != channelTerminal || !channel.serverReset ||
+			channel.clientHalfClosed || channel.clientResetSeen {
+			return nil, err
+		}
+		if channel.clientDataAfterServerResetSeen {
+			return nil, protocolViolation("frame.data", "client data was already observed after server reset")
+		}
+		effect := &ClientTerminalRaceEffect{channelID: data.GetChannelId()}
+		if err := s.stampEffectLocked(effect); err != nil {
+			return nil, err
+		}
+		channel.clientDataAfterServerResetSeen = true
+		return effect, nil
 	}
 	if channel.clientHalfClosed {
 		return nil, protocolViolation("frame.data", "cannot follow the client half-close")
-	}
-	if len(data.GetData()) == 0 || uint64(len(data.GetData())) > uint64(s.limits.MaxDataBytes) {
-		return nil, protocolViolation("frame.data.data", "length must be in 1..max_data_bytes")
 	}
 	effect := &ClientDataEffect{channelID: data.GetChannelId(), data: slices.Clone(data.GetData())}
 	if err := s.stampEffectLocked(effect); err != nil {
@@ -617,7 +706,19 @@ func (s *ChannelSessionState) applyClientDataLocked(data *externalproviderpb.Cha
 func (s *ChannelSessionState) applyClientHalfCloseLocked(halfClose *externalproviderpb.HalfCloseChannel) (SessionEffect, error) {
 	channel, err := s.peerAcceptedChannelLocked(halfClose.GetChannelId())
 	if err != nil {
-		return nil, err
+		channel = s.channels[halfClose.GetChannelId()]
+		if channel == nil || channel.phase != channelTerminal || !channel.serverReset {
+			return nil, err
+		}
+		if channel.clientHalfClosed {
+			return nil, protocolViolation("frame.half_close", "client direction is already closed")
+		}
+		effect := &ClientTerminalRaceEffect{channelID: halfClose.GetChannelId()}
+		if err := s.stampEffectLocked(effect); err != nil {
+			return nil, err
+		}
+		channel.clientHalfClosed = true
+		return effect, nil
 	}
 	if channel.clientHalfClosed {
 		return nil, protocolViolation("frame.half_close", "client direction is already closed")
@@ -634,17 +735,31 @@ func (s *ChannelSessionState) applyClientHalfCloseLocked(halfClose *externalprov
 }
 
 func (s *ChannelSessionState) applyClientResetLocked(reset *externalproviderpb.ResetChannel) (SessionEffect, error) {
-	channel, err := s.peerAcceptedChannelLocked(reset.GetChannelId())
-	if err != nil {
-		return nil, err
-	}
 	if err := validateReset(reset.GetGrpcCode(), reset.GetReason()); err != nil {
 		return nil, protocolViolation("frame.reset", err.Error())
+	}
+	channel, err := s.peerAcceptedChannelLocked(reset.GetChannelId())
+	if err != nil {
+		channel = s.channels[reset.GetChannelId()]
+		if channel == nil || channel.phase != channelTerminal ||
+			(!channel.serverReset && !(channel.serverHalfClosed && channel.clientHalfClosed)) {
+			return nil, err
+		}
+		if channel.clientResetSeen {
+			return nil, protocolViolation("frame.reset", "client reset was already observed")
+		}
+		effect := &ClientTerminalRaceEffect{channelID: reset.GetChannelId()}
+		if err := s.stampEffectLocked(effect); err != nil {
+			return nil, err
+		}
+		channel.clientResetSeen = true
+		return effect, nil
 	}
 	effect := &ClientResetEffect{channelID: reset.GetChannelId(), grpcCode: reset.GetGrpcCode(), reason: reset.GetReason()}
 	if err := s.stampEffectLocked(effect); err != nil {
 		return nil, err
 	}
+	channel.clientResetSeen = true
 	s.terminalizeLocked(channel)
 	return effect, nil
 }

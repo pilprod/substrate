@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -197,15 +198,29 @@ func egressHandler(roots *x509.CertPool, actor *ateapipb.Actor, err error) *Hand
 
 type egressMockClient struct {
 	ateapipb.ControlClient
-	actor *ateapipb.Actor
-	err   error
+	actor            *ateapipb.Actor
+	err              error
+	authorizeErr     error
+	getActorCalls    int
+	authorizeCalls   int
+	authorizeRequest *ateapipb.AuthorizeExternalActorEgressRequest
 }
 
 func (m *egressMockClient) GetActor(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error) {
+	m.getActorCalls++
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.actor, nil
+}
+
+func (m *egressMockClient) AuthorizeExternalActorEgress(_ context.Context, request *ateapipb.AuthorizeExternalActorEgressRequest, _ ...grpc.CallOption) (*ateapipb.AuthorizeExternalActorEgressResponse, error) {
+	m.authorizeCalls++
+	m.authorizeRequest = request
+	if m.authorizeErr != nil {
+		return nil, m.authorizeErr
+	}
+	return &ateapipb.AuthorizeExternalActorEgressResponse{}, nil
 }
 
 func runningActor() *ateapipb.Actor {
@@ -287,6 +302,69 @@ func TestHandleRequestHeadersAllowsAgentgatewayCertificateAttribute(t *testing.T
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
 	if _, err := h.HandleRequestHeaders(context.Background(), agentgatewayEgressMetadata(string(certificate))); err != nil {
 		t.Fatalf("HandleRequestHeaders() error = %v, want nil", err)
+	}
+}
+
+func TestHandleRequestHeadersOnlineAuthorizesExternalRouteBinding(t *testing.T) {
+	ca := newTestCA(t, "actor-identity-ca")
+	binding := &substratex509.ExternalRouteBinding{
+		Version:           substratex509.ExternalRouteBindingVersion,
+		RegistrationUID:   "registration-a",
+		SlotID:            "slot-a",
+		WorkerUID:         "00000000-0000-4000-8000-000000000001",
+		SessionGeneration: 7,
+		ExecutionIdentity: "registration-a.slot-a.execution",
+	}
+	leaf := ca.issueActorCert(t, actorCertOptions{mutate: func(certificate *x509.Certificate) {
+		if err := substratex509.AddExternalRouteBindingToCertificate(binding, certificate); err != nil {
+			t.Fatalf("AddExternalRouteBindingToCertificate() error = %v", err)
+		}
+	}})
+	client := &egressMockClient{actor: runningActor()}
+	handler := New(client, ca.roots())
+	if _, err := handler.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf))); err != nil {
+		t.Fatalf("HandleRequestHeaders() error = %v", err)
+	}
+	if client.authorizeCalls != 1 || client.getActorCalls != 0 || client.authorizeRequest == nil {
+		t.Fatalf("online authorization calls/getActor/request = %d/%d/%v", client.authorizeCalls, client.getActorCalls, client.authorizeRequest)
+	}
+	chain := client.authorizeRequest.GetActorCertificateChainDer()
+	if len(chain) != 1 || !slices.Equal(chain[0], leaf.Raw) {
+		t.Fatalf("authorized chain = %v, want exact verified leaf", chain)
+	}
+}
+
+func TestHandleRequestHeadersMapsExternalRouteAuthorizationFailure(t *testing.T) {
+	ca := newTestCA(t, "actor-identity-ca")
+	leaf := ca.issueActorCert(t, actorCertOptions{mutate: func(certificate *x509.Certificate) {
+		if err := substratex509.AddExternalRouteBindingToCertificate(&substratex509.ExternalRouteBinding{
+			Version:           substratex509.ExternalRouteBindingVersion,
+			RegistrationUID:   "registration-a",
+			SlotID:            "slot-a",
+			WorkerUID:         "00000000-0000-4000-8000-000000000001",
+			SessionGeneration: 7,
+			ExecutionIdentity: "registration-a.slot-a.execution",
+		}, certificate); err != nil {
+			t.Fatalf("AddExternalRouteBindingToCertificate() error = %v", err)
+		}
+	}})
+	for _, test := range []struct {
+		name string
+		err  error
+		want envoy_type.StatusCode
+	}{
+		{name: "stale or replayed route", err: status.Error(codes.PermissionDenied, "denied"), want: envoy_type.StatusCode_Forbidden},
+		{name: "authorization unavailable", err: status.Error(codes.Unavailable, "unavailable"), want: envoy_type.StatusCode_ServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &egressMockClient{authorizeErr: test.err}
+			handler := New(client, ca.roots())
+			_, err := handler.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
+			wantStatus(t, err, test.want)
+			if client.authorizeCalls != 1 || client.getActorCalls != 0 {
+				t.Fatalf("authorization/getActor calls = %d/%d", client.authorizeCalls, client.getActorCalls)
+			}
+		})
 	}
 }
 

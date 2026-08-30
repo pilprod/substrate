@@ -29,6 +29,12 @@ service Control {
   // provider credential, or external session generation.
   rpc OpenActorIngress(stream ActorIngressFrame) returns (stream ActorIngressFrame) {}
 
+  // AuthorizeExternalActorEgress is called by the authenticated in-cluster
+  // egress gateway for every CONNECT carrying an ExternalRouteBinding actor
+  // certificate. Identity is extracted only from the verified certificate;
+  // callers never submit Actor, Worker, slot, or generation fields directly.
+  rpc AuthorizeExternalActorEgress(AuthorizeExternalActorEgressRequest) returns (AuthorizeExternalActorEgressResponse) {}
+
   // Get an Actor.
   rpc GetActor(GetActorRequest) returns (Actor) {}
 
@@ -1295,6 +1301,17 @@ message MintCertResponse {
   // leaf-to-root order.
   repeated bytes actor_certificates = 1;
 }
+
+message AuthorizeExternalActorEgressRequest {
+  // DER certificates presented by the CONNECT peer, leaf first. The server
+  // independently verifies the actor CA chain, lifetime, EKU, ActorIdentity,
+  // and ExternalRouteBinding. Bounded by the Control API request limit.
+  repeated bytes actor_certificate_chain_der = 1 [ debug_redact = true ];
+}
+
+// Empty on success. Every denial is a uniform gRPC error and discloses no
+// current route, assignment, or identity state.
+message AuthorizeExternalActorEgressResponse {}
 
 // ActorIngressFrame carries one frame of the in-cluster Actor ingress stream.
 //

@@ -110,6 +110,9 @@ func TestSensitiveFieldsAreDebugRedacted(t *testing.T) {
 		"externalprovider.MintSessionTokenResponse.session_token":                         protoreflect.BytesKind,
 		"externalprovider.ChannelData.data":                                               protoreflect.BytesKind,
 		"externalprovider.OpenChannelAck.error_message":                                   protoreflect.StringKind,
+		"externalprovider.ActorEgressOpen.certificate_signing_request_der":                protoreflect.BytesKind,
+		"externalprovider.ActorEgressOpenAck.certificate_chain_der":                       protoreflect.BytesKind,
+		"externalprovider.ActorEgressOpenAck.gateway_trust_bundle_pem":                    protoreflect.BytesKind,
 		"externalprovider.ResetChannel.reason":                                            protoreflect.StringKind,
 	}
 	found := make(map[protoreflect.FullName]bool, len(want))
@@ -239,7 +242,7 @@ func TestPublishedSchemaBaseline(t *testing.T) {
 	}
 	sum := sha256.Sum256(wireDescriptor)
 	got := hex.EncodeToString(sum[:])
-	const want = "a093a7dfb734cbdba0099d1b7d9f8557b82a3359857196479ae3458717ef9964"
+	const want = "c8284eceb6636e10e7d4d4bbf4fb408c6da26bec17184ee5019806b12510ae85"
 	if got != want {
 		t.Fatalf("wire descriptor SHA-256 = %q, want %q", got, want)
 	}

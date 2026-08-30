@@ -33,35 +33,36 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_OpenActorIngress_FullMethodName       = "/ateapi.Control/OpenActorIngress"
-	Control_GetActor_FullMethodName               = "/ateapi.Control/GetActor"
-	Control_CreateActor_FullMethodName            = "/ateapi.Control/CreateActor"
-	Control_UpdateActor_FullMethodName            = "/ateapi.Control/UpdateActor"
-	Control_SuspendActor_FullMethodName           = "/ateapi.Control/SuspendActor"
-	Control_PauseActor_FullMethodName             = "/ateapi.Control/PauseActor"
-	Control_ResumeActor_FullMethodName            = "/ateapi.Control/ResumeActor"
-	Control_DeleteActor_FullMethodName            = "/ateapi.Control/DeleteActor"
-	Control_GetActorSnapshot_FullMethodName       = "/ateapi.Control/GetActorSnapshot"
-	Control_GetActorSnapshotTag_FullMethodName    = "/ateapi.Control/GetActorSnapshotTag"
-	Control_ListActorSnapshots_FullMethodName     = "/ateapi.Control/ListActorSnapshots"
-	Control_CreateActorSnapshotTag_FullMethodName = "/ateapi.Control/CreateActorSnapshotTag"
-	Control_UpdateActorSnapshotTag_FullMethodName = "/ateapi.Control/UpdateActorSnapshotTag"
-	Control_DeleteActorSnapshotTag_FullMethodName = "/ateapi.Control/DeleteActorSnapshotTag"
-	Control_ListWorkers_FullMethodName            = "/ateapi.Control/ListWorkers"
-	Control_GetWorker_FullMethodName              = "/ateapi.Control/GetWorker"
-	Control_CreateWorker_FullMethodName           = "/ateapi.Control/CreateWorker"
-	Control_UpdateWorker_FullMethodName           = "/ateapi.Control/UpdateWorker"
-	Control_DeleteWorker_FullMethodName           = "/ateapi.Control/DeleteWorker"
-	Control_DrainWorker_FullMethodName            = "/ateapi.Control/DrainWorker"
-	Control_ListActors_FullMethodName             = "/ateapi.Control/ListActors"
-	Control_CreateAtespace_FullMethodName         = "/ateapi.Control/CreateAtespace"
-	Control_GetAtespace_FullMethodName            = "/ateapi.Control/GetAtespace"
-	Control_ListAtespaces_FullMethodName          = "/ateapi.Control/ListAtespaces"
-	Control_DeleteAtespace_FullMethodName         = "/ateapi.Control/DeleteAtespace"
-	Control_CreateActorTemplate_FullMethodName    = "/ateapi.Control/CreateActorTemplate"
-	Control_GetActorTemplate_FullMethodName       = "/ateapi.Control/GetActorTemplate"
-	Control_ListActorTemplates_FullMethodName     = "/ateapi.Control/ListActorTemplates"
-	Control_DeleteActorTemplate_FullMethodName    = "/ateapi.Control/DeleteActorTemplate"
+	Control_OpenActorIngress_FullMethodName             = "/ateapi.Control/OpenActorIngress"
+	Control_AuthorizeExternalActorEgress_FullMethodName = "/ateapi.Control/AuthorizeExternalActorEgress"
+	Control_GetActor_FullMethodName                     = "/ateapi.Control/GetActor"
+	Control_CreateActor_FullMethodName                  = "/ateapi.Control/CreateActor"
+	Control_UpdateActor_FullMethodName                  = "/ateapi.Control/UpdateActor"
+	Control_SuspendActor_FullMethodName                 = "/ateapi.Control/SuspendActor"
+	Control_PauseActor_FullMethodName                   = "/ateapi.Control/PauseActor"
+	Control_ResumeActor_FullMethodName                  = "/ateapi.Control/ResumeActor"
+	Control_DeleteActor_FullMethodName                  = "/ateapi.Control/DeleteActor"
+	Control_GetActorSnapshot_FullMethodName             = "/ateapi.Control/GetActorSnapshot"
+	Control_GetActorSnapshotTag_FullMethodName          = "/ateapi.Control/GetActorSnapshotTag"
+	Control_ListActorSnapshots_FullMethodName           = "/ateapi.Control/ListActorSnapshots"
+	Control_CreateActorSnapshotTag_FullMethodName       = "/ateapi.Control/CreateActorSnapshotTag"
+	Control_UpdateActorSnapshotTag_FullMethodName       = "/ateapi.Control/UpdateActorSnapshotTag"
+	Control_DeleteActorSnapshotTag_FullMethodName       = "/ateapi.Control/DeleteActorSnapshotTag"
+	Control_ListWorkers_FullMethodName                  = "/ateapi.Control/ListWorkers"
+	Control_GetWorker_FullMethodName                    = "/ateapi.Control/GetWorker"
+	Control_CreateWorker_FullMethodName                 = "/ateapi.Control/CreateWorker"
+	Control_UpdateWorker_FullMethodName                 = "/ateapi.Control/UpdateWorker"
+	Control_DeleteWorker_FullMethodName                 = "/ateapi.Control/DeleteWorker"
+	Control_DrainWorker_FullMethodName                  = "/ateapi.Control/DrainWorker"
+	Control_ListActors_FullMethodName                   = "/ateapi.Control/ListActors"
+	Control_CreateAtespace_FullMethodName               = "/ateapi.Control/CreateAtespace"
+	Control_GetAtespace_FullMethodName                  = "/ateapi.Control/GetAtespace"
+	Control_ListAtespaces_FullMethodName                = "/ateapi.Control/ListAtespaces"
+	Control_DeleteAtespace_FullMethodName               = "/ateapi.Control/DeleteAtespace"
+	Control_CreateActorTemplate_FullMethodName          = "/ateapi.Control/CreateActorTemplate"
+	Control_GetActorTemplate_FullMethodName             = "/ateapi.Control/GetActorTemplate"
+	Control_ListActorTemplates_FullMethodName           = "/ateapi.Control/ListActorTemplates"
+	Control_DeleteActorTemplate_FullMethodName          = "/ateapi.Control/DeleteActorTemplate"
 )
 
 // ControlClient is the client API for Control service.
@@ -76,6 +77,11 @@ type ControlClient interface {
 	// Worker assignment and session route; clients never supply an endpoint,
 	// provider credential, or external session generation.
 	OpenActorIngress(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ActorIngressFrame, ActorIngressFrame], error)
+	// AuthorizeExternalActorEgress is called by the authenticated in-cluster
+	// egress gateway for every CONNECT carrying an ExternalRouteBinding actor
+	// certificate. Identity is extracted only from the verified certificate;
+	// callers never submit Actor, Worker, slot, or generation fields directly.
+	AuthorizeExternalActorEgress(ctx context.Context, in *AuthorizeExternalActorEgressRequest, opts ...grpc.CallOption) (*AuthorizeExternalActorEgressResponse, error)
 	// Get an Actor.
 	GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -159,6 +165,16 @@ func (c *controlClient) OpenActorIngress(ctx context.Context, opts ...grpc.CallO
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Control_OpenActorIngressClient = grpc.BidiStreamingClient[ActorIngressFrame, ActorIngressFrame]
+
+func (c *controlClient) AuthorizeExternalActorEgress(ctx context.Context, in *AuthorizeExternalActorEgressRequest, opts ...grpc.CallOption) (*AuthorizeExternalActorEgressResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AuthorizeExternalActorEgressResponse)
+	err := c.cc.Invoke(ctx, Control_AuthorizeExternalActorEgress_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (c *controlClient) GetActor(ctx context.Context, in *GetActorRequest, opts ...grpc.CallOption) (*Actor, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -452,6 +468,11 @@ type ControlServer interface {
 	// Worker assignment and session route; clients never supply an endpoint,
 	// provider credential, or external session generation.
 	OpenActorIngress(grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]) error
+	// AuthorizeExternalActorEgress is called by the authenticated in-cluster
+	// egress gateway for every CONNECT carrying an ExternalRouteBinding actor
+	// certificate. Identity is extracted only from the verified certificate;
+	// callers never submit Actor, Worker, slot, or generation fields directly.
+	AuthorizeExternalActorEgress(context.Context, *AuthorizeExternalActorEgressRequest) (*AuthorizeExternalActorEgressResponse, error)
 	// Get an Actor.
 	GetActor(context.Context, *GetActorRequest) (*Actor, error)
 	// Create a new Actor deriving from a given ActorTemplate.
@@ -525,6 +546,9 @@ type UnimplementedControlServer struct{}
 
 func (UnimplementedControlServer) OpenActorIngress(grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]) error {
 	return status.Error(codes.Unimplemented, "method OpenActorIngress not implemented")
+}
+func (UnimplementedControlServer) AuthorizeExternalActorEgress(context.Context, *AuthorizeExternalActorEgressRequest) (*AuthorizeExternalActorEgressResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AuthorizeExternalActorEgress not implemented")
 }
 func (UnimplementedControlServer) GetActor(context.Context, *GetActorRequest) (*Actor, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetActor not implemented")
@@ -637,6 +661,24 @@ func _Control_OpenActorIngress_Handler(srv interface{}, stream grpc.ServerStream
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Control_OpenActorIngressServer = grpc.BidiStreamingServer[ActorIngressFrame, ActorIngressFrame]
+
+func _Control_AuthorizeExternalActorEgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AuthorizeExternalActorEgressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).AuthorizeExternalActorEgress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_AuthorizeExternalActorEgress_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).AuthorizeExternalActorEgress(ctx, req.(*AuthorizeExternalActorEgressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 func _Control_GetActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetActorRequest)
@@ -1149,6 +1191,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "ateapi.Control",
 	HandlerType: (*ControlServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "AuthorizeExternalActorEgress",
+			Handler:    _Control_AuthorizeExternalActorEgress_Handler,
+		},
 		{
 			MethodName: "GetActor",
 			Handler:    _Control_GetActor_Handler,

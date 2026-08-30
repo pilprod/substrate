@@ -165,24 +165,29 @@ func (a *SessionAuthority) BindExecutionForwarding(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
 ) (*SessionRuntime, *ExternalExecutionDialer, error) {
-	runtime, execution, _, err := a.bindForwarding(reconciler, availability)
+	runtime, execution, _, err := a.bindForwarding(reconciler, availability, nil)
 	return runtime, execution, err
 }
 
-// BindProviderForwarding atomically binds Worker lifecycle and both
-// server-owned provider data planes. EXECUTION_GRPC and ACTOR_INGRESS share one
-// route/session fence while retaining distinct typed dialers, so callers
-// cannot select an arbitrary channel kind.
+// BindProviderForwarding atomically binds Worker lifecycle and all provider
+// data planes. EXECUTION_GRPC, ACTOR_INGRESS, and client-opened ACTOR_EGRESS
+// share one route/session fence. The egress gateway receives only the exact
+// immutable binding and generation derived by that authority.
 func (a *SessionAuthority) BindProviderForwarding(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
+	actorEgress ActorEgressGateway,
 ) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
-	return a.bindForwarding(reconciler, availability)
+	if actorEgress == nil {
+		return nil, nil, nil, fmt.Errorf("%w: Actor egress gateway is required", errInvalidSessionRuntime)
+	}
+	return a.bindForwarding(reconciler, availability, actorEgress)
 }
 
 func (a *SessionAuthority) bindForwarding(
 	reconciler WorkerPlanReconciler,
 	availability ExternalWorkerAvailabilityController,
+	actorEgress ActorEgressGateway,
 ) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
 	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
 		return nil, nil, nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
@@ -196,7 +201,11 @@ func (a *SessionAuthority) bindForwarding(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
 	}
-	forwarder, err := newExecutionForwarder(a.routes, a.executionLimits)
+	var egressOptions []ActorEgressGateway
+	if actorEgress != nil {
+		egressOptions = append(egressOptions, actorEgress)
+	}
+	forwarder, err := newExecutionForwarder(a.routes, a.executionLimits, egressOptions...)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: forwarding: %w", errInvalidSessionRuntime, err)
 	}

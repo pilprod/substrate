@@ -1258,15 +1258,22 @@ func TestSessionAuthorityProviderForwardingSharesExactFence(t *testing.T) {
 		t.Fatalf("NewSessionAuthority() error = %v", err)
 	}
 	runtime := newCoordinatorRuntime()
-	sessionRuntime, execution, ingress, err := authority.BindProviderForwarding(runtime, runtime)
+	if sessionRuntime, execution, ingress, err := authority.BindProviderForwarding(runtime, runtime, nil); err == nil || sessionRuntime != nil || execution != nil || ingress != nil {
+		t.Fatalf("BindProviderForwarding(nil egress) = (%v, %v, %v, %v), want nil/nil/nil/error", sessionRuntime, execution, ingress, err)
+	}
+	gateway := actorEgressGatewayFunc(func(context.Context, SessionWorkerBinding, uint64) (net.Conn, error) {
+		return nil, ErrExternalActorEgressUnavailable
+	})
+	sessionRuntime, execution, ingress, err := authority.BindProviderForwarding(runtime, runtime, gateway)
 	if err != nil || sessionRuntime == nil || execution == nil || ingress == nil {
 		t.Fatalf("BindProviderForwarding() = (%v, %v, %v, %v)", sessionRuntime, execution, ingress, err)
 	}
 	if execution.forwarder == nil || ingress.forwarder != execution.forwarder ||
-		sessionRuntime.coordinator.forwarder != execution.forwarder || !sessionRuntime.coordinator.activateWorkers {
+		sessionRuntime.coordinator.forwarder != execution.forwarder || execution.forwarder.actorEgress == nil ||
+		!sessionRuntime.coordinator.activateWorkers {
 		t.Fatal("provider dialers do not share the coordinator's exact forwarding fence")
 	}
-	if second, secondExecution, secondIngress, err := authority.BindProviderForwarding(runtime, runtime); err == nil || second != nil || secondExecution != nil || secondIngress != nil {
+	if second, secondExecution, secondIngress, err := authority.BindProviderForwarding(runtime, runtime, gateway); err == nil || second != nil || secondExecution != nil || secondIngress != nil {
 		t.Fatalf("second BindProviderForwarding() = (%v, %v, %v, %v), want nil/nil/nil/error", second, secondExecution, secondIngress, err)
 	}
 }

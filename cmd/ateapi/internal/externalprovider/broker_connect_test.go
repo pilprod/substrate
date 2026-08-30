@@ -370,7 +370,7 @@ func TestBrokerConnectRedactsClaimFailureBeforeReady(t *testing.T) {
 	requireClaimInstallGateStats(t, broker.sessionRuntime.claimInstallGate, claimInstallGateStats{})
 }
 
-func TestBrokerConnectRejectsUnsupportedClientChannelWithoutDroppingSession(t *testing.T) {
+func TestBrokerConnectRejectsActorEgressWhenGatewayIsUnboundWithoutDroppingSession(t *testing.T) {
 	coordinator, registry, routes, runtime := newCoordinatorHarness(t, 1, 1, 1)
 	claim := validSessionClaim(1)
 	broker, _ := connectTestBroker(t, coordinator, func(context.Context, string, CredentialDigest) (SessionClaim, error) {
@@ -379,9 +379,10 @@ func TestBrokerConnectRejectsUnsupportedClientChannelWithoutDroppingSession(t *t
 	open := &externalproviderpb.ClientFrame{
 		SessionGeneration: claim.Generation,
 		Frame: &externalproviderpb.ClientFrame_Open{Open: &externalproviderpb.OpenChannel{
-			ChannelId: 1,
-			Kind:      externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS,
-			SlotId:    "slot-a",
+			ChannelId:   1,
+			Kind:        externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS,
+			SlotId:      "slot-a",
+			ActorEgress: &externalproviderpb.ActorEgressOpen{CertificateSigningRequestDer: []byte("test-csr")},
 		}},
 	}
 	stream := newConnectTestStream(
@@ -399,15 +400,56 @@ func TestBrokerConnectRejectsUnsupportedClientChannelWithoutDroppingSession(t *t
 		t.Fatalf("server frames = %v, want Ready then bounded rejection", sent)
 	}
 	if stats := routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
-		t.Fatalf("route stats after unsupported effect = %+v, want empty", stats)
+		t.Fatalf("route stats after rejected Actor egress = %+v, want empty", stats)
 	}
 	if _, current := registry.lookup(claim.Registration.UID, claim.Generation); current {
 		t.Fatal("session lease remained current after unsupported effect")
 	}
 	for _, worker := range runtime.workers {
 		if worker.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
-			t.Fatalf("Worker state after unsupported effect = %v, want OFFLINE", worker.GetStatus().GetState())
+			t.Fatalf("Worker state after rejected Actor egress = %v, want OFFLINE", worker.GetStatus().GetState())
 		}
+	}
+}
+
+func TestBrokerConnectAcceptsActorEgressThroughBoundServerGateway(t *testing.T) {
+	coordinator, _, _, _ := newCoordinatorHarness(t, 1, 1, 1)
+	gateway := newBlockingActorEgressConn()
+	claim := validSessionClaim(1)
+	coordinator.forwarder.actorEgress = actorEgressGatewayFunc(func(_ context.Context, binding SessionWorkerBinding, generation uint64) (net.Conn, error) {
+		if binding.SlotID() != "slot-a" || generation != claim.Generation {
+			t.Fatalf("Actor egress route = (%+v, %d)", binding, generation)
+		}
+		return gateway, nil
+	})
+	broker, _ := connectTestBroker(t, coordinator, func(context.Context, string, CredentialDigest) (SessionClaim, error) {
+		return claim, nil
+	})
+	stream := newConnectTestStream(
+		connectTestContext(context.Background(), 0x85),
+		connectTestReceive{frame: validClientFrame()},
+		connectTestReceive{frame: &externalproviderpb.ClientFrame{
+			SessionGeneration: claim.Generation,
+			Frame: &externalproviderpb.ClientFrame_Open{Open: &externalproviderpb.OpenChannel{
+				ChannelId:   1,
+				Kind:        externalproviderpb.ChannelKind_CHANNEL_KIND_ACTOR_EGRESS,
+				SlotId:      "slot-a",
+				ActorEgress: &externalproviderpb.ActorEgressOpen{CertificateSigningRequestDer: []byte("test-csr")},
+			}},
+		}},
+	)
+	if err := broker.Connect(stream); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	sent := stream.sentSnapshot()
+	if len(sent) != 2 || sent[0].GetReady() == nil || sent[1].GetOpenAck().GetChannelId() != 1 ||
+		!sent[1].GetOpenAck().GetAccepted() || sent[1].GetOpenAck().GetErrorMessage() != "" {
+		t.Fatalf("server frames = %v, want Ready then accepted ACTOR_EGRESS", sent)
+	}
+	select {
+	case <-gateway.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Connect cleanup did not close bound Actor egress gateway")
 	}
 }
 

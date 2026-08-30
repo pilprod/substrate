@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	connectProtocolVersion = 2
+	connectProtocolVersionV2 uint32 = 2
+	connectProtocolVersionV3 uint32 = 3
 	// MaxWireMessageBytes is the transport and protobuf size ceiling for every
 	// client request and stream frame.
 	MaxWireMessageBytes = 1 << 20
@@ -51,6 +52,7 @@ var (
 type ConnectAdmission struct {
 	registration Registration
 	generation   uint64
+	protocol     uint32
 	slots        []AdmittedSlot
 }
 
@@ -61,6 +63,7 @@ type ConnectAdmission struct {
 type prevalidatedConnectHello struct {
 	registrationUID string
 	policyDigest    string
+	protocol        uint32
 	slots           []prevalidatedSlot
 }
 
@@ -77,6 +80,15 @@ func (a *ConnectAdmission) Registration() Registration {
 // Generation returns the nonzero fencing generation assigned by PostgreSQL.
 func (a *ConnectAdmission) Generation() uint64 {
 	return a.generation
+}
+
+// ProtocolVersion returns the authenticated Hello protocol semantics for this
+// generation. Version 3 is required for actor-egress credential bootstrap.
+func (a *ConnectAdmission) ProtocolVersion() uint32 {
+	if a == nil {
+		return 0
+	}
+	return a.protocol
 }
 
 // Slots returns independent copies in ascending SlotID order.
@@ -170,8 +182,8 @@ func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidat
 		return nil, invalidConnectAdmission("frame", "must contain only a nonnil hello")
 	}
 	hello := helloFrame.Hello
-	if hello.GetProtocolVersion() != connectProtocolVersion {
-		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 2")
+	if hello.GetProtocolVersion() != connectProtocolVersionV2 && hello.GetProtocolVersion() != connectProtocolVersionV3 {
+		return nil, invalidConnectAdmission("frame.hello.protocol_version", "must equal 2 or 3")
 	}
 	if !IsValidIdentity(hello.GetRegistrationUid()) {
 		return nil, invalidConnectAdmission("frame.hello.registration_uid", "has invalid identity syntax")
@@ -230,6 +242,7 @@ func prevalidateConnectHello(frame *externalproviderpb.ClientFrame) (*prevalidat
 	return &prevalidatedConnectHello{
 		registrationUID: hello.GetRegistrationUid(),
 		policyDigest:    hello.GetSlotPolicyDigest(),
+		protocol:        hello.GetProtocolVersion(),
 		slots:           normalized,
 	}, nil
 }
@@ -238,7 +251,8 @@ func validatePrevalidatedConnectAdmission(claim SessionClaim, hello *prevalidate
 	if err := validateAdmissionClaim(claim); err != nil {
 		return nil, err
 	}
-	if hello == nil || !IsValidIdentity(hello.registrationUID) || len(hello.slots) == 0 || len(hello.slots) > maxSlots {
+	if hello == nil || (hello.protocol != connectProtocolVersionV2 && hello.protocol != connectProtocolVersionV3) ||
+		!IsValidIdentity(hello.registrationUID) || len(hello.slots) == 0 || len(hello.slots) > maxSlots {
 		return nil, invalidConnectAdmission("prevalidated_hello", "is invalid")
 	}
 	if hello.registrationUID != claim.Registration.UID {
@@ -280,6 +294,7 @@ func validatePrevalidatedConnectAdmission(claim SessionClaim, hello *prevalidate
 	return &ConnectAdmission{
 		registration: claim.Registration,
 		generation:   claim.Generation,
+		protocol:     hello.protocol,
 		slots:        admittedSlots,
 	}, nil
 }
