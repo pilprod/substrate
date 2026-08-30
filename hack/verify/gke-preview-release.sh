@@ -132,7 +132,8 @@ if [[ "${FAKE_CHART_LOOKUP:-missing}" == "generic-not-found" ]]; then
   printf 'credential helper not found\n' >&2
   exit 1
 fi
-printf 'response status code 404: not found\n' >&2
+coordinate="${3#oci://}:$5"
+printf 'Error: failed to perform "FetchReference" on source: %s: not found\n' "${coordinate}" >&2
 exit 1
 EOF
 chmod +x "${fake_bin}/docker" "${fake_bin}/helm"

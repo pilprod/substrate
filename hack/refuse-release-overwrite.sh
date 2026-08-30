@@ -60,7 +60,7 @@ probe_registry_absence() {
   local kind="$1"
   local coordinate="$2"
   shift 2
-  local output status
+  local output status helm_coordinate
   set +o errexit
   output="$("$@" 2>&1)"
   status=$?
@@ -70,6 +70,11 @@ probe_registry_absence() {
   fi
   if [[ "${status}" -eq 126 || "${status}" -eq 127 ]]; then
     fail "could not execute the ${kind} coordinate probe: ${coordinate}"
+  fi
+  helm_coordinate="${coordinate#oci://}"
+  if [[ "${kind}" == "chart" ]] &&
+    grep -Fqi "failed to perform \"FetchReference\" on source: ${helm_coordinate}: not found" <<<"${output}"; then
+    return 0
   fi
   if ! grep -Eiq '(manifest unknown|name unknown|failed to inspect:.*: not found|response status( code)?[^[:cntrl:]]*404|unexpected status[^[:cntrl:]]*404|HTTP[^[:cntrl:]]*404([^0-9]|$))' <<<"${output}"; then
     fail "could not prove ${kind} coordinate is absent: ${coordinate}"
