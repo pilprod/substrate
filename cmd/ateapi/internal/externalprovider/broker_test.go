@@ -285,6 +285,174 @@ func TestBrokerRejectsCredentialsWithoutStoreAccess(t *testing.T) {
 	}
 }
 
+func TestBrokerBoundsEnrollAuthenticationBeforeStore(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	store := &fakeStore{
+		consume: func(ctx context.Context, _ CredentialDigest, _ string, _ CredentialDigest) (Registration, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return Registration{}, ctx.Err()
+		},
+	}
+	broker, err := newBroker(
+		store,
+		bytes.NewReader(make([]byte, 128)),
+		time.Minute,
+		WithUnaryAuthenticationLimits(UnaryAuthenticationLimits{MaxPending: 1}),
+	)
+	if err != nil {
+		t.Fatalf("newBroker() error = %v", err)
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(bearerContext("authorization", "Bearer "+string(testCredential(0x81))))
+	firstResult := make(chan error, 1)
+	go func() {
+		_, callErr := broker.Enroll(firstCtx, &externalproviderpb.EnrollRequest{})
+		firstResult <- callErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Enroll did not reach store")
+	}
+
+	_, err = broker.Enroll(
+		bearerContext("authorization", "Bearer "+string(testCredential(0x82))),
+		&externalproviderpb.EnrollRequest{},
+	)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("concurrent Enroll() code = %v, want ResourceExhausted", status.Code(err))
+	}
+	select {
+	case <-entered:
+		t.Fatal("capacity-rejected Enroll reached store")
+	default:
+	}
+
+	cancelFirst()
+	select {
+	case <-firstResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled Enroll did not return")
+	}
+
+	thirdCtx, cancelThird := context.WithCancel(bearerContext("authorization", "Bearer "+string(testCredential(0x83))))
+	thirdResult := make(chan error, 1)
+	go func() {
+		_, callErr := broker.Enroll(thirdCtx, &externalproviderpb.EnrollRequest{})
+		thirdResult <- callErr
+	}()
+	select {
+	case <-entered:
+		cancelThird()
+	case <-time.After(5 * time.Second):
+		cancelThird()
+		t.Fatal("Enroll permit was not released after cancellation")
+	}
+	select {
+	case <-thirdResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final Enroll did not return")
+	}
+}
+
+func TestBrokerBoundsMintAuthenticationBeforeStore(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	store := &fakeStore{
+		rotate: func(ctx context.Context, _ string, _, _ CredentialDigest, _ time.Duration) (SessionAuthorization, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return SessionAuthorization{}, ctx.Err()
+		},
+	}
+	broker, err := newBroker(
+		store,
+		bytes.NewReader(make([]byte, 96)),
+		time.Minute,
+		WithUnaryAuthenticationLimits(UnaryAuthenticationLimits{MaxPending: 1}),
+	)
+	if err != nil {
+		t.Fatalf("newBroker() error = %v", err)
+	}
+	request := &externalproviderpb.MintSessionTokenRequest{RegistrationUid: "registration-a"}
+
+	firstCtx, cancelFirst := context.WithCancel(bearerContext("authorization", "Bearer "+string(testCredential(0x91))))
+	firstResult := make(chan error, 1)
+	go func() {
+		_, callErr := broker.MintSessionToken(firstCtx, request)
+		firstResult <- callErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first MintSessionToken did not reach store")
+	}
+
+	_, err = broker.MintSessionToken(
+		bearerContext("authorization", "Bearer "+string(testCredential(0x92))),
+		request,
+	)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("concurrent MintSessionToken() code = %v, want ResourceExhausted", status.Code(err))
+	}
+	select {
+	case <-entered:
+		t.Fatal("capacity-rejected MintSessionToken reached store")
+	default:
+	}
+
+	cancelFirst()
+	select {
+	case <-firstResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled MintSessionToken did not return")
+	}
+
+	thirdCtx, cancelThird := context.WithCancel(bearerContext("authorization", "Bearer "+string(testCredential(0x93))))
+	thirdResult := make(chan error, 1)
+	go func() {
+		_, callErr := broker.MintSessionToken(thirdCtx, request)
+		thirdResult <- callErr
+	}()
+	select {
+	case <-entered:
+		cancelThird()
+	case <-time.After(5 * time.Second):
+		cancelThird()
+		t.Fatal("MintSessionToken permit was not released after cancellation")
+	}
+	select {
+	case <-thirdResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final MintSessionToken did not return")
+	}
+}
+
+func TestBrokerValidatesUnaryAuthenticationLimits(t *testing.T) {
+	for _, limits := range []UnaryAuthenticationLimits{
+		{},
+		{MaxPending: maximumPendingUnaryAuthentications + 1},
+	} {
+		if _, err := newBroker(
+			&fakeStore{},
+			bytes.NewReader(make([]byte, 64)),
+			time.Minute,
+			WithUnaryAuthenticationLimits(limits),
+		); err == nil {
+			t.Fatalf("newBroker() accepted unary authentication limits %+v", limits)
+		}
+	}
+	if _, err := newBroker(
+		&fakeStore{},
+		bytes.NewReader(make([]byte, 64)),
+		time.Minute,
+		WithUnaryAuthenticationLimits(UnaryAuthenticationLimits{MaxPending: 1}),
+		WithUnaryAuthenticationLimits(UnaryAuthenticationLimits{MaxPending: 1}),
+	); err == nil {
+		t.Fatal("newBroker() accepted duplicate unary authentication limits")
+	}
+}
+
 func TestConnectFailsClosedWithoutRuntimeAndStoreAccess(t *testing.T) {
 	store := &fakeStore{}
 	broker, err := newBroker(store, bytes.NewReader(make([]byte, 32)), time.Minute)

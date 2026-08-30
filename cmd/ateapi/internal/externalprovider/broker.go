@@ -33,10 +33,12 @@ import (
 )
 
 const (
-	defaultMaxPendingConnectHandshakes uint32 = 64
-	maximumPendingConnectHandshakes    uint32 = 1024
-	defaultConnectHandshakeTimeout            = 15 * time.Second
-	maximumConnectHandshakeTimeout            = time.Minute
+	defaultMaxPendingUnaryAuthentications uint32 = 16
+	maximumPendingUnaryAuthentications    uint32 = 1024
+	defaultMaxPendingConnectHandshakes    uint32 = 64
+	maximumPendingConnectHandshakes       uint32 = 1024
+	defaultConnectHandshakeTimeout               = 15 * time.Second
+	maximumConnectHandshakeTimeout               = time.Minute
 )
 
 // Broker implements authentication and the external session stream. The ateapi
@@ -51,6 +53,9 @@ type Broker struct {
 	handshakeTimeout    time.Duration
 	pendingHandshakes   chan struct{}
 	handshakeConfigured bool
+
+	pendingUnaryAuthentications   chan struct{}
+	unaryAuthenticationConfigured bool
 }
 
 var _ externalproviderpb.ExternalProviderBrokerServer = (*Broker)(nil)
@@ -63,6 +68,30 @@ type BrokerOption func(*Broker) error
 type ConnectHandshakeLimits struct {
 	MaxPending uint32
 	Timeout    time.Duration
+}
+
+// UnaryAuthenticationLimits bounds the combined Enroll and MintSessionToken
+// calls which may reach the credential store concurrently. The public Broker
+// listener accepts opaque bearer credentials, so syntactically valid invalid
+// credentials must not be able to exhaust the shared ateapi database pool.
+type UnaryAuthenticationLimits struct {
+	MaxPending uint32
+}
+
+// WithUnaryAuthenticationLimits overrides the conservative shared bound for
+// Enroll and MintSessionToken authentication. It may be supplied at most once.
+func WithUnaryAuthenticationLimits(limits UnaryAuthenticationLimits) BrokerOption {
+	return func(broker *Broker) error {
+		if broker.unaryAuthenticationConfigured {
+			return errors.New("external provider unary authentication limits are already configured")
+		}
+		if limits.MaxPending == 0 || limits.MaxPending > maximumPendingUnaryAuthentications {
+			return errors.New("external provider unary authentication limits are invalid")
+		}
+		broker.pendingUnaryAuthentications = make(chan struct{}, limits.MaxPending)
+		broker.unaryAuthenticationConfigured = true
+		return nil
+	}
 }
 
 // WithConnectHandshakeLimits overrides the conservative pending-handshake
@@ -112,11 +141,12 @@ func newBroker(store ExternalProviderStore, random io.Reader, sessionTTL time.Du
 		return nil, fmt.Errorf("session TTL: %w", err)
 	}
 	broker := &Broker{
-		store:             store,
-		random:            random,
-		sessionTTL:        sessionTTL,
-		handshakeTimeout:  defaultConnectHandshakeTimeout,
-		pendingHandshakes: make(chan struct{}, defaultMaxPendingConnectHandshakes),
+		store:                       store,
+		random:                      random,
+		sessionTTL:                  sessionTTL,
+		handshakeTimeout:            defaultConnectHandshakeTimeout,
+		pendingHandshakes:           make(chan struct{}, defaultMaxPendingConnectHandshakes),
+		pendingUnaryAuthentications: make(chan struct{}, defaultMaxPendingUnaryAuthentications),
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -141,6 +171,11 @@ func (b *Broker) Enroll(ctx context.Context, req *externalproviderpb.EnrollReque
 	}
 	enrollmentDigest := digestCredential(enrollmentDigestDomain, enrollmentCredential)
 	clear(enrollmentCredential)
+	authentication, acquired := b.acquireUnaryAuthentication()
+	if !acquired {
+		return nil, status.Error(codes.ResourceExhausted, "too many pending credential authentications")
+	}
+	defer authentication.release()
 
 	for range credentialGenerationAttempts {
 		refreshCredential, err := generateCredential(b.random)
@@ -188,6 +223,11 @@ func (b *Broker) MintSessionToken(ctx context.Context, req *externalproviderpb.M
 	}
 	refreshDigest := digestCredential(refreshDigestDomain, refreshCredential)
 	clear(refreshCredential)
+	authentication, acquired := b.acquireUnaryAuthentication()
+	if !acquired {
+		return nil, status.Error(codes.ResourceExhausted, "too many pending credential authentications")
+	}
+	defer authentication.release()
 
 	for range credentialGenerationAttempts {
 		sessionCredential, err := generateCredential(b.random)
@@ -450,6 +490,30 @@ func cleanupConnectedSessionDetached(session *coordinatedSession) {
 type connectHandshakeLease struct {
 	slots chan struct{}
 	once  sync.Once
+}
+
+type unaryAuthenticationLease struct {
+	slots chan struct{}
+	once  sync.Once
+}
+
+func (b *Broker) acquireUnaryAuthentication() (*unaryAuthenticationLease, bool) {
+	if b == nil || b.pendingUnaryAuthentications == nil {
+		return nil, false
+	}
+	select {
+	case b.pendingUnaryAuthentications <- struct{}{}:
+		return &unaryAuthenticationLease{slots: b.pendingUnaryAuthentications}, true
+	default:
+		return nil, false
+	}
+}
+
+func (l *unaryAuthenticationLease) release() {
+	if l == nil || l.slots == nil {
+		return
+	}
+	l.once.Do(func() { <-l.slots })
 }
 
 func (b *Broker) acquireConnectHandshake() (*connectHandshakeLease, bool) {
