@@ -47,11 +47,15 @@ jobs:
           TAG="${{ inputs.tag }}"
           if [[ -z "${TAG}" ]]; then
             BRANCH="${GITHUB_REF_NAME//\//-}"
-            SHA="$(git rev-parse --short HEAD)"
+            SHA="$(git rev-parse HEAD)"
             TAG="${BRANCH}-${SHA}"
           fi
           if [[ ! "${TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
             echo "::error::Tag '${TAG}' is not a valid immutable OCI tag"
+            exit 1
+          fi
+          if [[ "${TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then
+            echo "::error::The moving 'latest' tag is forbidden"
             exit 1
           fi
           if [[ "${{ inputs.create_release }}" == "true" ]]; then

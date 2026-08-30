@@ -42,14 +42,16 @@ require_literal 'CHART_REPOSITORY: oci://ghcr.io/${{ steps.tag.outputs.registry_
 require_literal 'run: ./hack/refuse-release-overwrite.sh'
 require_literal 'for component in ateapi atecontroller atelet ateom-gvisor ateom-microvm podcertcontroller atenet substrate-release-verify; do'
 require_literal '--tags "${IMAGE_TAG}"'
+require_literal 'SHA="$(git rev-parse HEAD)"'
+require_literal 'if [[ "${TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then'
 require_literal '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
 if grep -Eq 'uses:[[:space:]]+[^#[:space:]]+@(v[0-9]+|main|master)([[:space:]]|$)' "${WORKFLOW}"; then
   printf '%s contains a floating action reference\n' "${WORKFLOW}" >&2
   exit 1
 fi
-if grep -Eq '(^|[^[:alnum:]_-])latest([^[:alnum:]_-]|$)' "${WORKFLOW}"; then
-  printf '%s must never publish or run on latest\n' "${WORKFLOW}" >&2
+if grep -Eq -- '--tags.*(^|[ ,])latest([ ,]|$)|IMAGE_TAG:[[:space:]]*latest([[:space:]]|$)' "${WORKFLOW}"; then
+  printf '%s contains a publication path for the moving latest tag\n' "${WORKFLOW}" >&2
   exit 1
 fi
 if grep -Fq 'ghcr.io/kagent-dev/substrate' "${WORKFLOW}"; then
@@ -132,6 +134,7 @@ expect_guard_failure FAKE_EXISTING_RELEASE=true
 expect_guard_failure FAKE_RELEASE_PROBE_ERROR=true
 expect_guard_failure FAKE_EXISTING_CHART=substrate
 expect_guard_failure RELEASE_TAG=v0.0.22-rc1
+expect_guard_failure CREATE_RELEASE=false RELEASE_TAG=LaTeSt
 expect_guard_failure IMAGE_REGISTRY=ghcr.io/kagent-dev/substrate
 
 printf 'Release workflow is fork-scoped, immutable, pinned, and overwrite-protected.\n'

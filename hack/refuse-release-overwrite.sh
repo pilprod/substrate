@@ -37,6 +37,9 @@ fi
 if [[ ! "${RELEASE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
   fail "RELEASE_TAG is not a valid OCI tag"
 fi
+if [[ "${RELEASE_TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then
+  fail "the moving latest tag is forbidden"
+fi
 if [[ ! "${GITHUB_REPOSITORY}" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]]; then
   fail "GITHUB_REPOSITORY must be one lowercase owner/repository path"
 fi
