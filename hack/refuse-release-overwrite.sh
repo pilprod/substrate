@@ -65,7 +65,10 @@ probe_registry_absence() {
   if [[ "${status}" -eq 0 ]]; then
     fail "${kind} coordinate already exists: ${coordinate}"
   fi
-  if ! grep -Eiq '(manifest unknown|name unknown|not found|[[:space:]]404([^0-9]|$))' <<<"${output}"; then
+  if [[ "${status}" -eq 126 || "${status}" -eq 127 ]]; then
+    fail "could not execute the ${kind} coordinate probe: ${coordinate}"
+  fi
+  if ! grep -Eiq '(manifest unknown|name unknown|failed to inspect:.*: not found|response status( code)?[^[:cntrl:]]*404|unexpected status[^[:cntrl:]]*404|HTTP[^[:cntrl:]]*404([^0-9]|$))' <<<"${output}"; then
     fail "could not prove ${kind} coordinate is absent: ${coordinate}"
   fi
 }

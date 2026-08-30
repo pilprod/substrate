@@ -73,6 +73,14 @@ if [[ "${FAKE_AMBIGUOUS_IMAGE_ERROR:-}" == "true" ]]; then
   printf 'registry timeout\n' >&2
   exit 1
 fi
+if [[ "${FAKE_MISSING_IMAGE_TOOL:-}" == "true" ]]; then
+  printf 'docker: command not found\n' >&2
+  exit 127
+fi
+if [[ "${FAKE_GENERIC_NOT_FOUND:-}" == "true" ]]; then
+  printf 'credential helper not found\n' >&2
+  exit 1
+fi
 printf 'manifest unknown: not found\n' >&2
 exit 1
 EOF
@@ -104,7 +112,7 @@ cat > "${fake_bin}/helm" <<'EOF'
 if [[ "${FAKE_EXISTING_CHART:-}" != "" && "$*" == *"/${FAKE_EXISTING_CHART}"* ]]; then
   exit 0
 fi
-printf 'not found\n' >&2
+printf 'response status code 404: not found\n' >&2
 exit 1
 EOF
 chmod +x "${fake_bin}/docker" "${fake_bin}/git" "${fake_bin}/gh" "${fake_bin}/helm"
@@ -128,6 +136,8 @@ expect_guard_failure() {
 
 expect_guard_failure FAKE_EXISTING_IMAGE=ateapi
 expect_guard_failure FAKE_AMBIGUOUS_IMAGE_ERROR=true
+expect_guard_failure FAKE_MISSING_IMAGE_TOOL=true
+expect_guard_failure FAKE_GENERIC_NOT_FOUND=true
 expect_guard_failure FAKE_EXISTING_TAG=true
 expect_guard_failure FAKE_TAG_PROBE_ERROR=true
 expect_guard_failure FAKE_EXISTING_RELEASE=true
