@@ -58,6 +58,10 @@ jobs:
             echo "::error::The moving 'latest' tag is forbidden"
             exit 1
           fi
+          if [[ "${{ inputs.create_release }}" == "false" && "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::SemVer release coordinates are reserved for create_release=true"
+            exit 1
+          fi
           if [[ "${{ inputs.create_release }}" == "true" ]]; then
             if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::error::Tag '${TAG}' must match vMAJOR.MINOR.PATCH when creating a release (e.g. v1.2.3)"

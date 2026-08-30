@@ -52,6 +52,9 @@ fi
 if [[ "${CREATE_RELEASE}" == "true" && ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   fail "a GitHub release tag must match vMAJOR.MINOR.PATCH"
 fi
+if [[ "${CREATE_RELEASE}" == "false" && "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  fail "SemVer release coordinates are reserved for CREATE_RELEASE=true"
+fi
 
 probe_registry_absence() {
   local kind="$1"

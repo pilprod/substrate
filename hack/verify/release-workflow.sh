@@ -55,6 +55,7 @@ require_literal 'if grep -Fq "image: ${source_registry}/${component}:" "${render
 require_literal 'if ! grep -Fq "image: ${agentgateway_image}" "${rendered_chart}"; then'
 require_literal 'SHA="$(git rev-parse HEAD)"'
 require_literal 'if [[ "${TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then'
+require_literal 'if [[ "${{ inputs.create_release }}" == "false" && "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then'
 require_literal '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
 if grep -Eq 'uses:[[:space:]]+[^#[:space:]]+@(v[0-9]+|main|master)([[:space:]]|$)' "${WORKFLOW}"; then
@@ -182,6 +183,7 @@ expect_guard_failure FAKE_EXISTING_RELEASE=true
 expect_guard_failure FAKE_RELEASE_PROBE_ERROR=true
 expect_guard_failure FAKE_EXISTING_CHART=substrate
 expect_guard_failure RELEASE_TAG=v0.0.22-rc1
+expect_guard_failure CREATE_RELEASE=false RELEASE_TAG=v0.0.22
 expect_guard_failure CREATE_RELEASE=false RELEASE_TAG=LaTeSt
 expect_guard_failure IMAGE_REGISTRY=ghcr.io/kagent-dev/substrate
 

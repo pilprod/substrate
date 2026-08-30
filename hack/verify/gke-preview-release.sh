@@ -100,7 +100,15 @@ if [[ "${FAKE_IMAGE_LOOKUP:-missing}" == "existing" ]]; then
   exit 0
 fi
 if [[ "${FAKE_IMAGE_LOOKUP:-missing}" == "error" ]]; then
-  printf 'registry unavailable\n' >&2
+  printf 'response status code 503: registry unavailable\n' >&2
+  exit 1
+fi
+if [[ "${FAKE_IMAGE_LOOKUP:-missing}" == "missing-tool" ]]; then
+  printf 'docker: command not found\n' >&2
+  exit 127
+fi
+if [[ "${FAKE_IMAGE_LOOKUP:-missing}" == "generic-not-found" ]]; then
+  printf 'credential helper not found\n' >&2
   exit 1
 fi
 printf 'manifest unknown\n' >&2
@@ -113,10 +121,18 @@ if [[ "${FAKE_CHART_LOOKUP:-missing}" == "existing" ]]; then
   exit 0
 fi
 if [[ "${FAKE_CHART_LOOKUP:-missing}" == "error" ]]; then
-  printf 'registry unavailable\n' >&2
+  printf 'response status code 503: registry unavailable\n' >&2
   exit 1
 fi
-printf 'not found\n' >&2
+if [[ "${FAKE_CHART_LOOKUP:-missing}" == "missing-tool" ]]; then
+  printf 'helm: command not found\n' >&2
+  exit 127
+fi
+if [[ "${FAKE_CHART_LOOKUP:-missing}" == "generic-not-found" ]]; then
+  printf 'credential helper not found\n' >&2
+  exit 1
+fi
+printf 'response status code 404: not found\n' >&2
 exit 1
 EOF
 chmod +x "${fake_bin}/docker" "${fake_bin}/helm"
@@ -146,6 +162,26 @@ if env "${guard_env[@]}" FAKE_CHART_LOOKUP=existing "${OVERWRITE_GUARD}" >/dev/n
 fi
 if env "${guard_env[@]}" FAKE_IMAGE_LOOKUP=error "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
   printf 'overwrite guard treated an unknown registry failure as absence\n' >&2
+  exit 1
+fi
+if env "${guard_env[@]}" FAKE_IMAGE_LOOKUP=missing-tool "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
+  printf 'overwrite guard treated a missing image probe as absence\n' >&2
+  exit 1
+fi
+if env "${guard_env[@]}" FAKE_IMAGE_LOOKUP=generic-not-found "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
+  printf 'overwrite guard treated a missing image credential helper as coordinate absence\n' >&2
+  exit 1
+fi
+if env "${guard_env[@]}" FAKE_CHART_LOOKUP=error "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
+  printf 'overwrite guard treated an unknown chart registry failure as absence\n' >&2
+  exit 1
+fi
+if env "${guard_env[@]}" FAKE_CHART_LOOKUP=missing-tool "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
+  printf 'overwrite guard treated a missing chart probe as absence\n' >&2
+  exit 1
+fi
+if env "${guard_env[@]}" FAKE_CHART_LOOKUP=generic-not-found "${OVERWRITE_GUARD}" >/dev/null 2>&1; then
+  printf 'overwrite guard treated a missing chart credential helper as coordinate absence\n' >&2
   exit 1
 fi
 

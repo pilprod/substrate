@@ -51,7 +51,11 @@ refuse_existing() {
     printf '%s coordinate already exists and will not be overwritten: %s\n' "${kind}" "${coordinate}" >&2
     exit 1
   fi
-  if grep -Eiq '(manifest unknown|name unknown|not found|(^|[^0-9])404([^0-9]|$))' <<< "${output}"; then
+  if [[ "${status}" -eq 126 || "${status}" -eq 127 ]]; then
+    printf 'could not execute the %s coordinate probe: %s\n' "${kind}" "${coordinate}" >&2
+    exit 1
+  fi
+  if grep -Eiq '(manifest unknown|name unknown|failed to inspect:.*: not found|response status( code)?[^[:cntrl:]]*404|unexpected status[^[:cntrl:]]*404|HTTP[^[:cntrl:]]*404([^0-9]|$))' <<< "${output}"; then
     return 0
   fi
 
