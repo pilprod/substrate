@@ -91,10 +91,11 @@ func (r *sessionRegistry) install(registrationUID string, generation uint64) (*s
 }
 
 // installPrepared installs a newer generation only after prepare has made the
-// previous generation fail closed. prepare runs under the stable
-// per-registration lifecycle gate and without the registry's global lock, so
-// it may perform bounded persistence I/O. If prepare fails, the previous lease
-// remains current and the generation is not consumed.
+// previous generation, or any retained no-current lifecycle state, fail
+// closed. prepare runs under the stable per-registration lifecycle gate and
+// without the registry's global lock, so it may perform bounded persistence
+// I/O. If prepare fails, the previous lease or retained lifecycle state remains
+// authoritative and the generation is not consumed.
 func (r *sessionRegistry) installPrepared(
 	registrationUID string,
 	generation uint64,
@@ -127,7 +128,7 @@ func (r *sessionRegistry) installPrepared(
 	if tracked && generation <= highest {
 		return nil, errSessionGenerationNotNewer
 	}
-	if previous.lease != nil && prepare != nil {
+	if prepare != nil {
 		if err := prepare(lifecycle, previous); err != nil {
 			return nil, err
 		}

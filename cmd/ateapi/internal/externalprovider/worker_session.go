@@ -98,16 +98,20 @@ func newWorkerSessionLifecycle(
 	return &workerSessionLifecycle{registry: registry, availability: availability, routes: routes}, nil
 }
 
-// install replaces a provider generation only after the old route has stopped
-// accepting assignments and every conservatively owned Worker is OFFLINE. The
-// old route remains indexed while OFFLINE is in progress, then is withdrawn
-// immediately before the registry fences the old lease.
+// install replaces a provider generation only after the old or retained route
+// has stopped accepting assignments and every conservatively owned Worker is
+// OFFLINE. The route remains indexed while OFFLINE is in progress, then is
+// withdrawn immediately before the registry installs the new lease. This also
+// recovers lifecycle state left behind after a failed no-current generation.
 func (l *workerSessionLifecycle) install(ctx context.Context, registrationUID string, generation uint64) (*sessionLease, error) {
 	if l == nil || ctx == nil {
 		return nil, errInvalidWorkerSessionLifecycle
 	}
 	return l.registry.installPrepared(registrationUID, generation, func(state *sessionLifecycleState, current sessionEntry) error {
 		route := l.currentRoute(current.lease)
+		if route == nil {
+			route = l.retainedRoute(registrationUID)
+		}
 		if route != nil && !l.routes.Close(route) {
 			return errSessionRouteNotPublished
 		}
@@ -126,7 +130,10 @@ func (l *workerSessionLifecycle) install(ctx context.Context, registrationUID st
 
 func (l *workerSessionLifecycle) currentRoute(lease *sessionLease) workerSessionRoute {
 	if directory, ok := l.routes.(*SessionRouteDirectory); ok {
-		return directory.routeForLease(lease)
+		if route := directory.routeForLease(lease); route != nil {
+			return route
+		}
+		return nil
 	}
 	if authority, ok := l.routes.(interface {
 		CurrentRoute(*sessionLease) workerSessionRoute
@@ -138,7 +145,10 @@ func (l *workerSessionLifecycle) currentRoute(lease *sessionLease) workerSession
 
 func (l *workerSessionLifecycle) retainedRoute(registrationUID string) workerSessionRoute {
 	if directory, ok := l.routes.(*SessionRouteDirectory); ok {
-		return directory.routeForRegistration(registrationUID)
+		if route := directory.routeForRegistration(registrationUID); route != nil {
+			return route
+		}
+		return nil
 	}
 	if authority, ok := l.routes.(interface {
 		CurrentRouteForRegistration(string) workerSessionRoute
@@ -364,8 +374,9 @@ func (l *workerSessionLifecycle) cleanupUnpublished(ctx context.Context, lease *
 // authenticated claim from installing after durable revocation.
 //
 // Cancellation happens before any fallible OFFLINE transition. A failed
-// cleanup therefore leaves a retryable, non-routable lease and never permits
-// an establishment already past durable claim to publish after revocation.
+// cleanup therefore leaves retryable, non-routable lifecycle state and never
+// permits an establishment already past durable claim to publish after
+// revocation.
 func (l *workerSessionLifecycle) revokeCurrent(ctx context.Context, registrationUID string) error {
 	if l == nil || ctx == nil || !IsValidIdentity(registrationUID) {
 		return errInvalidWorkerSessionLifecycle
@@ -377,7 +388,8 @@ func (l *workerSessionLifecycle) revokeCurrent(ctx context.Context, registration
 		var route workerSessionRoute
 		if current.lease != nil {
 			route = l.currentRoute(current.lease)
-		} else {
+		}
+		if route == nil {
 			route = l.retainedRoute(registrationUID)
 		}
 		closed := false

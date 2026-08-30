@@ -379,6 +379,81 @@ func TestSessionAuthorityRevocationCleansNoCurrentWorkerTombstone(t *testing.T) 
 	})
 }
 
+func TestSessionAuthorityRevocationWithdrawsRetainedRouteBehindUnpublishedCurrentGeneration(t *testing.T) {
+	fixture := newRevocationFixture(t)
+	makeRevocationNoCurrentTombstone(t, fixture)
+	// Install directly at the registry boundary to preserve the adversarial
+	// state which revocation must still recover if a future caller bypasses the
+	// lifecycle prepare hook.
+	second, err := fixture.authority.registry.install("registration-a", 2)
+	if err != nil {
+		t.Fatalf("install generation 2 over tombstone: %v", err)
+	}
+	if current, exists := fixture.authority.registry.lookup("registration-a", 2); !exists || current != second {
+		t.Fatal("generation 2 was not current before revocation")
+	}
+	if route := fixture.authority.routes.routeForLease(second); route != nil {
+		t.Fatalf("generation 2 unexpectedly published route %v", route)
+	}
+	if stats := fixture.authority.routes.Stats(); stats.Routes != 1 || stats.Bindings != 1 {
+		t.Fatalf("retained generation 1 route stats = %+v, want one stale route", stats)
+	}
+
+	store := &fakeStore{revokeRegistration: func(context.Context, string) error { return nil }}
+	if err := fixture.authority.RevokeExternalProviderRegistration(context.Background(), store, "registration-a"); err != nil {
+		t.Fatalf("RevokeExternalProviderRegistration() error = %v", err)
+	}
+	select {
+	case <-second.done():
+	default:
+		t.Fatal("unpublished generation 2 was not canceled")
+	}
+	if _, current := fixture.authority.registry.lookup("registration-a", 2); current {
+		t.Fatal("unpublished generation 2 remained current")
+	}
+	if stats := fixture.authority.routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("revocation retained stale generation 1 route stats %+v", stats)
+	}
+	assertRevocationWorkerState(t, fixture, ateapipb.WorkerState_WORKER_STATE_OFFLINE)
+	fixture.authority.registry.mu.RLock()
+	_, retained := fixture.authority.registry.lifecycleStates["registration-a"]
+	fixture.authority.registry.mu.RUnlock()
+	if retained {
+		t.Fatal("revocation retained lifecycle after stale-route cleanup")
+	}
+}
+
+func TestWorkerSessionInstallRecoversNoCurrentTombstoneBeforeNewGeneration(t *testing.T) {
+	fixture := newRevocationFixture(t)
+	makeRevocationNoCurrentTombstone(t, fixture)
+	second, err := fixture.session.coordinator.lifecycle.install(context.Background(), "registration-a", 2)
+	if err != nil {
+		t.Fatalf("lifecycle install generation 2 over tombstone: %v", err)
+	}
+	if current, exists := fixture.authority.registry.lookup("registration-a", 2); !exists || current != second {
+		t.Fatal("generation 2 was not current after tombstone recovery")
+	}
+	if stats := fixture.authority.routes.Stats(); stats != (SessionRouteDirectoryStats{}) {
+		t.Fatalf("lifecycle install retained stale route stats %+v", stats)
+	}
+	assertRevocationWorkerState(t, fixture, ateapipb.WorkerState_WORKER_STATE_OFFLINE)
+	fixture.authority.registry.mu.RLock()
+	lifecycle := fixture.authority.registry.lifecycleStates["registration-a"]
+	owned := 0
+	if lifecycle != nil {
+		owned = len(lifecycle.ownedWorkers)
+	}
+	fixture.authority.registry.mu.RUnlock()
+	if lifecycle == nil || owned != 0 {
+		t.Fatalf("generation 2 lifecycle = (%v, %d owned), want empty ownership retained for current lease", lifecycle, owned)
+	}
+
+	store := &fakeStore{revokeRegistration: func(context.Context, string) error { return nil }}
+	if err := fixture.authority.RevokeExternalProviderRegistration(context.Background(), store, "registration-a"); err != nil {
+		t.Fatalf("cleanup revoke error = %v", err)
+	}
+}
+
 func TestSessionAuthorityRevocationWithoutLiveSessionIsIdempotent(t *testing.T) {
 	authority, err := NewSessionAuthority(DefaultSessionRuntimeConfig())
 	if err != nil {
@@ -498,7 +573,7 @@ func TestEnrollmentAdminRevocationTerminatesLiveBrokerAndDeniesMintAndReconnect(
 	if _, current := authority.registry.lookup(claim.Registration.UID, claim.Generation); current {
 		t.Fatal("admin revoke left the live generation current")
 	}
-	worker = waitCoordinatorWorkerState(t, runtime, worker.GetMetadata().GetName(), ateapipb.WorkerState_WORKER_STATE_OFFLINE)
+	waitCoordinatorWorkerState(t, runtime, worker.GetMetadata().GetName(), ateapipb.WorkerState_WORKER_STATE_OFFLINE)
 
 	mintCtx := connectTestContext(context.Background(), 0xb2)
 	if response, err := broker.MintSessionToken(mintCtx, &externalproviderpb.MintSessionTokenRequest{RegistrationUid: claim.Registration.UID}); response != nil || status.Code(err) != codes.Unauthenticated {
