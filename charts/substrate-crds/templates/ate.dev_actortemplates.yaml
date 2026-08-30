@@ -390,9 +390,11 @@ spec:
               sandboxClass:
                 default: gvisor
                 description: |-
-                  SandboxClass selects the sandbox runtime family this template's actors run
-                  on. Only worker pools whose SandboxClass matches are eligible. Snapshots are
-                  not portable across classes, so this is a hard gate, AND'd with WorkerSelector
+                  SandboxClass selects the execution isolation family this template's actors
+                  run on. Only capacity whose SandboxClass matches is eligible. The
+                  host-process-hardened class is restricted to ExternalSlot; WorkerPool and
+                  SandboxConfig remain limited to in-cluster runtimes. Snapshots are not
+                  portable across classes, so this is a hard gate, AND'd with WorkerSelector
                   and the actor's worker_selector. Defaults to gvisor.
 
 
@@ -405,6 +407,7 @@ spec:
                 enum:
                 - gvisor
                 - microvm
+                - host-process-hardened
                 type: string
               snapshotsConfig:
                 description: |-
@@ -773,8 +776,12 @@ spec:
             - message: volumes are not supported for ExternalSlot
               rule: '!(has(self.workerProvider) && self.workerProvider == ''ExternalSlot'')
                 || !has(self.volumes) || size(self.volumes) == 0'
-            - message: 'onResume.fromData: Golden is not supported when sandboxClass
-                is ''gvisor'''
+            - message: sandboxClass 'host-process-hardened' requires workerProvider
+                'ExternalSlot'
+              rule: '!has(self.sandboxClass) || self.sandboxClass != ''host-process-hardened''
+                || (has(self.workerProvider) && self.workerProvider == ''ExternalSlot'')'
+            - message: 'onResume.fromData: Golden is supported only when sandboxClass
+                is ''microvm'''
               rule: '(has(self.sandboxClass) && self.sandboxClass == ''microvm'')
                 || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData)
                 ? self.snapshotsConfig.onResume.fromData : ''ColdBoot'') != ''Golden'''

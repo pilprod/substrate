@@ -568,7 +568,8 @@ type SnapshotsConfig struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') ? !has(self.snapshotsConfig.location) : has(self.snapshotsConfig.location)",message="snapshotsConfig.location is required for KubernetesPod and forbidden for ExternalSlot"
 // +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.workerSelector)",message="workerSelector is not supported for ExternalSlot"
 // +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.volumes) || size(self.volumes) == 0",message="volumes are not supported for ExternalSlot"
-// +kubebuilder:validation:XValidation:rule="(has(self.sandboxClass) && self.sandboxClass == 'microvm') || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData) ? self.snapshotsConfig.onResume.fromData : 'ColdBoot') != 'Golden'",message="onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'"
+// +kubebuilder:validation:XValidation:rule="!has(self.sandboxClass) || self.sandboxClass != 'host-process-hardened' || (has(self.workerProvider) && self.workerProvider == 'ExternalSlot')",message="sandboxClass 'host-process-hardened' requires workerProvider 'ExternalSlot'"
+// +kubebuilder:validation:XValidation:rule="(has(self.sandboxClass) && self.sandboxClass == 'microvm') || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData) ? self.snapshotsConfig.onResume.fromData : 'ColdBoot') != 'Golden'",message="onResume.fromData: Golden is supported only when sandboxClass is 'microvm'"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.requests)",message="spec.resources.requests is not supported; actors are sized by spec.resources.limits only"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.claims)",message="spec.resources.claims is not supported"
 // A micro-VM's guest RAM is the declared memory limit minus a fixed VMM reserve
@@ -607,9 +608,11 @@ type ActorTemplateSpec struct {
 	// +required
 	SnapshotsConfig SnapshotsConfig `json:"snapshotsConfig"`
 
-	// SandboxClass selects the sandbox runtime family this template's actors run
-	// on. Only worker pools whose SandboxClass matches are eligible. Snapshots are
-	// not portable across classes, so this is a hard gate, AND'd with WorkerSelector
+	// SandboxClass selects the execution isolation family this template's actors
+	// run on. Only capacity whose SandboxClass matches is eligible. The
+	// host-process-hardened class is restricted to ExternalSlot; WorkerPool and
+	// SandboxConfig remain limited to in-cluster runtimes. Snapshots are not
+	// portable across classes, so this is a hard gate, AND'd with WorkerSelector
 	// and the actor's worker_selector. Defaults to gvisor.
 	//
 	// TODO: This is almost certainly insufficient.  We have to decide a number of things:
@@ -623,7 +626,7 @@ type ActorTemplateSpec struct {
 	//
 	//
 	// +optional
-	// +kubebuilder:validation:Enum=gvisor;microvm
+	// +kubebuilder:validation:Enum=gvisor;microvm;host-process-hardened
 	// +kubebuilder:default=gvisor
 	SandboxClass SandboxClass `json:"sandboxClass,omitempty"`
 

@@ -57,6 +57,13 @@ func TestWorkerPoolValidation(t *testing.T) {
 		mutate:  func(wp *WorkerPool) {},
 		wantErr: false,
 	}, {
+		name: "worker pool rejects external host process sandbox",
+		mutate: func(wp *WorkerPool) {
+			wp.Spec.SandboxClass = SandboxClassHostProcessHardened
+		},
+		wantErr: true,
+		errMsg:  "Unsupported value",
+	}, {
 		name: "replicas below minimum",
 		mutate: func(wp *WorkerPool) {
 			wp.Spec.Replicas = -1

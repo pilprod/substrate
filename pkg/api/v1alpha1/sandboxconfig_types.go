@@ -18,8 +18,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// SandboxClass selects the sandbox runtime family. It is shared by WorkerPool
-// (which family a pool runs) and SandboxConfig (which family a config is for).
+// SandboxClass selects an execution isolation family. Individual API fields
+// constrain which values they accept: WorkerPool and SandboxConfig are limited
+// to in-cluster runtimes, while ActorTemplate may also select an ExternalSlot
+// host-process runtime.
 type SandboxClass string
 
 const (
@@ -28,6 +30,10 @@ const (
 	// SandboxClassMicroVM is the micro-VM runtime (cmd/ateom-microvm); needs
 	// /dev/kvm and vhost devices.
 	SandboxClassMicroVM SandboxClass = "microvm"
+	// SandboxClassHostProcessHardened is an externally hosted process whose
+	// isolation contract is enforced by the enrolled ExternalSlot provider. It
+	// is valid only on ActorTemplates that explicitly select ExternalSlot.
+	SandboxClassHostProcessHardened SandboxClass = "host-process-hardened"
 )
 
 // AssetFile is one content-addressed file that atelet fetches for a sandbox

@@ -146,6 +146,11 @@ func TestSandboxConfigValidation(t *testing.T) {
 		sc:      sandboxConfig("ok-microvm-arm64", "microvm", map[string]map[string]AssetFile{"arm64": microVMAssets()}),
 		wantErr: false,
 	}, {
+		name:    "sandbox config rejects external host process sandbox",
+		sc:      sandboxConfig("bad-host-process", SandboxClassHostProcessHardened, nil),
+		wantErr: true,
+		errMsg:  "Unsupported value",
+	}, {
 		name: "microvm missing an asset",
 		sc: sandboxConfig("bad-microvm", "microvm", map[string]map[string]AssetFile{"amd64": func() map[string]AssetFile {
 			m := microVMAssets()

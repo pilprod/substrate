@@ -121,6 +121,27 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 	}, {
+		name: "external worker provider accepts hardened host process sandbox",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SandboxClass = SandboxClassHostProcessHardened
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
+		},
+		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.SandboxClass != SandboxClassHostProcessHardened {
+				t.Errorf("sandboxClass = %q, want %q", at.Spec.SandboxClass, SandboxClassHostProcessHardened)
+			}
+		},
+	}, {
+		name: "kubernetes worker provider rejects hardened host process sandbox",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassHostProcessHardened
+		},
+		wantErr: true,
+		errMsg:  "sandboxClass 'host-process-hardened' requires workerProvider 'ExternalSlot'",
+	}, {
 		name: "external worker provider rejects snapshot location",
 		mutate: func(at *ActorTemplate) {
 			at.Spec.WorkerProvider = WorkerProviderExternalSlot
@@ -749,7 +770,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
 		},
 		wantErr: true,
-		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+		errMsg:  "onResume.fromData: Golden is supported only when sandboxClass is 'microvm'",
 	}, {
 		name: "SnapshotsConfig: onResume.fromData=Golden, SandboxClass unset (defaults to gvisor, invalid)",
 		mutate: func(at *ActorTemplate) {
@@ -757,7 +778,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
 		},
 		wantErr: true,
-		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+		errMsg:  "onResume.fromData: Golden is supported only when sandboxClass is 'microvm'",
 	}, {
 		name: "Volumes: 1 DurableDir mount is valid",
 		mutate: func(at *ActorTemplate) {
