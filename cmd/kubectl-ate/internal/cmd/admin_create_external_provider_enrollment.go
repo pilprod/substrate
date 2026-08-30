@@ -65,7 +65,7 @@ renders the credential through JSON or YAML output.`,
 			return err
 		}
 		defer credentialOutput.Abort()
-		apiClient, err := ateclient.NewClient(cmd.Context(), kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
+		apiClient, err := ateclient.NewClient(cmd.Context(), kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled, serverCAFile, serverName)
 		if err != nil {
 			return fmt.Errorf("failed to connect to ate-api-server: %w", err)
 		}

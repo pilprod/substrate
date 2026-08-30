@@ -168,6 +168,48 @@ func TestServerTLSConfig(t *testing.T) {
 	}
 }
 
+func TestResolveServerTLSConfigFromFile(t *testing.T) {
+	ca := testCAPEM(t, "external-profile-ca")
+	caFile := filepath.Join(t.TempDir(), "server-ca.pem")
+	if err := os.WriteFile(caFile, ca, 0o600); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+
+	cfg, err := resolveServerTLSConfig(context.Background(), fake.NewSimpleClientset(), caFile, "api.ate-system.svc")
+	if err != nil {
+		t.Fatalf("resolveServerTLSConfig: %v", err)
+	}
+	if got, want := cfg.ServerName, "api.ate-system.svc"; got != want {
+		t.Errorf("ServerName=%q want %q", got, want)
+	}
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Errorf("MinVersion=%x want %x", cfg.MinVersion, tls.VersionTLS13)
+	}
+	wantPool := x509.NewCertPool()
+	wantPool.AppendCertsFromPEM(ca)
+	if !cfg.RootCAs.Equal(wantPool) {
+		t.Error("RootCAs does not match the explicit CA file")
+	}
+}
+
+func TestResolveServerTLSConfigRejectsPartialOverride(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	for _, tc := range []struct {
+		name       string
+		caFile     string
+		serverName string
+	}{
+		{name: "CA only", caFile: "/tmp/unused.pem"},
+		{name: "server name only", serverName: "api.ate-system.svc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := resolveServerTLSConfig(context.Background(), clientset, tc.caFile, tc.serverName); err == nil {
+				t.Fatal("resolveServerTLSConfig: want error, got nil")
+			}
+		})
+	}
+}
+
 func TestServerTLSConfigErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
