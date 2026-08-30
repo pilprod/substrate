@@ -22,6 +22,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: atenet-router
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -49,6 +50,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "substrate.fullname" (list "atenet-router" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: v1
 kind: ConfigMap

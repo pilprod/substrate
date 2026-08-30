@@ -31,6 +31,13 @@ createNamespace: false
 # worker, network data plane, storage backend, and beta Pod Certificate API.
 profile: standard
 
+# Create chart-managed Role, ClusterRole, RoleBinding, and
+# ClusterRoleBinding resources. Keep ServiceAccounts independent so a platform
+# installer can provide least-privilege RBAC declaratively before Helm installs
+# the workloads. Existing installs retain the historical behavior by default.
+rbac:
+  create: true
+
 postgres:
   storageSize: 1Gi
   connectionString: ""
@@ -75,6 +82,27 @@ externalProviderBroker:
   enabled: false
   containerPort: 8443
   sessionTokenTTL: 5m
+  # Optional Gateway API adapter for the official agentgateway controller.
+  # The chart creates only Gateway/TLSRoute resources. Platform infrastructure
+  # owns the GatewayClass, controller, and CRDs. The application Gateway asks
+  # that controller to generate and manage its data-plane Deployment/Service.
+  gateway:
+    enabled: false
+    gatewayClassName: agentgateway
+    listenerPort: 443
+    # Exact TLS SNI routed to the Broker. Because TLS is passed through, this
+    # name must also be valid on the ate-api-server Broker certificate.
+    hostname: ""
+    annotations: {}
+    # Optional static addresses requested for the controller-generated Gateway
+    # Service. IPAddress accepts an IPv4 or IPv6 literal. Leave empty unless the
+    # target platform has reserved the address for this Gateway.
+    addresses: []
+    infrastructure:
+      # Optional reference to an application-owned configuration object such as
+      # AgentgatewayParameters. The referenced resource is not created here.
+      # Set group, kind, and name together; an empty map omits parametersRef.
+      parametersRef: {}
 
 # Required only by profile=external-control-plane-only. The chart references a
 # pre-created Secret and never accepts or creates its value. The selected key is
@@ -94,6 +122,22 @@ externalControlPlane:
         credentialBundleKey: server-credential-bundle.pem
         clientCAKey: client-ca.pem
     controller:
+      existingSecret:
+        name: ""
+        credentialBundleKey: client-credential-bundle.pem
+        serverCAKey: server-ca.pem
+    # The external Actor egress gateway has two deliberately separate TLS
+    # roles. egressGateway is the HTTPS server identity presented to external
+    # Actors. egressAuthorizer is the atenet client identity used only for the
+    # online AuthorizeExternalActorEgress call back to ate-api-server.
+    egressGateway:
+      serverName: ""
+      existingSecret:
+        name: ""
+        credentialBundleKey: server-credential-bundle.pem
+        serverCAKey: server-ca.pem
+    egressAuthorizer:
+      principal: ""
       existingSecret:
         name: ""
         credentialBundleKey: client-credential-bundle.pem
@@ -121,6 +165,10 @@ externalControlPlane:
     # Complete NetworkPolicyEgressRule objects for the controller. It needs the
     # Kubernetes API and ate-api-server, but never PostgreSQL or provider ingress.
     controllerEgress: []
+    # Complete NetworkPolicyEgressRule objects for atenet-egress destinations.
+    # DNS and the online authorization callback to ate-api-server are added by
+    # the chart; Actor destinations remain denied unless listed here.
+    egressGatewayEgress: []
 
 otel:
   endpoint: ""
@@ -136,6 +184,6 @@ images:
   postgres: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
   rustfs: rustfs/rustfs:1.0.0-beta.3@sha256:378642b05b7dcb4849fb77ebe6aca4ced1c3f66e7e504247df95a5c9018d3358
   awsCli: amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73
-  agentgateway: ghcr.io/kagent-dev/substrate/agentgateway:dfd154e6a731
+  agentgateway: ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429
   coredns: coredns/coredns:1.11.1
   busybox: busybox:1.36

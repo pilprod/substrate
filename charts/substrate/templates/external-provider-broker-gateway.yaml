@@ -1,0 +1,84 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.externalProviderBroker.gateway.enabled }}
+{{- $gateway := .Values.externalProviderBroker.gateway }}
+{{- $name := include "substrate.fullname" (list "external-provider-broker" .) }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/component: external-provider-broker
+    app.kubernetes.io/part-of: substrate
+{{- with $gateway.annotations }}
+  annotations:
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  gatewayClassName: {{ $gateway.gatewayClassName }}
+{{- with $gateway.addresses }}
+  addresses:
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- with $gateway.infrastructure.parametersRef }}
+  infrastructure:
+    parametersRef:
+      group: {{ .group | quote }}
+      kind: {{ .kind | quote }}
+      name: {{ .name | quote }}
+{{- end }}
+  listeners:
+  - name: broker
+    hostname: {{ $gateway.hostname | quote }}
+    port: {{ $gateway.listenerPort }}
+    protocol: TLS
+    tls:
+      mode: Passthrough
+    allowedRoutes:
+      namespaces:
+        from: Same
+      kinds:
+      - group: gateway.networking.k8s.io
+        kind: TLSRoute
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/component: external-provider-broker
+    app.kubernetes.io/part-of: substrate
+spec:
+  hostnames:
+  - {{ $gateway.hostname | quote }}
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ $name }}
+    sectionName: broker
+  rules:
+  - backendRefs:
+    - group: ""
+      kind: Service
+      name: {{ include "substrate.fullname" (list "api" .) }}
+      port: {{ .Values.externalProviderBroker.containerPort }}
+      weight: 1
+{{- end }}

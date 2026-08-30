@@ -152,6 +152,38 @@ without changing the existing chart's permissive values surface.
 {{- if not .Values.externalProviderBroker.sessionTokenTTL -}}
 {{- fail "externalProviderBroker.sessionTokenTTL must not be empty" -}}
 {{- end -}}
+{{- $brokerEnabled := or .Values.externalProviderBroker.enabled (eq $profile "external-control-plane-only") -}}
+{{- $brokerGateway := .Values.externalProviderBroker.gateway -}}
+{{- if $brokerGateway.enabled -}}
+{{- if not $brokerEnabled -}}
+{{- fail "externalProviderBroker.gateway.enabled requires externalProviderBroker.enabled=true or profile external-control-plane-only" -}}
+{{- end -}}
+{{- if or (gt (len $brokerGateway.gatewayClassName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $brokerGateway.gatewayClassName)) -}}
+{{- fail "externalProviderBroker.gateway.gatewayClassName must be a valid GatewayClass name" -}}
+{{- end -}}
+{{- $gatewayPort := int $brokerGateway.listenerPort -}}
+{{- if or (lt $gatewayPort 1) (gt $gatewayPort 65535) -}}
+{{- fail "externalProviderBroker.gateway.listenerPort must be between 1 and 65535" -}}
+{{- end -}}
+{{- if or (not $brokerGateway.hostname) (gt (len $brokerGateway.hostname) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $brokerGateway.hostname)) -}}
+{{- fail "externalProviderBroker.gateway.hostname must be an exact valid DNS name" -}}
+{{- end -}}
+{{- end -}}
+{{- $parametersRef := $brokerGateway.infrastructure.parametersRef -}}
+{{- if $parametersRef -}}
+{{- $parametersGroup := $parametersRef.group | default "" -}}
+{{- $parametersKind := $parametersRef.kind | default "" -}}
+{{- $parametersName := $parametersRef.name | default "" -}}
+{{- if or (gt (len $parametersGroup) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $parametersGroup)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.group must be a valid API group" -}}
+{{- end -}}
+{{- if or (gt (len $parametersKind) 63) (not (regexMatch "^[A-Za-z][A-Za-z0-9]*$" $parametersKind)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.kind must be a valid Kubernetes kind" -}}
+{{- end -}}
+{{- if or (gt (len $parametersName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $parametersName)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.name must be a valid Kubernetes object name" -}}
+{{- end -}}
+{{- end -}}
 {{- if eq $profile "external-control-plane-only" -}}
 {{- if .Values.postgres.connectionString -}}
 {{- fail "postgres.connectionString is forbidden for profile external-control-plane-only; reference externalControlPlane.postgres.existingSecret instead" -}}
@@ -177,6 +209,29 @@ without changing the existing chart's permissive values surface.
 {{- $privateKeyOverlap := or (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.credentialBundleKey) (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.serverCAKey) (eq $apiTLSSecret.clientCAKey $controllerTLSSecret.credentialBundleKey) -}}
 {{- if and $sharedTLSSecret $privateKeyOverlap -}}
 {{- fail "externalControlPlane.tls credential keys must not project a private-key bundle into both Pods when one Secret is shared" -}}
+{{- end -}}
+{{- $egressGatewayTLS := .Values.externalControlPlane.tls.egressGateway -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.egressGateway.existingSecret.name" $egressGatewayTLS.existingSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressGateway.existingSecret.credentialBundleKey" $egressGatewayTLS.existingSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressGateway.existingSecret.serverCAKey" $egressGatewayTLS.existingSecret.serverCAKey) -}}
+{{- if eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressGatewayTLS.existingSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.egressGateway existing Secret credentialBundleKey and serverCAKey must differ" -}}
+{{- end -}}
+{{- if or (not $egressGatewayTLS.serverName) (gt (len $egressGatewayTLS.serverName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $egressGatewayTLS.serverName)) -}}
+{{- fail "externalControlPlane.tls.egressGateway.serverName must be a valid DNS name" -}}
+{{- end -}}
+{{- $egressAuthorizerTLS := .Values.externalControlPlane.tls.egressAuthorizer -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.name" $egressAuthorizerTLS.existingSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.credentialBundleKey" $egressAuthorizerTLS.existingSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.serverCAKey" $egressAuthorizerTLS.existingSecret.serverCAKey) -}}
+{{- if eq $egressAuthorizerTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.egressAuthorizer existing Secret credentialBundleKey and serverCAKey must differ" -}}
+{{- end -}}
+{{- if not (regexMatch "^spiffe://[A-Za-z0-9.-]+/[^?#[:space:]]+$" ($egressAuthorizerTLS.principal | default "")) -}}
+{{- fail "externalControlPlane.tls.egressAuthorizer.principal must be an exact SPIFFE URI" -}}
+{{- end -}}
+{{- if and (eq $egressGatewayTLS.existingSecret.name $egressAuthorizerTLS.existingSecret.name) (or (eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.credentialBundleKey) (eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.serverCAKey) (eq $egressGatewayTLS.existingSecret.serverCAKey $egressAuthorizerTLS.existingSecret.credentialBundleKey)) -}}
+{{- fail "externalControlPlane.tls egress credential keys must not project a private-key bundle into both gateway roles when one Secret is shared" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

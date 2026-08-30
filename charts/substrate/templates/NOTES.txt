@@ -1,11 +1,13 @@
 {{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
 substrate {{ .Chart.AppVersion }} installed as external-control-plane-only
 
-The chart did not create PostgreSQL, provider credentials, authentication
-configuration, or an external route. ate-api-server reads PostgreSQL from
+The chart did not create PostgreSQL, provider credentials, or authentication
+configuration{{ if not .Values.externalProviderBroker.gateway.enabled }}, and it did not create an external route{{ end }}. ate-api-server reads PostgreSQL from
 Secret/{{ .Values.externalControlPlane.postgres.existingSecret.name }} and is
-isolated together with the external-template-only controller by default-deny
-NetworkPolicy when enabled.
+isolated together with the external-template-only controller and atenet egress
+gateway by default-deny NetworkPolicy when enabled. Actor destinations remain
+denied unless externalControlPlane.networkPolicy.egressGatewayEgress allows
+them explicitly.
 
 TLS is read only from the existing Secrets referenced under
 externalControlPlane.tls. This profile does not install the Pod Certificate
@@ -18,4 +20,26 @@ REQUIRED Kubernetes feature gates:
   - ClusterTrustBundleProjection
   - PodCertificateRequest
 The certificates.k8s.io/v1beta1 API must also be enabled.
+{{- end }}
+{{- if .Values.externalProviderBroker.gateway.enabled }}
+
+ExternalProviderBroker Gateway API adapter enabled:
+  Gateway: {{ include "substrate.fullname" (list "external-provider-broker" .) }}
+  GatewayClass: {{ .Values.externalProviderBroker.gateway.gatewayClassName }}
+  TLS SNI: {{ .Values.externalProviderBroker.gateway.hostname }}
+  Listener port: {{ .Values.externalProviderBroker.gateway.listenerPort }}
+{{- with .Values.externalProviderBroker.gateway.addresses }}
+  Requested addresses:
+{{ toYaml . | indent 4 }}
+{{- end }}
+{{- with .Values.externalProviderBroker.gateway.infrastructure.parametersRef }}
+  Data-plane parameters: {{ .group }}/{{ .kind }}/{{ .name }}
+{{- end }}
+
+The Gateway passes TLS through only to the internal Broker Service port
+{{ .Values.externalProviderBroker.containerPort }}. It does not expose the
+general Control API. The platform installation owns Gateway API CRDs, the
+official agentgateway controller, and GatewayClass. This application-owned
+Gateway drives the controller-generated data-plane Deployment and Service;
+optional addresses and parametersRef configure that managed data plane.
 {{- end }}

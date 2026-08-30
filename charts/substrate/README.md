@@ -39,7 +39,8 @@ See `values.yaml` for the full set; the important keys:
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `profile` | `standard` | Set `external-control-plane-only` for externally connected provider slots without the in-cluster data plane |
+| `profile` | `standard` | Set `external-control-plane-only` for externally connected provider slots without in-cluster Workers or the node data plane |
+| `rbac.create` | `true` | Set false when the platform installer owns Roles and bindings; ServiceAccounts and workloads are still rendered |
 | `postgres.connectionString` | `""` (in-cluster) | Legacy `standard` profile override; forbidden in `external-control-plane-only` |
 | `postgres.storageSize` | `1Gi` | In-cluster PostgreSQL PVC size |
 | `rustfs.enabled` | `true` | Deploy an in-cluster S3-compatible RustFS bucket for snapshots |
@@ -48,19 +49,63 @@ See `values.yaml` for the full set; the important keys:
 | `externalProviderBroker.enabled` | `false` | Add a dedicated internal TLS Broker listener and API Service port |
 | `externalProviderBroker.containerPort` | `8443` | Broker listener port inside the ate-api-server Pod |
 | `externalProviderBroker.sessionTokenTTL` | `5m` | Lifetime of a one-time external provider Connect token |
+| `externalProviderBroker.gateway.enabled` | `false` | Render an agentgateway `Gateway` plus TLS-passthrough `TLSRoute` to the Broker |
+| `externalProviderBroker.gateway.gatewayClassName` | `agentgateway` | Existing platform-owned GatewayClass selected by the adapter |
+| `externalProviderBroker.gateway.listenerPort` | `443` | Client-facing TLS listener port on the Gateway |
+| `externalProviderBroker.gateway.hostname` | `""` | Required exact Broker TLS SNI when the adapter is enabled |
+| `externalProviderBroker.gateway.addresses` | `[]` | Optional Gateway `IPAddress` requests, for example a reserved public IP injected by `app-gcp` |
+| `externalProviderBroker.gateway.infrastructure.parametersRef` | `{}` | Optional `group`/`kind`/`name` reference to an application-owned data-plane parameters object |
 | `externalControlPlane.postgres.existingSecret.name` | `""` | Required Secret reference for `external-control-plane-only`; the chart never creates it |
 | `externalControlPlane.tls.apiServer.existingSecret.name` | `""` | Existing ate-api server credential bundle and client CA Secret |
 | `externalControlPlane.tls.controller.existingSecret.name` | `""` | Existing restricted-controller client credential bundle and server CA Secret |
+| `externalControlPlane.tls.egressGateway.existingSecret.name` | `""` | Existing atenet gateway server credential bundle and serving CA Secret |
+| `externalControlPlane.tls.egressGateway.serverName` | `""` | Exact DNS name external Actor clients verify on the gateway certificate |
+| `externalControlPlane.tls.egressAuthorizer.existingSecret.name` | `""` | Existing atenet client credential bundle and ate-api server CA Secret |
+| `externalControlPlane.tls.egressAuthorizer.principal` | `""` | Exact SPIFFE URI ate-api accepts for online egress authorization |
 | `externalControlPlane.networkPolicy.enabled` | `true` | Selective default-deny policies for ate-api-server in the external profile |
 | `externalControlPlane.networkPolicy.controllerEgress` | `[]` | Explicit Kubernetes API and ate-api-server egress for the restricted template controller |
+| `externalControlPlane.networkPolicy.egressGatewayEgress` | `[]` | Explicit Actor destination rules for atenet-egress; empty denies dynamic destinations |
 | `otel.endpoint` | `""` | Set to an OTLP endpoint to export traces/metrics |
 
 Enabling `externalProviderBroker` adds a second port to the existing internal
-`api` Service. It does not create an Ingress, Gateway, tunnel, or public load
-balancer. External clients need a separately governed path to that port and
-must trust the server certificate issuer. In the standard profile that is the
-`servicedns.podcert.ate.dev` CA; in `external-control-plane-only` it is the CA
-chosen by the platform owner for the existing ate-api TLS Secret.
+`api` Service. The nested `gateway.enabled` switch remains false by default. If
+it stays false, external clients need a separately governed path to that port.
+If it is true, this chart renders only a Gateway API `Gateway` and same-namespace
+`TLSRoute`; it never installs agentgateway, its controller, CRDs, GatewayClass,
+or an `AgentgatewayParameters` object. For the GKE deployment, `platform-gcp`
+installs the Gateway API CRDs, official agentgateway controller, and
+GatewayClass from the official agentgateway Helm chart. The application-owned
+Gateway then asks that controller to generate and manage a dedicated data-plane
+Deployment and Service; those per-Gateway resources are not pre-created by the
+platform installation.
+
+The listener uses TLS `Passthrough` and the route has one fixed backend:
+the release's internal `api` Service on `externalProviderBroker.containerPort`.
+The general Control API on port 443 is therefore not a route target. Gateway
+and route are in the release namespace, so no `ReferenceGrant` is needed. The
+configured `hostname` is both the TLSRoute SNI match and the name provider
+clients must verify on the ate-api-server Broker certificate. The public DNS
+name or IP used to reach the Gateway may differ only when the client supports
+an explicit TLS server-name override.
+
+The optional `addresses` list maps directly to `Gateway.spec.addresses`; the
+currently accepted typed address is an IPv4 or IPv6 `IPAddress`. The optional
+`infrastructure.parametersRef` maps directly to the same Gateway field. Set its
+`group`, `kind`, and `name` together to reference an application-owned object,
+such as `agentgateway.dev/AgentgatewayParameters`, that configures GKE Service
+annotations or workload settings. This chart validates and renders the
+reference but does not create the referenced resource. Empty defaults omit both
+Gateway fields.
+
+Cluster policy still governs which static addresses and parameters may be used,
+as well as source ranges, capacity, disruption policy, and observability. In the
+`external-control-plane-only` profile, the chart's ate-api NetworkPolicy allows
+the official agentgateway data-plane label
+`gateway.networking.k8s.io/gateway-name=<rendered Gateway name>` to reach only
+the Broker port. Provider clients must still trust the Broker server CA. In the
+standard profile that is the `servicedns.podcert.ate.dev` CA; in
+`external-control-plane-only` it is the CA selected by the platform owner for
+the existing ate-api TLS Secret.
 
 The Broker listener and its `Connect` route remain disabled by default. For the
 MVP, enabling `externalProviderBroker` also pins ate-api-server to one replica
@@ -87,13 +132,18 @@ capacity supplied through `ExternalProviderBroker`. It renders:
   NetworkPolicy, or egress-trust reconciler;
 - existing Secret volumes for ate-api server identity/client trust and
   restricted-controller client identity/server trust;
-- NetworkPolicies selecting the ate-api-server and restricted controller Pods,
-  denying ingress and egress by default, plus explicitly configured allow
-  rules.
+- one atenet egress gateway whose serving identity and separate ate-api client
+  identity come from existing Secret volumes;
+- optionally, an agentgateway `Gateway` and TLS-passthrough `TLSRoute` when
+  `externalProviderBroker.gateway.enabled=true`;
+- NetworkPolicies selecting the ate-api-server, restricted controller, and
+  atenet-egress Pods, denying ingress and egress by default, with fixed
+  control-plane links and explicitly configured Actor destination rules.
 
-It does not render `atelet`, `atenet`, a `WorkerPool`, local sandbox
+It does not render `atelet`, atenet-router/DNS, a `WorkerPool`, local sandbox
 configuration, PostgreSQL, RustFS, a PVC, a StatefulSet, a privileged container,
-or a `hostPath`. It also does not render the Pod Certificate controller,
+or a `hostPath`. It renders only the atenet egress policy-enforcement point. It
+also does not render the Pod Certificate controller,
 `podCertificate` or `clusterTrustBundle` volume sources, or
 `certificates.k8s.io/v1beta1` resources. The restricted controller has RBAC only
 for reading ActorTemplates and updating their status. It ignores KubernetesPod
@@ -103,15 +153,16 @@ ate-api-server from the authenticated Broker session and the referenced
 WorkerPool metadata.
 
 The profile implies `externalProviderBroker.enabled=true`; the historical
-`standard` default remains byte-for-byte unchanged. The internal Service is
-still headless `ClusterIP`. A Gateway, tunnel, or other externally governed
-route must be installed separately.
+`standard` default remains byte-for-byte unchanged. The internal API and egress
+gateway Services remain cluster-only. Enable the typed Gateway API adapter or
+install another externally governed route to the Broker separately.
 
 This profile requires binaries from the same source revision as the chart:
 ate-api-server must support `--postgres-connection-string-file`, and
 ate-controller must support `--controller-mode=external-templates-only`. Set
 `image.registry`, `image.digests.ateapi`, and
-`image.digests.atecontroller` to a matching published build during release. An
+`image.digests.atecontroller`, and `image.digests.atenet` to a matching
+published build during release. An
 older image fails startup; the chart deliberately has no fallback to a raw DSN
 value, environment variable, or the full local-worker controller set.
 
@@ -119,6 +170,9 @@ value, environment variable, or the full local-worker controller set.
 
 The chart deliberately does not create authentication or credential material.
 Before installing the profile, the platform owner must provision:
+
+- the workload Roles and bindings when `rbac.create=false`; the chart still
+  creates the ServiceAccounts referenced by its Deployments;
 
 - ConfigMap `ate-api-authentication` in the release namespace;
 - Secrets `actor-id-jwt-pool` and `actor-id-ca-pool` in the release namespace;
@@ -130,7 +184,13 @@ Before installing the profile, the platform owner must provision:
   server credential-bundle and client-CA keys;
 - the Secret named by
   `externalControlPlane.tls.controller.existingSecret.name`, with the selected
-  client credential-bundle and server-CA keys.
+  client credential-bundle and server-CA keys;
+- the Secret named by
+  `externalControlPlane.tls.egressGateway.existingSecret.name`, with the selected
+  gateway server credential-bundle and serving-CA keys;
+- the Secret named by
+  `externalControlPlane.tls.egressAuthorizer.existingSecret.name`, with the
+  selected atenet client credential-bundle and ate-api server-CA keys.
 
 Install the `substrate-crds` chart first. Each enrollment scope also references
 an existing WorkerPool CR as server-owned scheduling metadata. In this profile
@@ -139,16 +199,20 @@ running controller mode does not register WorkerPool reconciliation; it must
 not be used as a local-capacity pool.
 
 The PostgreSQL key is mounted read-only at
-`/run/secrets/substrate/postgres/connection-string` with mode `0400` and passed
+`/run/secrets/substrate/postgres/connection-string` with mode `0440` and passed
 to ate-api-server through `--postgres-connection-string-file`. It is never
 copied into a chart ConfigMap, environment variable, rendered Secret, or Helm
 value. Supplying `postgres.connectionString` in this profile fails rendering.
+The ko-built external control-plane containers run as UID/GID `65532`, and the
+ate-api-server and controller Pods use `fsGroup: 65532`, so kubelet-managed
+group ownership makes the selected Secret files readable without granting
+world access.
 
 ### Existing TLS Secret contract
 
 The chart accepts only Secret names and key mappings. It never accepts PEM
-contents in values and never creates a Secret. Both Secrets must exist in the
-Helm release namespace before the Deployments start:
+contents in values and never creates a Secret. All referenced Secrets must
+exist in the Helm release namespace before the Deployments start:
 
 - `externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey` is
   mounted as `server-credential-bundle.pem` and used by both the Control API and
@@ -156,8 +220,8 @@ Helm release namespace before the Deployments start:
   certificate chain in leaf-to-root order. `PRIVATE KEY` (PKCS#8),
   `RSA PRIVATE KEY`, and `EC PRIVATE KEY` blocks are supported.
 - `externalControlPlane.tls.apiServer.existingSecret.clientCAKey` is a PEM CA
-  bundle used by ate-api-server to verify the restricted controller's client
-  certificate.
+  bundle used by ate-api-server to verify the restricted controller and atenet
+  authorizer client certificates.
 - `externalControlPlane.tls.controller.existingSecret.credentialBundleKey` is
   the controller's client private key plus certificate chain in the same
   credential-bundle format. Its leaf must be valid for TLS client
@@ -169,8 +233,25 @@ Helm release namespace before the Deployments start:
   the controller does not send a fallback bearer token.
 - `externalControlPlane.tls.controller.existingSecret.serverCAKey` is the PEM
   CA bundle used by the controller to verify ate-api-server.
+- `externalControlPlane.tls.egressGateway.existingSecret.credentialBundleKey`
+  is the gateway's server private key plus leaf-first certificate chain. Its
+  leaf must be valid for `externalControlPlane.tls.egressGateway.serverName`.
+- `externalControlPlane.tls.egressGateway.existingSecret.serverCAKey` is the PEM
+  CA bundle ate-api returns to protocol-v3 Actor clients for gateway
+  verification; ate-api mounts this selected CA key without the gateway private
+  key.
+- `externalControlPlane.tls.egressAuthorizer.existingSecret.credentialBundleKey`
+  is the atenet ext-proc client private key plus leaf-first certificate chain.
+  Its leaf URI SAN must equal
+  `externalControlPlane.tls.egressAuthorizer.principal` and chain to the ate-api
+  `clientCAKey` trust bundle.
+- `externalControlPlane.tls.egressAuthorizer.existingSecret.serverCAKey` is the
+  PEM CA bundle atenet uses to verify ate-api-server.
 
-All four files are mounted read-only with mode `0400`. The restricted
+All selected files are mounted read-only with mode `0440`. The external
+control-plane Pods use `fsGroup: 65532`, and the ko-built ate-api-server,
+controller, and atenet ext-proc containers use UID/GID `65532`; the pinned
+agentgateway sidecar keeps its image-defined identity. The restricted
 controller explicitly verifies the internal Service DNS name
 `<api-service>.<release-namespace>.svc`. The shared ate-api/Broker server leaf
 certificate must therefore include that DNS SAN and the externally configured
@@ -181,14 +262,13 @@ existence, PEM contents, key/certificate matching, trust chains, EKUs, and
 SANs.
 
 Credential-bundle files are re-statted on each new TLS handshake, so an atomic
-Secret-volume update of the ate-api server leaf/key or controller client
-leaf/key is picked up without restarting the process. Existing connections keep
-their established credentials until they reconnect. Trust bundles are
-different: ate-api-server reads its client CA once during startup, and the
-controller reads its server CA once during startup. The platform Secret owner
-must coordinate overlap in old/new trust roots and roll out the affected
-Deployment after changing either CA key. This chart does not watch Secret
-rotation or trigger restarts.
+Secret-volume update of a serving or client leaf/key is picked up for new
+connections. Existing connections keep their established credentials until
+they reconnect. Trust bundles are different: ate-api-server, the controller,
+and atenet read their respective CA files during startup. The platform Secret
+owner must coordinate overlap in old/new trust roots and roll out the affected
+Deployment after changing a CA key. This chart does not watch Secret rotation
+or trigger restarts.
 
 ### GKE authentication routing
 
@@ -222,7 +302,7 @@ before installation with the exact private GKE API endpoint and private Cloud
 SQL endpoint. The pre-created `substrate-cloud-sql` Secret must expose a
 `connection-string` key. Its value is a PostgreSQL URI managed and rotated by
 the platform secret owner; it is not a value accepted by this chart. The
-example also names the two pre-created TLS Secrets and their required keys,
+example also names the four pre-created TLS Secrets and their required keys,
 without embedding any credential material.
 
 If Cloud SQL is reached through a separately managed Cloud SQL Auth Proxy or
@@ -236,9 +316,12 @@ The example also assumes:
 - kagent calls the Control API from `kagent-system` on TCP 443;
 - the restricted template controller calls the Control API on TCP 443 and the
   Kubernetes API on TCP 443;
-- an independently managed client gateway reaches the Broker on TCP 8443;
+- the controller-generated agentgateway data plane reaches the Broker on TCP
+  8443;
 - ate-api-server can reach the Kubernetes API on TCP 443, Cloud SQL on TCP
-  5432, and kube-dns on TCP/UDP 53.
+  5432, atenet-egress on TCP 8443, and kube-dns on TCP/UDP 53;
+- atenet-egress can reach ate-api-server on TCP 443, kube-dns, and only the
+  Actor destination CIDRs/ports listed in `egressGatewayEgress`.
 
 Change the namespace and pod selectors to the labels actually enforced in the
 target cluster. Add explicit egress rules for an OTLP endpoint or any OIDC

@@ -28,6 +28,10 @@ fi
 
 helm lint --strict "${CHART}"
 helm lint --strict "${CHART}" --set externalProviderBroker.enabled=true
+helm lint --strict "${CHART}" \
+  --set externalProviderBroker.enabled=true \
+  --set externalProviderBroker.gateway.enabled=true \
+  --set externalProviderBroker.gateway.hostname=api.ate-system.svc
 
 helm template substrate "${CHART}" \
   --show-only templates/ate-api-server.yaml \
@@ -40,6 +44,23 @@ helm template substrate "${CHART}" \
   --show-only templates/ate-api-server.yaml \
   --set externalProviderBroker.enabled=true \
   > "${TMP_DIR}/enabled.yaml"
+helm template substrate "${CHART}" --namespace ate-system \
+  > "${TMP_DIR}/gateway-default.yaml"
+helm template substrate "${CHART}" --namespace ate-system \
+  --set externalProviderBroker.enabled=true \
+  --set externalProviderBroker.gateway.enabled=true \
+  --set externalProviderBroker.gateway.hostname=api.ate-system.svc \
+  > "${TMP_DIR}/gateway-enabled.yaml"
+helm template substrate "${CHART}" --namespace ate-system \
+  --set externalProviderBroker.enabled=true \
+  --set externalProviderBroker.gateway.enabled=true \
+  --set externalProviderBroker.gateway.hostname=api.ate-system.svc \
+  --set-string 'externalProviderBroker.gateway.addresses[0].type=IPAddress' \
+  --set-string 'externalProviderBroker.gateway.addresses[0].value=203.0.113.11' \
+  --set-string externalProviderBroker.gateway.infrastructure.parametersRef.group=agentgateway.dev \
+  --set-string externalProviderBroker.gateway.infrastructure.parametersRef.kind=AgentgatewayParameters \
+  --set-string externalProviderBroker.gateway.infrastructure.parametersRef.name=broker-gateway-params \
+  > "${TMP_DIR}/gateway-configured.yaml"
 
 if ! cmp -s "${TMP_DIR}/default.yaml" "${TMP_DIR}/explicit-disabled.yaml"; then
   echo "default chart output differs from explicit externalProviderBroker.enabled=false" >&2
@@ -47,7 +68,57 @@ if ! cmp -s "${TMP_DIR}/default.yaml" "${TMP_DIR}/explicit-disabled.yaml"; then
   exit 1
 fi
 
-python3 - "${TMP_DIR}/default.yaml" "${TMP_DIR}/enabled.yaml" <<'PY'
+expect_failure() {
+  local expected="$1"
+  shift
+  local output
+  if output="$("$@" 2>&1)"; then
+    echo "command unexpectedly succeeded: $*" >&2
+    exit 1
+  fi
+  if [[ "${output}" != *"${expected}"* ]]; then
+    echo "command failed without expected message ${expected}: ${output}" >&2
+    exit 1
+  fi
+}
+
+expect_failure \
+  "externalProviderBroker.gateway.enabled requires externalProviderBroker.enabled=true" \
+  helm template substrate "${CHART}" \
+    --set externalProviderBroker.gateway.enabled=true \
+    --set externalProviderBroker.gateway.hostname=api.default.svc
+expect_failure \
+  "externalProviderBroker.gateway.hostname must be an exact valid DNS name" \
+  helm template substrate "${CHART}" \
+    --set externalProviderBroker.enabled=true \
+    --set externalProviderBroker.gateway.enabled=true \
+    --set externalProviderBroker.gateway.hostname='*.example.com'
+expect_failure \
+  "additional properties 'typo' not allowed" \
+  helm template substrate "${CHART}" \
+    --set externalProviderBroker.gateway.typo=true
+expect_failure \
+  "'not-an-ip' is not valid ipv4" \
+  helm template substrate "${CHART}" \
+    --set externalProviderBroker.enabled=true \
+    --set externalProviderBroker.gateway.enabled=true \
+    --set externalProviderBroker.gateway.hostname=api.default.svc \
+    --set-string 'externalProviderBroker.gateway.addresses[0].type=IPAddress' \
+    --set-string 'externalProviderBroker.gateway.addresses[0].value=not-an-ip'
+expect_failure \
+  "externalProviderBroker.gateway.infrastructure.parametersRef.kind must be a valid Kubernetes kind" \
+  helm template substrate "${CHART}" \
+    --set externalProviderBroker.enabled=true \
+    --set externalProviderBroker.gateway.enabled=true \
+    --set externalProviderBroker.gateway.hostname=api.default.svc \
+    --set-string externalProviderBroker.gateway.infrastructure.parametersRef.group=agentgateway.dev
+
+python3 - \
+  "${TMP_DIR}/default.yaml" \
+  "${TMP_DIR}/enabled.yaml" \
+  "${TMP_DIR}/gateway-default.yaml" \
+  "${TMP_DIR}/gateway-enabled.yaml" \
+  "${TMP_DIR}/gateway-configured.yaml" <<'PY'
 import re
 import sys
 
@@ -71,6 +142,9 @@ def resource(docs, kind, name):
 
 default_docs = documents(sys.argv[1])
 enabled_docs = documents(sys.argv[2])
+gateway_default_docs = documents(sys.argv[3])
+gateway_enabled_docs = documents(sys.argv[4])
+gateway_configured_docs = documents(sys.argv[5])
 default_deployment = resource(default_docs, "Deployment", "ate-api-server")
 enabled_deployment = resource(enabled_docs, "Deployment", "ate-api-server")
 enabled_service = resource(enabled_docs, "Service", "api")
@@ -111,6 +185,71 @@ for required in ("clusterIP: None", "name: provider-grpc", "port: 8443", "target
 for forbidden in ("type: LoadBalancer", "type: NodePort", "externalIPs:"):
     if forbidden in enabled_service:
         raise AssertionError(f"enabled API Service exposes forbidden field {forbidden!r}")
+
+for kind in ("Gateway", "TLSRoute", "ReferenceGrant"):
+    if any(re.search(rf"(?m)^kind: {kind}$", doc) for doc in gateway_default_docs):
+        raise AssertionError(f"default chart unexpectedly rendered {kind}")
+
+gateway = resource(gateway_enabled_docs, "Gateway", "external-provider-broker")
+for required in (
+    "gatewayClassName: agentgateway",
+    'hostname: "api.ate-system.svc"',
+    "port: 443",
+    "protocol: TLS",
+    "mode: Passthrough",
+    "from: Same",
+    "kind: TLSRoute",
+):
+    if required not in gateway:
+        raise AssertionError(f"Broker Gateway lacks {required!r}")
+for forbidden in (
+    "certificateRefs:",
+    "protocol: HTTPS",
+    "kind: HTTPRoute",
+    "addresses:",
+    "infrastructure:",
+):
+    if forbidden in gateway:
+        raise AssertionError(f"Broker Gateway contains forbidden field {forbidden!r}")
+
+configured_gateway = resource(
+    gateway_configured_docs, "Gateway", "external-provider-broker"
+)
+for required in (
+    "addresses:\n  - type: IPAddress\n    value: 203.0.113.11",
+    "infrastructure:\n    parametersRef:",
+    'group: "agentgateway.dev"',
+    'kind: "AgentgatewayParameters"',
+    'name: "broker-gateway-params"',
+):
+    if required not in configured_gateway:
+        raise AssertionError(f"configured Broker Gateway lacks {required!r}")
+
+tls_route = resource(gateway_enabled_docs, "TLSRoute", "external-provider-broker")
+for required in (
+    '  - "api.ate-system.svc"',
+    "sectionName: broker",
+    'group: ""',
+    "kind: Service",
+    "name: api",
+    "port: 8443",
+):
+    if required not in tls_route:
+        raise AssertionError(f"Broker TLSRoute lacks {required!r}")
+for forbidden in ("port: 443", "name: ate-api-server", "kind: HTTPRoute"):
+    if forbidden in tls_route:
+        raise AssertionError(f"Broker TLSRoute exposes forbidden backend {forbidden!r}")
+
+if any(re.search(r"(?m)^kind: ReferenceGrant$", doc) for doc in gateway_enabled_docs):
+    raise AssertionError("same-namespace Broker route rendered an unnecessary ReferenceGrant")
+
+for kind in ("Deployment", "ConfigMap", "Service"):
+    if any(
+        re.search(rf"(?m)^kind: {kind}$", doc)
+        and re.search(r"(?m)^  name: external-provider-broker$", doc)
+        for doc in gateway_enabled_docs
+    ):
+        raise AssertionError(f"Substrate unexpectedly owns agentgateway {kind}")
 PY
 
-echo "External provider Broker chart topology is fail-closed and default-disabled."
+echo "External provider Broker and Gateway API adapter are fail-closed and default-disabled."

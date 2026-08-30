@@ -22,6 +22,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: ate-controller
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -47,6 +48,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "substrate.fullname" (list "ate-controller" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: v1
 kind: Service
@@ -81,6 +83,8 @@ spec:
     spec:
       serviceAccountName: {{ include "substrate.fullname" (list "ate-controller" .) }}
       securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -119,13 +123,15 @@ spec:
           capabilities:
             drop: ["ALL"]
           readOnlyRootFilesystem: true
+          runAsUser: 65532
+          runAsGroup: 65532
         volumeMounts:
         - { name: ate-controller-tls, mountPath: /run/secrets/substrate/tls/ate-controller, readOnly: true }
       volumes:
       - name: ate-controller-tls
         secret:
           secretName: {{ .Values.externalControlPlane.tls.controller.existingSecret.name }}
-          defaultMode: 0400
+          defaultMode: 0440
           items:
           - key: {{ .Values.externalControlPlane.tls.controller.existingSecret.credentialBundleKey }}
             path: client-credential-bundle.pem

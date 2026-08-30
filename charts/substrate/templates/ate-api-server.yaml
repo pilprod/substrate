@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{ if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -34,11 +35,13 @@ rules:
 # ActorTemplates (e.g. via a namespace-scoped Role + RoleBinding using
 # resourceNames).
 ---
+{{ end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ include "substrate.fullname" (list "ate-api-server" .) }}
   namespace: {{ .Release.Namespace }}
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -52,6 +55,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "substrate.fullname" (list "ate-api-server-role" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -85,6 +89,8 @@ spec:
       terminationGracePeriodSeconds: 40
 {{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
       securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
 {{- end }}
@@ -115,8 +121,17 @@ spec:
 {{- end }}
         - "--actor-id-jwt-pool=/run/actor-id-jwt-pool/pool.json"
         - "--actor-id-ca-pool=/run/actor-id-ca-pool/pool.json"
-{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
         - "--egress-gateway-address={{ include "substrate.fullname" (list "atenet-egress" .) }}.{{ .Release.Namespace }}.svc:443"
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--egress-gateway-server-name={{ .Values.externalControlPlane.tls.egressGateway.serverName }}"
+        - "--egress-gateway-trust-bundle=/run/secrets/substrate/tls/egress-gateway/server-ca.pem"
+        - "--egress-gateway-ateapi-principal={{ .Values.externalControlPlane.tls.egressAuthorizer.principal }}"
+{{- else }}
+        - "--egress-gateway-server-name={{ include "substrate.fullname" (list "atenet-egress" .) }}.{{ .Release.Namespace }}.svc"
+        - "--egress-gateway-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem"
+        - "--egress-gateway-ateapi-principal=spiffe://cluster.local/ns/{{ .Release.Namespace }}/sa/{{ include "substrate.fullname" (list "atenet-egress" .) }}"
+{{- end }}
 {{- end }}
 {{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
         - "--atelet-client-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
@@ -156,6 +171,7 @@ spec:
         volumeMounts:
 {{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
         - { name: ate-api-tls,         mountPath: /run/secrets/substrate/tls/ate-api, readOnly: true }
+        - { name: egress-gateway-trust, mountPath: /run/secrets/substrate/tls/egress-gateway, readOnly: true }
 {{- else }}
         - { name: servicedns,          mountPath: /run/servicedns.podcert.ate.dev }
 {{- end }}
@@ -172,6 +188,8 @@ spec:
           capabilities:
             drop: ["ALL"]
           readOnlyRootFilesystem: true
+          runAsUser: 65532
+          runAsGroup: 65532
 {{- end }}
         ports:
         - containerPort: 443
@@ -200,12 +218,19 @@ spec:
       - name: ate-api-tls
         secret:
           secretName: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.name }}
-          defaultMode: 0400
+          defaultMode: 0440
           items:
           - key: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey }}
             path: server-credential-bundle.pem
           - key: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.clientCAKey }}
             path: client-ca.pem
+      - name: egress-gateway-trust
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.serverCAKey }}
+            path: server-ca.pem
 {{- else }}
       - name: servicedns
         projected:
@@ -223,6 +248,9 @@ spec:
 {{- end }}
       - name: actor-id-jwt-pool
         projected:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+          defaultMode: 0440
+{{- end }}
           sources:
           - secret:
               name: actor-id-jwt-pool
@@ -230,6 +258,9 @@ spec:
               - { key: pool, path: pool.json }
       - name: actor-id-ca-pool
         projected:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+          defaultMode: 0440
+{{- end }}
           sources:
           - secret:
               name: actor-id-ca-pool
@@ -242,7 +273,7 @@ spec:
       - name: postgres-connection-string
         secret:
           secretName: {{ .Values.externalControlPlane.postgres.existingSecret.name }}
-          defaultMode: 0400
+          defaultMode: 0440
           items:
           - key: {{ .Values.externalControlPlane.postgres.existingSecret.key }}
             path: connection-string

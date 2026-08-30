@@ -60,7 +60,7 @@ patches:
         path: /spec/template/spec/containers/1
         value:
           name: agentgateway
-          image: ghcr.io/kagent-dev/substrate/agentgateway:dfd154e6a731
+          image: ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429
           args:
           - -f
           - /etc/agentgateway/config.yaml
@@ -117,7 +117,7 @@ patches:
         path: /spec/template/spec/containers/0
         value:
           name: agentgateway
-          image: ghcr.io/kagent-dev/substrate/agentgateway:dfd154e6a731
+          image: ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429
           args:
           - -f
           - /etc/agentgateway/config.yaml

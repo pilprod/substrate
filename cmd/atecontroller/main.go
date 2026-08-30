@@ -206,8 +206,9 @@ func main() {
 		}
 	}
 	mgr, err := ctrl.NewManager(k8sConfig, ctrl.Options{
-		Scheme: scheme,
-		Cache:  cacheOptions,
+		Scheme:                 scheme,
+		Cache:                  cacheOptions,
+		HealthProbeBindAddress: ":8081",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

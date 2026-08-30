@@ -35,6 +35,20 @@ externalControlPlane:
         name: substrate-ate-controller-tls
         credentialBundleKey: client-credential-bundle.pem
         serverCAKey: server-ca.pem
+    # The gateway server bundle and the atenet authorizer client bundle are
+    # separate credentials. Their Secret owners rotate them outside Helm.
+    egressGateway:
+      serverName: atenet-egress.ate-system.svc
+      existingSecret:
+        name: substrate-atenet-egress-server-tls
+        credentialBundleKey: server-credential-bundle.pem
+        serverCAKey: server-ca.pem
+    egressAuthorizer:
+      principal: spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+      existingSecret:
+        name: substrate-atenet-egress-client-tls
+        credentialBundleKey: client-credential-bundle.pem
+        serverCAKey: server-ca.pem
   networkPolicy:
     enabled: true
     allowDNS: true
@@ -44,17 +58,16 @@ externalControlPlane:
           kubernetes.io/metadata.name: kagent-system
       podSelector:
         matchLabels:
-          app.kubernetes.io/name: kagent-controller
+          app.kubernetes.io/name: kagent
+          app.kubernetes.io/instance: kagent
+          app.kubernetes.io/component: controller
     - podSelector:
         matchLabels:
           app: ate-controller
-    brokerIngress:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: client-gateway-system
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/name: client-gateway
+    # The chart automatically allows the controller-generated data plane for
+    # external-provider-broker. Keep additional Broker peers empty unless the
+    # application explicitly owns another ingress path.
+    brokerIngress: []
     # Configure ate-api's paired discoveryURL/jwksURL overrides to the in-cluster
     # Kubernetes API. The TCP/443 rules below must cover the exact Service and
     # endpoint destinations enforced by the cluster CNI; no public Google API
@@ -88,9 +101,38 @@ externalControlPlane:
       ports:
       - protocol: TCP
         port: 443
+    # Replace this documentation-only destination with the exact CIDRs and
+    # ports Actors may reach. With an empty list, dynamic Actor egress remains
+    # denied even though the gateway and online authorization callback run.
+    egressGatewayEgress:
+    - to:
+      - ipBlock:
+          cidr: 192.0.2.30/32
+      ports:
+      - protocol: TCP
+        port: 443
 
 # The profile enables this listener even though the historical chart default
 # remains false. The port and token TTL stay configurable.
 externalProviderBroker:
   containerPort: 8443
   sessionTokenTTL: 5m
+  gateway:
+    # Requires platform-gcp to install Gateway API CRDs, the official
+    # agentgateway controller, and GatewayClass/agentgateway first. The Gateway
+    # then drives its controller-generated data-plane Deployment and Service.
+    enabled: true
+    gatewayClassName: agentgateway
+    listenerPort: 443
+    # TLS is passed through. Provider clients dial the Gateway address but use
+    # this exact SNI, which must be present on the Broker server certificate.
+    hostname: api.ate-system.svc
+    annotations: {}
+    # app-gcp may inject a reserved IPAddress here for a no-port-forward
+    # endpoint. This documentation example deliberately requests no address.
+    addresses: []
+    infrastructure:
+      # app-gcp may inject a reference to an application-owned
+      # agentgateway.dev/AgentgatewayParameters resource for GKE Service
+      # annotations and workload settings. The chart does not create it.
+      parametersRef: {}

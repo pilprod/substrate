@@ -32,6 +32,19 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-default-deny" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: {{ include "substrate.fullname" (list "ate-controller-default-deny" .) }}
   namespace: {{ .Release.Namespace }}
 spec:
@@ -41,7 +54,6 @@ spec:
   policyTypes:
   - Ingress
   - Egress
-{{- if or $policy.apiIngress $policy.brokerIngress }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -55,6 +67,13 @@ spec:
   policyTypes:
   - Ingress
   ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 443
 {{- if $policy.apiIngress }}
   - from:
 {{ toYaml $policy.apiIngress | indent 4 }}
@@ -62,13 +81,21 @@ spec:
     - protocol: TCP
       port: 443
 {{- end }}
+{{- if .Values.externalProviderBroker.gateway.enabled }}
+  - from:
+    - podSelector:
+        matchLabels:
+          gateway.networking.k8s.io/gateway-name: {{ include "substrate.fullname" (list "external-provider-broker" .) }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.externalProviderBroker.containerPort }}
+{{- end }}
 {{- if $policy.brokerIngress }}
   - from:
 {{ toYaml $policy.brokerIngress | indent 4 }}
     ports:
     - protocol: TCP
       port: {{ .Values.externalProviderBroker.containerPort }}
-{{- end }}
 {{- end }}
 {{- if $policy.controllerIngress }}
 ---
@@ -90,7 +117,6 @@ spec:
     - protocol: TCP
       port: 8080
 {{- end }}
-{{- if or $policy.allowDNS $policy.egress }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -104,6 +130,13 @@ spec:
   policyTypes:
   - Egress
   egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 8443
 {{- if $policy.allowDNS }}
   - to:
     - namespaceSelector:
@@ -118,7 +151,6 @@ spec:
 {{- end }}
 {{- with $policy.egress }}
 {{ toYaml . | indent 2 }}
-{{- end }}
 {{- end }}
 {{- if or $policy.allowDNS $policy.controllerEgress }}
 ---
@@ -149,5 +181,60 @@ spec:
 {{- with $policy.controllerEgress }}
 {{ toYaml . | indent 2 }}
 {{- end }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-allow-ingress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ate-api-server
+    ports:
+    - protocol: TCP
+      port: 8443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-allow-egress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ate-api-server
+    ports:
+    - protocol: TCP
+      port: 443
+{{- if $policy.allowDNS }}
+  - to:
+    - namespaceSelector:
+{{ toYaml $policy.dnsNamespaceSelector | indent 8 }}
+      podSelector:
+{{ toYaml $policy.dnsPodSelector | indent 8 }}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end }}
+{{- with $policy.egressGatewayEgress }}
+{{ toYaml . | indent 2 }}
 {{- end }}
 {{- end }}
