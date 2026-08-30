@@ -42,6 +42,17 @@ require_literal 'CHART_REPOSITORY: oci://ghcr.io/${{ steps.tag.outputs.registry_
 require_literal 'run: ./hack/refuse-release-overwrite.sh'
 require_literal 'for component in ateapi atecontroller atelet ateom-gvisor ateom-microvm podcertcontroller atenet substrate-release-verify; do'
 require_literal '--tags "${IMAGE_TAG}"'
+require_literal 'release_chart="${release_chart_root}/substrate"'
+require_literal 'source_registry="ghcr.io/kagent-dev/substrate"'
+require_literal 'release_registry="${IMAGE_REPOSITORY}"'
+require_literal 'agentgateway_image="ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429"'
+require_literal 'sed -i "s|^  registry: ${source_registry}$|  registry: ${release_registry}|" "${values_file}"'
+require_literal 'tar -xOf "${substrate_package}" substrate/values.yaml > "${packaged_values}"'
+require_literal 'helm template substrate-release "${substrate_package}"'
+require_literal 'for component in ateapi atecontroller atelet atenet podcertcontroller; do'
+require_literal 'expected_image="${release_registry}/${component}:${tag}"'
+require_literal 'if grep -Fq "image: ${source_registry}/${component}:" "${rendered_chart}"; then'
+require_literal 'if ! grep -Fq "image: ${agentgateway_image}" "${rendered_chart}"; then'
 require_literal 'SHA="$(git rev-parse HEAD)"'
 require_literal 'if [[ "${TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then'
 require_literal '^v[0-9]+\.[0-9]+\.[0-9]+$'
@@ -54,13 +65,40 @@ if grep -Eq -- '--tags.*(^|[ ,])latest([ ,]|$)|IMAGE_TAG:[[:space:]]*latest([[:s
   printf '%s contains a publication path for the moving latest tag\n' "${WORKFLOW}" >&2
   exit 1
 fi
-if grep -Fq 'ghcr.io/kagent-dev/substrate' "${WORKFLOW}"; then
-  printf '%s hard-codes the upstream release repository\n' "${WORKFLOW}" >&2
+if grep -Eq '(IMAGE_REPOSITORY|CHART_REPOSITORY):[^[:cntrl:]]*ghcr\.io/kagent-dev/substrate' "${WORKFLOW}"; then
+  printf '%s publishes owned artifacts to the upstream release repository\n' "${WORKFLOW}" >&2
   exit 1
 fi
 
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf "${temporary_dir}"' EXIT
+
+release_chart_contract_present() {
+  local workflow="$1"
+  grep -Fq 'release_registry="${IMAGE_REPOSITORY}"' "${workflow}" &&
+    grep -Fq 'helm template substrate-release "${substrate_package}"' "${workflow}" &&
+    grep -Fq 'if grep -Fq "image: ${source_registry}/${component}:" "${rendered_chart}"; then' "${workflow}"
+}
+
+if ! release_chart_contract_present "${WORKFLOW}"; then
+  printf '%s is missing the packaged-chart ownership assertion\n' "${WORKFLOW}" >&2
+  exit 1
+fi
+adversarial_registry_workflow="${temporary_dir}/release-upstream-registry.yaml"
+sed 's|release_registry="${IMAGE_REPOSITORY}"|release_registry="${source_registry}"|' \
+  "${WORKFLOW}" > "${adversarial_registry_workflow}"
+if release_chart_contract_present "${adversarial_registry_workflow}"; then
+  printf 'release workflow verifier accepted an upstream-owned packaged chart\n' >&2
+  exit 1
+fi
+adversarial_render_workflow="${temporary_dir}/release-without-render-assertion.yaml"
+grep -Fv 'helm template substrate-release "${substrate_package}"' \
+  "${WORKFLOW}" > "${adversarial_render_workflow}"
+if release_chart_contract_present "${adversarial_render_workflow}"; then
+  printf 'release workflow verifier accepted a chart without post-package rendering\n' >&2
+  exit 1
+fi
+
 fake_bin="${temporary_dir}/bin"
 mkdir -p "${fake_bin}"
 

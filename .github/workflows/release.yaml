@@ -134,25 +134,82 @@ jobs:
         env:
           HELM_EXPERIMENTAL_OCI: "1"
           CHART_REPOSITORY: oci://ghcr.io/${{ steps.tag.outputs.registry_repository }}/helm
+          IMAGE_REPOSITORY: ghcr.io/${{ steps.tag.outputs.registry_repository }}
         run: |
           set -o errexit -o nounset -o pipefail
 
           tag="${{ steps.tag.outputs.value }}"
           chart_version="${tag#v}"
           package_dir="${RUNNER_TEMP}/helm-packages"
-          mkdir -p "${package_dir}"
+          release_chart_root="${RUNNER_TEMP}/release-charts"
+          release_chart="${release_chart_root}/substrate"
+          release_crd_chart="${release_chart_root}/substrate-crds"
+          source_registry="ghcr.io/kagent-dev/substrate"
+          release_registry="${IMAGE_REPOSITORY}"
+          agentgateway_image="ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429"
+          mkdir -p "${package_dir}" "${release_chart_root}"
+          cp -R charts/substrate "${release_chart}"
+          cp -R charts/substrate-crds "${release_crd_chart}"
 
-          helm package charts/substrate-crds \
+          values_file="${release_chart}/values.yaml"
+          if [[ "$(grep -Fxc "  registry: ${source_registry}" "${values_file}")" -ne 1 ]]; then
+            echo "::error::Source chart image registry contract changed"
+            exit 1
+          fi
+          sed -i "s|^  registry: ${source_registry}$|  registry: ${release_registry}|" "${values_file}"
+          if [[ "$(grep -Fxc "  registry: ${release_registry}" "${values_file}")" -ne 1 ]] || \
+             grep -Fqx "  registry: ${source_registry}" "${values_file}"; then
+            echo "::error::Release chart image registry was not rewritten exactly once"
+            exit 1
+          fi
+          if [[ "$(grep -Fxc "  agentgateway: ${agentgateway_image}" "${values_file}")" -ne 1 ]]; then
+            echo "::error::Pinned external agentgateway image changed during release staging"
+            exit 1
+          fi
+
+          helm package "${release_crd_chart}" \
             --destination "${package_dir}" \
             --version "${chart_version}" \
             --app-version "${tag}"
-          helm package charts/substrate \
+          helm package "${release_chart}" \
             --destination "${package_dir}" \
             --version "${chart_version}" \
             --app-version "${tag}"
+
+          substrate_package="${package_dir}/substrate-${chart_version}.tgz"
+          packaged_values="${package_dir}/packaged-values.yaml"
+          rendered_chart="${package_dir}/rendered.yaml"
+          tar -xOf "${substrate_package}" substrate/values.yaml > "${packaged_values}"
+          if [[ "$(grep -Fxc "  registry: ${release_registry}" "${packaged_values}")" -ne 1 ]] || \
+             grep -Fqx "  registry: ${source_registry}" "${packaged_values}"; then
+            echo "::error::Packaged chart does not default to this fork's image registry"
+            exit 1
+          fi
+          if [[ "$(grep -Fxc "  agentgateway: ${agentgateway_image}" "${packaged_values}")" -ne 1 ]]; then
+            echo "::error::Packaged chart changed the pinned external agentgateway image"
+            exit 1
+          fi
+
+          helm template substrate-release "${substrate_package}" \
+            --namespace ate-system > "${rendered_chart}"
+          for component in ateapi atecontroller atelet atenet podcertcontroller; do
+            expected_image="${release_registry}/${component}:${tag}"
+            if ! grep -Fq "image: ${expected_image}" "${rendered_chart}"; then
+              echo "::error::Packaged chart did not render owned image ${expected_image}"
+              exit 1
+            fi
+            if grep -Fq "image: ${source_registry}/${component}:" "${rendered_chart}"; then
+              echo "::error::Packaged chart rendered upstream-owned image for ${component}"
+              exit 1
+            fi
+          done
+          if ! grep -Fq "image: ${agentgateway_image}" "${rendered_chart}"; then
+            echo "::error::Packaged chart did not preserve the pinned external agentgateway image"
+            exit 1
+          fi
 
           helm push "${package_dir}/substrate-crds-${chart_version}.tgz" "${CHART_REPOSITORY}"
-          helm push "${package_dir}/substrate-${chart_version}.tgz" "${CHART_REPOSITORY}"
+          helm push "${substrate_package}" "${CHART_REPOSITORY}"
 
       - name: Build kubectl-ate release binaries
         if: inputs.create_release
