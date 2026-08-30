@@ -25,6 +25,9 @@ KO := hack/run-tool.sh ko
 # Binaries
 BINDIR := bin/
 ATECTL := $(BINDIR)/kubectl-ate
+SUBSTRATE_RELEASE_VERIFY := $(BINDIR)/substrate-release-verify
+RELEASE_VERIFY_GOOS ?= linux
+RELEASE_VERIFY_GOARCH ?= $(shell $(GO) env GOARCH)
 
 # Version stamping. Override on the make command line to pin
 # (e.g. `make VERSION=v0.5.0 build`).
@@ -55,6 +58,15 @@ build-atectl:
 .PHONY: build-atenet
 build-atenet:
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINDIR)/atenet ./cmd/atenet
+
+# The release verifier runs in a minimal, read-only Skaffold verification Pod.
+# Keep this target independent from the server image build so the release rail
+# can package the same static binary at /usr/local/bin/substrate-release-verify.
+.PHONY: build-release-verifier
+build-release-verifier:
+	mkdir -p $(BINDIR)
+	CGO_ENABLED=0 GOOS=$(RELEASE_VERIFY_GOOS) GOARCH=$(RELEASE_VERIFY_GOARCH) \
+		$(GO) build -trimpath -o $(SUBSTRATE_RELEASE_VERIFY) ./cmd/substrate-release-verify
 
 .PHONY: build-demos
 build-demos:

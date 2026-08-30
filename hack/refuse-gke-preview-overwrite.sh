@@ -59,7 +59,7 @@ refuse_existing() {
   exit 1
 }
 
-for component in ateapi atecontroller ateom-gvisor; do
+for component in ateapi atecontroller ateom-gvisor atenet substrate-release-verify; do
   ref="${IMAGE_REGISTRY}/${component}:${IMAGE_TAG}"
   refuse_existing image "${ref}" docker buildx imagetools inspect "${ref}"
 done

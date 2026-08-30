@@ -26,6 +26,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: substrate-gke-preview-${{ github.sha }}
@@ -45,6 +47,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve immutable preview coordinates
+        id: coordinates
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
@@ -68,6 +71,7 @@ jobs:
             printf 'IMAGE_TAG=%s\n' "${image_tag}"
             printf 'CHART_VERSION=%s\n' "${chart_version}"
           } >> "${GITHUB_ENV}"
+          printf 'registry_repository=%s\n' "${registry_repository}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -82,9 +86,33 @@ jobs:
       - name: Verify preview inputs
         run: |
           set -o errexit -o nounset -o pipefail
-          go test ./cmd/ateapi/... ./cmd/atecontroller/... ./cmd/ateom-gvisor/...
+          go test ./cmd/ateapi/... ./cmd/atecontroller/... ./cmd/ateom-gvisor/... ./cmd/atenet/... ./cmd/substrate-release-verify/...
           make verify-external-control-plane-chart verify-crd-chart
           ./hack/verify/gke-preview-release.sh
+
+      - name: Verify pinned agentgateway dependency
+        run: |
+          set -o errexit -o nounset -o pipefail
+
+          agentgateway_refs="$(
+            helm template substrate charts/substrate \
+              --namespace ate-system \
+              --values charts/substrate/examples/external-control-plane-only-cloud-sql.values.yaml \
+              --show-only templates/atenet-egress.yaml \
+              | awk '
+                  $1 == "-" && $2 == "name:" && $3 == "agentgateway" { in_container = 1; next }
+                  in_container && $1 == "image:" { print $2; in_container = 0 }
+                '
+          )"
+          agentgateway_count="$(printf '%s\n' "${agentgateway_refs}" | awk 'NF { count++ } END { print count + 0 }')"
+          agentgateway_ref="$(printf '%s\n' "${agentgateway_refs}" | awk 'NF { print; exit }')"
+          if [[ "${agentgateway_count}" -ne 1 ]] \
+            || [[ ! "${agentgateway_ref}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The external profile must render exactly one digest-qualified agentgateway image"
+            exit 1
+          fi
+          docker buildx imagetools inspect "${agentgateway_ref}" >/dev/null
+          printf 'AGENTGATEWAY_IMAGE_REF=%s\n' "${agentgateway_ref}" >> "${GITHUB_ENV}"
 
       - name: Log in to GHCR
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
@@ -105,14 +133,16 @@ jobs:
           ./hack/refuse-gke-preview-overwrite.sh
 
       - name: Build and publish preview images
+        id: images
         run: |
           set -o errexit -o nounset -o pipefail
 
           mkdir -p dist/sbom
-          for component in ateapi atecontroller ateom-gvisor; do
+          for component in ateapi atecontroller ateom-gvisor atenet substrate-release-verify; do
             mkdir -p "dist/sbom/${component}"
             tagged_ref="${IMAGE_REGISTRY}/${component}:${IMAGE_TAG}"
-            KO_DOCKER_REPO="${IMAGE_REGISTRY}/${component}" \
+            published_ref="$(CGO_ENABLED=0 \
+              KO_DOCKER_REPO="${IMAGE_REGISTRY}/${component}" \
               ./hack/run-tool.sh ko build \
                 --bare \
                 --tags "${IMAGE_TAG}" \
@@ -122,19 +152,63 @@ jobs:
                 --image-label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
                 --sbom=spdx \
                 --sbom-dir="dist/sbom/${component}" \
-                "./cmd/${component}"
+                "./cmd/${component}")"
+            printf '%s\n' "${published_ref}"
 
-            digest="$(docker buildx imagetools inspect "${tagged_ref}" --format '{{json .}}' | jq -er '.manifest.digest')"
+            ref_prefix="${tagged_ref}@"
+            if [[ "${published_ref}" == *$'\n'* ]] || [[ "${published_ref}" != "${ref_prefix}"sha256:* ]]; then
+              echo "::error::ko returned an unexpected immutable reference for ${tagged_ref}: ${published_ref}"
+              exit 1
+            fi
+            digest="${published_ref#"${ref_prefix}"}"
             if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Could not resolve an immutable digest for ${tagged_ref}"
+              echo "::error::ko did not return an immutable digest for ${tagged_ref}"
               exit 1
             fi
 
             env_name="$(printf '%s' "${component}" | tr '[:lower:]-' '[:upper:]_')_IMAGE_REF"
             printf '%s=%s@%s\n' "${env_name}" "${IMAGE_REGISTRY}/${component}" "${digest}" >> "${GITHUB_ENV}"
+            output_name="$(printf '%s' "${component}" | tr '-' '_')_digest"
+            printf '%s=%s\n' "${output_name}" "${digest}" >> "${GITHUB_OUTPUT}"
           done
 
+      - name: Attest ateapi preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/ateapi
+          subject-digest: ${{ steps.images.outputs.ateapi_digest }}
+          push-to-registry: true
+
+      - name: Attest atecontroller preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/atecontroller
+          subject-digest: ${{ steps.images.outputs.atecontroller_digest }}
+          push-to-registry: true
+
+      - name: Attest ateom-gvisor preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/ateom-gvisor
+          subject-digest: ${{ steps.images.outputs.ateom_gvisor_digest }}
+          push-to-registry: true
+
+      - name: Attest atenet preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/atenet
+          subject-digest: ${{ steps.images.outputs.atenet_digest }}
+          push-to-registry: true
+
+      - name: Attest substrate release verifier preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/substrate-release-verify
+          subject-digest: ${{ steps.images.outputs.substrate_release_verify_digest }}
+          push-to-registry: true
+
       - name: Package and publish preview charts
+        id: charts
         env:
           HELM_EXPERIMENTAL_OCI: "1"
         run: |
@@ -156,6 +230,7 @@ jobs:
           publish_chart() {
             local chart_name="$1"
             local env_name="$2"
+            local output_name="$3"
             local output digest
 
             output="$(helm push "${package_dir}/${chart_name}-${CHART_VERSION}.tgz" "${chart_repository}")"
@@ -166,10 +241,25 @@ jobs:
               exit 1
             fi
             printf '%s=%s/%s@%s\n' "${env_name}" "${chart_repository}" "${chart_name}" "${digest}" >> "${GITHUB_ENV}"
+            printf '%s=%s\n' "${output_name}" "${digest}" >> "${GITHUB_OUTPUT}"
           }
 
-          publish_chart substrate-crds CRDS_CHART_REF
-          publish_chart substrate APPLICATION_CHART_REF
+          publish_chart substrate-crds CRDS_CHART_REF crds_digest
+          publish_chart substrate APPLICATION_CHART_REF application_digest
+
+      - name: Attest substrate CRD chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/helm/substrate-crds
+          subject-digest: ${{ steps.charts.outputs.crds_digest }}
+          push-to-registry: true
+
+      - name: Attest substrate application chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/helm/substrate
+          subject-digest: ${{ steps.charts.outputs.application_digest }}
+          push-to-registry: true
 
       - name: Generate app-gcp handoff manifest
         run: |
@@ -184,6 +274,9 @@ jobs:
           PREVIEW_ATEAPI_REF="${ATEAPI_IMAGE_REF}" \
           PREVIEW_ATECONTROLLER_REF="${ATECONTROLLER_IMAGE_REF}" \
           PREVIEW_ATEOM_GVISOR_REF="${ATEOM_GVISOR_IMAGE_REF}" \
+          PREVIEW_ATENET_REF="${ATENET_IMAGE_REF}" \
+          PREVIEW_AGENTGATEWAY_REF="${AGENTGATEWAY_IMAGE_REF}" \
+          PREVIEW_RELEASE_VERIFIER_REF="${SUBSTRATE_RELEASE_VERIFY_IMAGE_REF}" \
           PREVIEW_CRDS_CHART_REF="${CRDS_CHART_REF}" \
           PREVIEW_APPLICATION_CHART_REF="${APPLICATION_CHART_REF}" \
             ./hack/generate-gke-preview-manifest.sh
