@@ -215,7 +215,7 @@ func newTestPersistence(t *testing.T) store.Interface {
 }
 
 // newDanglingDialer returns a dialer whose informer cache has no pods, so
-// DialForWorker returns ErrWorkerPodNotFound and DialForAteletOnNode returns
+// DialForWorker returns ErrWorkerPodNotFound and DialForLocalSnapshot returns
 // ErrNoAteletOnNode.
 func newDanglingDialer() *AteletDialer {
 	empty := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{

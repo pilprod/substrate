@@ -16,9 +16,11 @@ package controlapi
 
 import (
 	"context"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -37,8 +39,17 @@ import (
 type RPCService struct {
 	ateapipb.UnimplementedControlServer
 	impl                  serviceStore
+	actorIngressStore     actorIngressStore
+	actorIngressDialer    ActorIngressByteDialer
+	actorEgressGateway    string
+	actorEgressDial       func(context.Context, string, string) (net.Conn, error)
+	actorEgressCA         externalActorCertificateAuthority
+	actorEgressRoutes     externalprovider.ExternalActorEgressRouteAuthorizer
+	actorEgressServerName string
+	actorEgressTrustPEM   []byte
+	actorEgressPrincipal  string
 	workerCache           *workercache.Cache
-	dialer                *AteletDialer
+	dialer                workerExecutionDialer
 	workerPoolLister      listersv1alpha1.WorkerPoolLister
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
 	actorWorkflow         *ActorWorkflow
@@ -64,15 +75,19 @@ func NewRPCService(
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister,
 	storageClassLister storagev1listers.StorageClassLister,
-	dialer *AteletDialer,
+	dialer workerExecutionDialer,
 	instruments *Instruments,
 	egressGatewayAddress string,
 	actorWorkflowDeadline time.Duration,
 	volumePlugins map[string]volume.VolumePluginControlPlane,
+	workflowOpts ...ActorWorkflowOption,
 ) *RPCService {
 	impl := newServiceImpl(persistence, actorTemplateLister, storageClassLister)
 	s := &RPCService{
 		impl:                  impl,
+		actorIngressStore:     impl,
+		actorEgressGateway:    egressGatewayAddress,
+		actorEgressDial:       (&net.Dialer{}).DialContext,
 		workerCache:           workerCache,
 		workerPoolLister:      workerPoolLister,
 		csiDriverConfigLister: csiDriverConfigLister,
@@ -80,7 +95,7 @@ func NewRPCService(
 		instruments:           instruments,
 		volumePlugins:         volumePlugins,
 	}
-	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, actorWorkflowDeadline)
+	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, actorWorkflowDeadline, workflowOpts...)
 	return s
 }
 

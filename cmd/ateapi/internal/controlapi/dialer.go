@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/substratex509"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
@@ -40,6 +41,10 @@ import (
 )
 
 var ErrWorkerPodNotFound = errors.New("worker pod not found")
+
+// ErrAteletUnsupportedWorkerProvider reports that a worker cannot be reached
+// through the Kubernetes atelet data plane.
+var ErrAteletUnsupportedWorkerProvider = errors.New("worker provider is not supported by the Kubernetes atelet dialer")
 
 // ErrNoAteletOnNode reports that the informer cache holds no atelet pod for
 // the requested node — e.g. the atelet is restarting, or the node is gone.
@@ -65,6 +70,8 @@ type AteletDialer struct {
 	// per-atelet mTLS; tests can override it with insecure credentials.
 	dialCredentials func(expectedPodUID string) (credentials.TransportCredentials, error)
 }
+
+var _ workerExecutionDialer = (*AteletDialer)(nil)
 
 // DialerOption customizes an AteletDialer built by NewAteletDialer.
 type DialerOption func(*AteletDialer)
@@ -102,9 +109,21 @@ func NewAteletDialer(workerIndexer cache.Indexer, ateletIndexer cache.Indexer, c
 	return d
 }
 
-// DialForWorker returns a gRPC connection to the Atelet running on the same node as the specified worker pod.
-// Returns ErrWorkerPodNotFound if the worker pod is not found in the informer cache.
-func (d *AteletDialer) DialForWorker(workerPodNamespace, workerPodName string) (*grpc.ClientConn, error) {
+// DialForWorker returns a gRPC connection to the Atelet running on the same
+// node as the assigned Kubernetes worker pod. It returns ErrWorkerPodNotFound
+// when a Kubernetes assignment is incomplete or the pod is absent from the
+// informer cache. Non-Kubernetes providers return
+// ErrAteletUnsupportedWorkerProvider without consulting that cache.
+func (d *AteletDialer) DialForWorker(assignment *ateapipb.WorkerAssignment) (*grpc.ClientConn, error) {
+	if provider := effectiveWorkerProvider(assignment.GetProvider()); provider != ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD {
+		return nil, fmt.Errorf("%w: %s", ErrAteletUnsupportedWorkerProvider, provider)
+	}
+	workerPodNamespace := assignment.GetWorkerNamespace()
+	workerPodName := assignment.GetWorkerPod()
+	if workerPodNamespace == "" || workerPodName == "" {
+		return nil, fmt.Errorf("%w: assignment has incomplete Kubernetes pod identity", ErrWorkerPodNotFound)
+	}
+
 	workerPodKey := workerPodNamespace + "/" + workerPodName
 	matchingPods, err := d.workerIndexer.ByIndex(byNamespaceAndName, workerPodKey)
 	if err != nil {
@@ -126,6 +145,17 @@ func (d *AteletDialer) DialForWorker(workerPodNamespace, workerPodName string) (
 		return nil, fmt.Errorf("for worker pod %q: %w", workerPodKey, err)
 	}
 	return conn, nil
+}
+
+// DialForLocalSnapshot returns a gRPC connection to the Atelet on the
+// Kubernetes node holding the local snapshot. It returns ErrNoAteletOnNode
+// when the snapshot has no recorded node.
+func (d *AteletDialer) DialForLocalSnapshot(local *ateapipb.LocalSnapshotInfo) (*grpc.ClientConn, error) {
+	nodes := local.GetNodeVmsWithLocalSnapshots()
+	if len(nodes) == 0 || nodes[0] == "" {
+		return nil, fmt.Errorf("%w: local snapshot has no Kubernetes node", ErrNoAteletOnNode)
+	}
+	return d.DialForAteletOnNode(nodes[0])
 }
 
 // DialForAteletOnNode resolves the single atelet pod on nodeName and dials it

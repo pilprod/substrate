@@ -51,6 +51,25 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate()},
 		nil,
 	}, {
+		"explicit external worker provider",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.WorkerProvider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+		})},
+		nil,
+	}, {
+		"unsupported worker provider",
+		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.WorkerProvider = ateapipb.WorkerProvider(99)
+		})},
+		field.ErrorList{field.NotSupported(
+			field.NewPath("actor_template", "worker_provider"),
+			ateapipb.WorkerProvider(99),
+			[]string{
+				ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD.String(),
+				ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT.String(),
+			},
+		)},
+	}, {
 		"unknown field on actor_template",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: withUnknown(validActorTemplate(), 9999)},
 		field.ErrorList{field.Invalid(field.NewPath("actor_template"), field.OmitValueType{}, "")},
@@ -198,6 +217,19 @@ func TestCreateActorTemplate(t *testing.T) {
 	if created.GetMetadata().GetName() != "tmpl-a" {
 		t.Errorf("created name = %q, want tmpl-a", created.GetMetadata().GetName())
 	}
+	if created.GetWorkerProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD {
+		t.Errorf("created worker_provider = %v, want KUBERNETES_POD", created.GetWorkerProvider())
+	}
+
+	externalReq := req("ns1", "tmpl-external")
+	externalReq.ActorTemplate.WorkerProvider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+	external, err := s.CreateActorTemplate(ctx, externalReq)
+	if err != nil {
+		t.Fatalf("CreateActorTemplate(external) failed: %v", err)
+	}
+	if external.GetWorkerProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		t.Errorf("external worker_provider = %v, want EXTERNAL_SLOT", external.GetWorkerProvider())
+	}
 }
 
 // TestCreateActorTemplateIgnoresServerOwnedFields pins the create contract:
@@ -239,6 +271,7 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Containers = in.GetContainers()
 		tmpl.SnapshotsConfig = in.GetSnapshotsConfig()
 		tmpl.Resources = in.GetResources()
+		tmpl.WorkerProvider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
 		tmpl.Status = &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL}
 	})
 	if diff := cmp.Diff(want, created, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {

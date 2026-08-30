@@ -517,6 +517,98 @@ func (f failingUpdateWorkerStore) UpdateWorker(context.Context, string, store.Pr
 	return nil, f.err
 }
 
+type releaseWorkerTestStore struct {
+	worker      *ateapipb.Worker
+	updateCalls int
+}
+
+func (s *releaseWorkerTestStore) GetActor(context.Context, resources.ActorRef) (*ateapipb.Actor, error) {
+	return nil, errors.New("unexpected GetActor call")
+}
+
+func (s *releaseWorkerTestStore) UpdateActor(context.Context, resources.ActorRef, store.Precondition, func(*ateapipb.Actor) error) (*ateapipb.Actor, error) {
+	return nil, errors.New("unexpected UpdateActor call")
+}
+
+func (s *releaseWorkerTestStore) GetWorker(_ context.Context, name string) (*ateapipb.Worker, error) {
+	if s.worker == nil || s.worker.GetMetadata().GetName() != name {
+		return nil, store.ErrNotFound
+	}
+	return s.worker, nil
+}
+
+func (s *releaseWorkerTestStore) UpdateWorker(_ context.Context, name string, _ store.Precondition, mutate func(*ateapipb.Worker) error) (*ateapipb.Worker, error) {
+	if s.worker == nil || s.worker.GetMetadata().GetName() != name {
+		return nil, store.ErrNotFound
+	}
+	s.updateCalls++
+	if err := mutate(s.worker); err != nil {
+		return nil, err
+	}
+	return s.worker, nil
+}
+
+func TestReleaseWorkerRespectsResourceIncarnationPin(t *testing.T) {
+	const (
+		workerName  = "worker-a"
+		originalUID = "11111111-1111-4111-8111-111111111111"
+		currentUID  = "22222222-2222-4222-8222-222222222222"
+		actorUID    = "actor-incarnation-a"
+	)
+
+	tests := []struct {
+		name          string
+		assignmentUID string
+		provider      ateapipb.WorkerProvider
+		wantReleased  bool
+		wantErr       bool
+	}{
+		{name: "legacy unpinned assignment keeps compatibility", wantReleased: true},
+		{name: "matching resource incarnation releases", assignmentUID: currentUID, wantReleased: true},
+		{name: "recreated Worker with same name is untouched", assignmentUID: originalUID, wantReleased: false},
+		{name: "ExternalSlot without resource UID fails closed", provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, wantErr: true},
+		{name: "pinned ExternalSlot releases", provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, assignmentUID: currentUID, wantReleased: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actor := &ateapipb.Actor{
+				Metadata: &ateapipb.ResourceMetadata{Uid: actorUID},
+				Status: &ateapipb.ActorStatus{WorkerAssignment: &ateapipb.WorkerAssignment{
+					Worker:            &ateapipb.ObjectRef{Name: workerName},
+					WorkerResourceUid: tt.assignmentUID,
+					Provider:          tt.provider,
+				}},
+			}
+			st := &releaseWorkerTestStore{worker: &ateapipb.Worker{
+				Metadata:     &ateapipb.ResourceMetadata{Name: workerName, Uid: currentUID, Version: 1},
+				SandboxClass: "gvisor",
+				Status: &ateapipb.WorkerStatus{Assignment: &ateapipb.ActorAssignment{
+					ActorUid: actorUID,
+				}},
+			}}
+
+			gotClass, err := releaseWorker(context.Background(), st, actor)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("releaseWorker() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if gotClass != "gvisor" {
+				t.Errorf("releaseWorker() sandbox class = %q, want gvisor", gotClass)
+			}
+			if gotReleased := st.worker.GetStatus().GetAssignment() == nil; gotReleased != tt.wantReleased {
+				t.Errorf("Worker released = %v, want %v", gotReleased, tt.wantReleased)
+			}
+			wantUpdates := 0
+			if tt.wantReleased {
+				wantUpdates = 1
+			}
+			if st.updateCalls != wantUpdates {
+				t.Errorf("UpdateWorker calls = %d, want %d", st.updateCalls, wantUpdates)
+			}
+		})
+	}
+}
+
 // A transient failure releasing the worker must not move the actor to the
 // terminal CRASHED state: doing so would strand the still-assigned worker with
 // no actor left to drive a retry, permanently consuming the worker slot.

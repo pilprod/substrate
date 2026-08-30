@@ -32,6 +32,27 @@ bash "${ROOT}/hack/run-tool.sh" controller-gen \
   paths="${ROOT}/cmd/atecontroller/internal/controllers/..." \
   "output:rbac:artifacts:config=${ROOT}/charts/substrate/templates/"
 
-# Templatize the ClusterRole name. controller-gen emits `  name: ate-controller`
-# at column 0; the substitution is exact-match to stay robust.
-sed -i 's|^  name: ate-controller$|  name: {{ include "substrate.fullname" (list "ate-controller" .) }}|' "${OUT}"
+# Keep generated RBAC out of the external-control-plane-only profile and
+# templatize every generated ate-controller role name. Use a temporary file
+# instead of sed -i so generation is identical on GNU and BSD/macOS hosts.
+TMP_OUT="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "${TMP_OUT}"' EXIT
+awk '
+  !guarded && $0 == "---" {
+    print "{{- if and (ne (.Values.profile | default \"standard\") \"external-control-plane-only\") .Values.rbac.create }}"
+    guarded = 1
+  }
+  $0 == "  name: ate-controller" {
+    print "  name: {{ include \"substrate.fullname\" (list \"ate-controller\" .) }}"
+    next
+  }
+  { print }
+  END {
+    if (!guarded) {
+      exit 1
+    }
+    print "{{- end }}"
+  }
+' "${OUT}" > "${TMP_OUT}"
+mv "${TMP_OUT}" "${OUT}"
+trap - EXIT

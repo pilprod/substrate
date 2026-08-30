@@ -26,6 +26,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -37,6 +39,10 @@ var (
 	oidPodIdentity = makeSubstrateOID(1)
 	// oidActorIdentity identifies the Substrate ActorIdentity X.509 extension specifically in substrate.
 	oidActorIdentity = makeSubstrateOID(2)
+	// oidExternalRouteBinding binds an actor certificate to one exact live
+	// external-provider route generation. It is separate from ActorIdentity so
+	// existing in-cluster actor certificates retain their current semantics.
+	oidExternalRouteBinding = makeSubstrateOID(3)
 )
 
 func makeSubstrateOID(subIDs ...int) asn1.ObjectIdentifier {
@@ -215,4 +221,114 @@ func validateActorIdentity(actor *ActorIdentity) error {
 		return fmt.Errorf("unsupported Purpose %q", actor.Purpose)
 	}
 	return nil
+}
+
+// ExternalRouteBindingVersion is the only signed route-binding encoding
+// currently understood by ateapi and atenet.
+const ExternalRouteBindingVersion uint32 = 1
+
+// ExternalRouteBinding is the server-derived ExternalSlot route authority
+// embedded in a short-lived actor certificate. None of these fields may come
+// from the CSR or provider client.
+type ExternalRouteBinding struct {
+	Version           uint32
+	RegistrationUID   string
+	SlotID            string
+	WorkerUID         string
+	SessionGeneration uint64
+	ExecutionIdentity string
+}
+
+// AddExternalRouteBindingToCertificate appends one validated, signed route
+// binding extension to template.
+func AddExternalRouteBindingToCertificate(binding *ExternalRouteBinding, template *x509.Certificate) error {
+	if template == nil {
+		return fmt.Errorf("certificate template is required")
+	}
+	if err := validateExternalRouteBinding(binding); err != nil {
+		return fmt.Errorf("while validating ExternalRouteBinding input: %w", err)
+	}
+	wire, err := json.Marshal(binding)
+	if err != nil {
+		return fmt.Errorf("while json-marshaling ExternalRouteBinding extension: %w", err)
+	}
+	template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
+		Id:    oidExternalRouteBinding,
+		Value: wire,
+	})
+	return nil
+}
+
+// ExternalRouteBindingFromCertificate returns the single validated route
+// binding, nil when the extension is absent, and an error for duplicates or a
+// malformed value.
+func ExternalRouteBindingFromCertificate(cert *x509.Certificate) (*ExternalRouteBinding, error) {
+	if cert == nil {
+		return nil, fmt.Errorf("certificate is required")
+	}
+	count := 0
+	var value []byte
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(oidExternalRouteBinding) {
+			count++
+			value = ext.Value
+		}
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	if count > 1 {
+		return nil, fmt.Errorf("certificate contains multiple ExternalRouteBinding extensions")
+	}
+	binding := &ExternalRouteBinding{}
+	if err := json.Unmarshal(value, binding); err != nil {
+		return nil, fmt.Errorf("while json-unmarshaling ExternalRouteBinding extension: %w", err)
+	}
+	if err := validateExternalRouteBinding(binding); err != nil {
+		return nil, fmt.Errorf("while validating ExternalRouteBinding extension: %w", err)
+	}
+	return binding, nil
+}
+
+func validateExternalRouteBinding(binding *ExternalRouteBinding) error {
+	if binding == nil {
+		return fmt.Errorf("binding is required")
+	}
+	if binding.Version != ExternalRouteBindingVersion {
+		return fmt.Errorf("unsupported Version %d", binding.Version)
+	}
+	if !validExternalRouteIdentity(binding.RegistrationUID) {
+		return fmt.Errorf("invalid RegistrationUID")
+	}
+	if !validExternalRouteIdentity(binding.SlotID) {
+		return fmt.Errorf("invalid SlotID")
+	}
+	workerUID, err := uuid.Parse(binding.WorkerUID)
+	if err != nil || workerUID.String() != binding.WorkerUID {
+		return fmt.Errorf("invalid WorkerUID")
+	}
+	if binding.SessionGeneration == 0 {
+		return fmt.Errorf("SessionGeneration must be nonzero")
+	}
+	if !validExternalRouteIdentity(binding.ExecutionIdentity) {
+		return fmt.Errorf("invalid ExecutionIdentity")
+	}
+	return nil
+}
+
+func validExternalRouteIdentity(value string) bool {
+	if len(value) == 0 || len(value) > 253 || !asciiAlphaNumeric(value[0]) || !asciiAlphaNumeric(value[len(value)-1]) {
+		return false
+	}
+	for index := 1; index+1 < len(value); index++ {
+		char := value[index]
+		if !asciiAlphaNumeric(char) && char != '.' && char != '_' && char != '~' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }

@@ -21,13 +21,14 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -176,6 +177,14 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	actorTemplate, err := w.actorTemplateLister.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
 	if err != nil {
 		return nil, nil, src, fmt.Errorf("while getting ActorTemplate: %w", err)
+	}
+	hasSnapshotSource := actor.GetSourceSnapshotTag() != nil ||
+		actor.GetStatus().GetSourceSnapshot() != nil ||
+		actor.GetStatus().GetLocalSnapshotInfo() != nil ||
+		actor.GetStatus().GetLatestSnapshot() != nil ||
+		(!boot && actorTemplate.Status.GoldenSnapshot != "")
+	if err := rejectUnsupportedSnapshotSource(actorTemplate, hasSnapshotSource, "resuming from a snapshot"); err != nil {
+		return nil, nil, src, err
 	}
 	if ref := actor.GetStatus().GetLatestSnapshot(); ref != nil {
 		snapshot, err := w.store.GetActorSnapshot(ctx, resources.ActorSnapshotRefFromObjectRef(ref))
@@ -377,6 +386,16 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, fmt.Errorf("failed to get already assigned worker for actor %w", err)
 	}
+	if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+		slog.ErrorContext(ctx, "crashing actor because its Worker resource incarnation cannot be proven",
+			slog.String("actor", actorRef.String()),
+			slog.String("worker", assignment.GetWorker().GetName()),
+			slog.Any("err", err))
+		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
+			return nil, fmt.Errorf("while crashing actor: %w", cerr)
+		}
+		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
+	}
 	if worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_DRAINING {
 		slog.InfoContext(ctx, "Assigned worker is draining; crashing actor",
 			slog.String("actor", actorRef.String()),
@@ -524,10 +543,32 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// Workers() returns pointers directly from the cache, so the claim is written
 	// by mutating the store's own copy; the cached one is only read, for the
 	// version this claim is conditioned on.
-	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = assignment
-		return nil
-	})
+	var stored *ateapipb.Worker
+	claim := func(validateCurrent func(*ateapipb.Worker) error) error {
+		var claimErr error
+		stored, claimErr = w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
+			if validateCurrent != nil {
+				if err := validateCurrent(toUpdate); err != nil {
+					return err
+				}
+			}
+			toUpdate.Status.Assignment = assignment
+			return nil
+		})
+		return claimErr
+	}
+	if effectiveWorkerProvider(assignedWorker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if w.externalRouteGuard == nil {
+			err = externalprovider.ErrExternalRouteAssignmentUnavailable
+		} else {
+			err = w.externalRouteGuard.GuardAssignment(ctx, actorRef.Atespace, assignedWorker, claim)
+		}
+		if errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
+			err = errors.Join(store.ErrVersionConflict, err)
+		}
+	} else {
+		err = claim(nil)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
@@ -537,7 +578,10 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 	assignedWorker = stored
 
-	newAssignment := workerAssignmentFrom(assignedWorker)
+	newAssignment, err := workerAssignmentFrom(assignedWorker)
+	if err != nil {
+		return nil, nil, err
+	}
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING
 		toUpdate.Status.WorkerAssignment = newAssignment
@@ -567,15 +611,28 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	return storedActor, assignedWorker, nil
 }
 
-func workerAssignmentFrom(w *ateapipb.Worker) *ateapipb.WorkerAssignment {
-	return &ateapipb.WorkerAssignment{
-		Worker:          &ateapipb.ObjectRef{Name: w.GetMetadata().GetName()},
-		WorkerNamespace: w.GetWorkerNamespace(),
-		WorkerPool:      w.GetWorkerPool(),
-		WorkerPod:       w.GetWorkerPod(),
-		WorkerPodUid:    w.GetWorkerPodUid(),
-		WorkerPodIp:     w.GetIp(),
+// workerAssignmentFrom snapshots a Worker returned by the authoritative store.
+// It rejects an object without the server-assigned resource UID so callers
+// cannot persist a new unpinned assignment.
+func workerAssignmentFrom(w *ateapipb.Worker) (*ateapipb.WorkerAssignment, error) {
+	if w == nil || w.GetMetadata().GetName() == "" || w.GetMetadata().GetUid() == "" {
+		return nil, fmt.Errorf("cannot create Worker assignment from incomplete server resource identity")
 	}
+	var externalSlot *ateapipb.ExternalSlotIdentity
+	if w.GetExternalSlot() != nil {
+		externalSlot = proto.Clone(w.GetExternalSlot()).(*ateapipb.ExternalSlotIdentity)
+	}
+	return &ateapipb.WorkerAssignment{
+		Worker:            &ateapipb.ObjectRef{Name: w.GetMetadata().GetName()},
+		WorkerResourceUid: w.GetMetadata().GetUid(),
+		WorkerNamespace:   w.GetWorkerNamespace(),
+		WorkerPool:        w.GetWorkerPool(),
+		WorkerPod:         w.GetWorkerPod(),
+		WorkerPodUid:      w.GetWorkerPodUid(),
+		WorkerPodIp:       w.GetIp(),
+		Provider:          w.GetProvider(),
+		ExternalSlot:      externalSlot,
+	}, nil
 }
 
 // actorResourceLimits returns the actor's declared CPU (millicores) and memory
@@ -598,7 +655,13 @@ func actorResourceLimits(tmpl *atev1alpha1.ActorTemplate) (cpuMilli, memBytes in
 
 func schedulingConstraints(actor *ateapipb.Actor, tmpl *atev1alpha1.ActorTemplate) (scheduling.Constraints, error) {
 	cpuMilli, memBytes := actorResourceLimits(tmpl)
+	provider, err := actorTemplateWorkerProvider(tmpl.Spec.WorkerProvider)
+	if err != nil {
+		return scheduling.Constraints{}, err
+	}
 	c := scheduling.Constraints{
+		Provider:      provider,
+		OwnerAtespace: actor.GetMetadata().GetAtespace(),
 		SandboxClass:  string(tmpl.Spec.SandboxClass),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes: actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(),
@@ -615,6 +678,17 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *atev1alpha1.ActorTemplat
 	return c, nil
 }
 
+func actorTemplateWorkerProvider(provider atev1alpha1.WorkerProvider) (ateapipb.WorkerProvider, error) {
+	switch provider {
+	case "", atev1alpha1.WorkerProviderKubernetesPod:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, nil
+	case atev1alpha1.WorkerProviderExternalSlot:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, nil
+	default:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED, fmt.Errorf("invalid ActorTemplate worker provider %q", provider)
+	}
+}
+
 // ensureVolumesAttached attaches the actor's mounted external volumes to the
 // assigned worker's node. Attachment is idempotent, so a re-entered workflow
 // safely runs it again.
@@ -623,13 +697,20 @@ func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actor *ateapi
 	ctx, done := stepSpan(ctx, "AttachVolumes")
 	defer func() { err = done(err) }()
 
+	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
+	mounted := getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate)
+	if effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if len(mounted) == 0 {
+			return nil
+		}
+		return status.Error(codes.FailedPrecondition, "ExternalSlot workers do not support cluster-attached volumes")
+	}
 	node := worker.GetNodeName()
 	if node == "" {
 		return fmt.Errorf("assigned worker has no node name")
 	}
 
-	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
-	for _, vol := range getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate) {
+	for _, vol := range mounted {
 		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
 		plugin, err := w.pluginRegistry.GetPlugin(ctx, vol.GetVolumeType())
 		if err != nil {
@@ -654,7 +735,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 	defer func() { err = done(err) }()
 
 	assignment := actor.GetStatus().GetWorkerAssignment()
-	ateletConn, err := w.dialer.DialForWorker(assignment.GetWorkerNamespace(), assignment.GetWorkerPod())
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return tele, err
+	}
+	ateletConn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		return tele, err
 	}
@@ -675,7 +760,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 
 		req := &ateletpb.RestoreRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
@@ -723,7 +808,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		tele.WireSnapshotScope = ateattr.SnapshotScopeValue(scope)
 		req := &ateletpb.RestoreRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
@@ -749,16 +834,20 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		slog.InfoContext(ctx, "Actor has no snapshot; ActorTemplate has no golden snapshot; Booting from ActorTemplate spec")
 		tele.SnapshotKind = ateattr.SnapshotKindBoot
 
-		// Booting from scratch: resolve the sandbox binaries from the pool's
-		// SandboxConfig and send them so atelet can fetch and record them.
-		// (Restores above are self-describing via the snapshot manifest.)
-		sandboxAssets, err := resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool())
-		if err != nil {
-			return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
+		// Kubernetes workers need cluster-owned sandbox binaries from their
+		// SandboxConfig. ExternalSlot launchers are owned and verified by the
+		// connected provider, so sending Kubernetes sandbox assets would both
+		// leak an in-cluster implementation detail and override local policy.
+		var sandboxAssets *ateletpb.SandboxAssets
+		if effectiveWorkerProvider(assignment.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+			sandboxAssets, err = resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool())
+			if err != nil {
+				return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
+			}
 		}
 
 		req := &ateletpb.RunRequest{
-			TargetAteomUid:         assignment.GetWorkerPodUid(),
+			TargetAteomUid:         targetUID,
 			Atespace:               actor.GetMetadata().GetAtespace(),
 			ActorName:              actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
@@ -766,13 +855,23 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			SandboxAssets:          sandboxAssets,
 			Spec:                   workloadSpec,
 			ActorUid:               actor.GetMetadata().Uid,
-			EgressGateway:          egressGateway,
+			EgressGateway:          w.runEgressGateway(assignment),
 			CpuMilli:               cpuMilli,
 			MemoryBytes:            memBytes,
 		}
 		_, err = client.Run(ctx, req)
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while creating workload from spec", ateattr.OperationResume)
 	}
+}
+
+func (w *ActorWorkflow) runEgressGateway(assignment *ateapipb.WorkerAssignment) *ateletpb.EgressGateway {
+	// The configured gateway is an in-cluster endpoint. ExternalSlot execution
+	// runs outside that network and its provider-owned Herder must not receive a
+	// Kubernetes-only address it cannot reach or is required to reject.
+	if effectiveWorkerProvider(assignment.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		return nil
+	}
+	return w.egressGateway()
 }
 
 func (w *ActorWorkflow) egressGateway() *ateletpb.EgressGateway {

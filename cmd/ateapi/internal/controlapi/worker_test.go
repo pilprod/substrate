@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// Worker names are pod UIDs, which are opaque to everything above the syncer.
+// These legacy Kubernetes fixture names are pod UIDs, opaque above the syncer.
 const (
 	apiWorkerName      = "5f2c1a90-7b34-4e6d-8a11-0c3e9d5b7f42"
 	apiOtherWorkerName = "1a7e4c83-6d20-4f95-b3c8-9e0a2f6d4b17"
@@ -50,6 +50,19 @@ func newAPIWorker(name string) *ateapipb.Worker {
 		SandboxClass:    "gvisor",
 		Capacity:        &ateapipb.WorkerCapacity{CpuMilli: 2000, MemoryBytes: 4 << 30},
 	}
+}
+
+func makeAPIWorkerExternal(worker *ateapipb.Worker) {
+	worker.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+	worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
+		ExecutionIdentity: "host-01.slot_02",
+		LocalityIdentity:  "device-01~workspace",
+		OwnerAtespace:     "team-a",
+	}
+	worker.WorkerPod = ""
+	worker.WorkerPodUid = ""
+	worker.NodeName = ""
+	worker.Ip = ""
 }
 
 func newAPIAssignment(actorUID string) *ateapipb.ActorAssignment {
@@ -200,10 +213,48 @@ func TestCreateWorker(t *testing.T) {
 	if got.GetMetadata().GetUid() == "" {
 		t.Error("created worker has no uid; the store is meant to assign one")
 	}
-	// A Worker is registered only once its pod is Ready and has an IP, which
-	// makes ACTIVE the only state it can be born in.
+	// A KubernetesPod is ready when it registers.
 	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
 		t.Errorf("created worker state = %v, want %v", got.GetStatus().GetState(), ateapipb.WorkerState_WORKER_STATE_ACTIVE)
+	}
+
+	stored, err := persistence.GetWorker(ctx, apiWorkerName)
+	if err != nil {
+		t.Fatalf("GetWorker() failed: %v", err)
+	}
+	if diff := cmp.Diff(stored, got, protocmp.Transform()); diff != "" {
+		t.Errorf("CreateWorker() returned something other than what it stored (-stored +returned):\n%s", diff)
+	}
+}
+
+func TestCreateExternalWorker(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	worker := newAPIWorker(apiWorkerName)
+	makeAPIWorkerExternal(worker)
+	worker.Status = &ateapipb.WorkerStatus{
+		State:      ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+		Assignment: newAPIAssignment("forged-actor-uid"),
+	}
+
+	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
+	if err != nil {
+		t.Fatalf("CreateWorker() failed: %v", err)
+	}
+	if got.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		t.Errorf("provider = %v, want ExternalSlot", got.GetProvider())
+	}
+	if diff := cmp.Diff(worker.GetExternalSlot(), got.GetExternalSlot(), protocmp.Transform()); diff != "" {
+		t.Errorf("external_slot mismatch (-want +got):\n%s", diff)
+	}
+	if got.GetWorkerPod() != "" || got.GetWorkerPodUid() != "" || got.GetNodeName() != "" || got.GetIp() != "" {
+		t.Errorf("external Worker carries Kubernetes identity: %v", got)
+	}
+	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+		t.Errorf("created worker state = %v, want OFFLINE", got.GetStatus().GetState())
+	}
+	if got.GetStatus().GetAssignment() != nil {
+		t.Errorf("created worker assignment = %v, want request-owned status discarded", got.GetStatus().GetAssignment())
 	}
 
 	stored, err := persistence.GetWorker(ctx, apiWorkerName)
@@ -358,6 +409,33 @@ func TestUpdateWorker_LeavesStatusAlone(t *testing.T) {
 	}
 	if diff := cmp.Diff(assigned.GetStatus(), got.GetStatus(), protocmp.Transform()); diff != "" {
 		t.Errorf("UpdateWorker() disturbed status (-want +got):\n%s", diff)
+	}
+}
+
+func TestUpdateWorker_CannotActivateExternalWorker(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newWorkerAPIService(t)
+	worker := newAPIWorker(apiWorkerName)
+	makeAPIWorkerExternal(worker)
+	created, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: worker})
+	if err != nil {
+		t.Fatalf("CreateWorker() failed: %v", err)
+	}
+
+	got, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(created, func(w *ateapipb.Worker) {
+			w.SandboxClass = "microvm"
+			w.Status.State = ateapipb.WorkerState_WORKER_STATE_ACTIVE
+		}),
+	})
+	if err != nil {
+		t.Fatalf("UpdateWorker() failed: %v", err)
+	}
+	if got.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+		t.Errorf("state = %v, want OFFLINE: only the external provider broker may activate the Worker", got.GetStatus().GetState())
+	}
+	if got.GetSandboxClass() != "microvm" {
+		t.Errorf("sandbox_class = %q, want mutable fields to be updated", got.GetSandboxClass())
 	}
 }
 
@@ -648,6 +726,19 @@ func TestValidateWorker(t *testing.T) {
 	}{{
 		name: "valid unassigned worker",
 	}, {
+		name:   "valid explicit KubernetesPod worker",
+		mutate: func(w *ateapipb.Worker) { w.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD },
+	}, {
+		name:   "valid ExternalSlot worker",
+		mutate: makeAPIWorkerExternal,
+	}, {
+		name: "valid maximum length external identities",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.ExecutionIdentity = strings.Repeat("a", maxExternalSlotIdentityLength)
+			w.ExternalSlot.LocalityIdentity = strings.Repeat("z", maxExternalSlotIdentityLength)
+		},
+	}, {
 		// status is output-only and every caller sets it itself, so it is not
 		// validated at all: a thoroughly malformed one still passes.
 		name: "status is not validated",
@@ -697,6 +788,80 @@ func TestValidateWorker(t *testing.T) {
 		name:    "invalid node_name",
 		mutate:  func(w *ateapipb.Worker) { w.NodeName = "NODE_NAME" },
 		wantMsg: "worker.node_name: Invalid value",
+	}, {
+		name: "KubernetesPod worker carries external identity",
+		mutate: func(w *ateapipb.Worker) {
+			w.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+			w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1", OwnerAtespace: "team-a"}
+		},
+		wantMsg: "worker.external_slot: Forbidden",
+	}, {
+		name: "ExternalSlot worker missing identity",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot = nil
+		},
+		wantMsg: "worker.external_slot: Required value",
+	}, {
+		name: "ExternalSlot worker missing execution identity",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.ExecutionIdentity = ""
+		},
+		wantMsg: "worker.external_slot.execution_identity: Required value",
+	}, {
+		name: "ExternalSlot worker missing owner atespace",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.OwnerAtespace = ""
+		},
+		wantMsg: "worker.external_slot.owner_atespace: Required value",
+	}, {
+		name: "ExternalSlot worker rejects invalid owner atespace",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.OwnerAtespace = "Team_A"
+		},
+		wantMsg: "worker.external_slot.owner_atespace: Invalid value",
+	}, {
+		name: "ExternalSlot worker carries pod identity",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.WorkerPod = "worker-pod-1"
+		},
+		wantMsg: "worker.worker_pod: Forbidden",
+	}, {
+		name: "ExternalSlot identity rejects whitespace",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.ExecutionIdentity = "host 1"
+		},
+		wantMsg: "worker.external_slot.execution_identity: Invalid value",
+	}, {
+		name: "ExternalSlot identity rejects route syntax",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.ExecutionIdentity = "https://host-1/session"
+		},
+		wantMsg: "worker.external_slot.execution_identity: Invalid value",
+	}, {
+		name: "ExternalSlot identity rejects control characters",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.LocalityIdentity = "device\n1"
+		},
+		wantMsg: "worker.external_slot.locality_identity: Invalid value",
+	}, {
+		name: "ExternalSlot identity is bounded",
+		mutate: func(w *ateapipb.Worker) {
+			makeAPIWorkerExternal(w)
+			w.ExternalSlot.ExecutionIdentity = strings.Repeat("a", maxExternalSlotIdentityLength+1)
+		},
+		wantMsg: "worker.external_slot.execution_identity: Too long",
+	}, {
+		name:    "unknown provider",
+		mutate:  func(w *ateapipb.Worker) { w.Provider = ateapipb.WorkerProvider(99) },
+		wantMsg: "worker.provider: Unsupported value",
 	}, {
 		name:    "missing metadata",
 		mutate:  func(w *ateapipb.Worker) { w.Metadata = nil },

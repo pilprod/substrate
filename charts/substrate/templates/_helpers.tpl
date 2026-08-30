@@ -84,7 +84,8 @@ Build an image reference for a substrate component binary.
 Usage:
   {{ include "substrate.componentImage" (list "ateapi" .) }}
 
-Produces  {image.registry}/{name}:{tag}  where tag is resolved as:
+Produces  {image.registry}/{name}@{digest} when image.digests[name] is set.
+Otherwise produces {image.registry}/{name}:{tag}, where tag is resolved as:
   1. image.tag value, if set and not the sentinel "<none>"
   2. .Chart.AppVersion, if image.tag is empty
   3. no tag (no colon) when image.tag is the sentinel "<none>"
@@ -96,10 +97,141 @@ are emitted without a tag, letting `ko resolve` supply the digest at build time.
 {{- $name := index . 0 -}}
 {{- $ctx := index . 1 -}}
 {{- $registry := $ctx.Values.image.registry -}}
+{{- $digests := $ctx.Values.image.digests | default dict -}}
+{{- $digest := get $digests $name | default "" -}}
 {{- $tag := $ctx.Values.image.tag | default $ctx.Chart.AppVersion -}}
-{{- if ne $tag "<none>" -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail (printf "image.digests.%s must be a sha256 OCI digest" $name) -}}
+{{- end -}}
+{{- printf "%s/%s@%s" $registry $name $digest -}}
+{{- else if ne $tag "<none>" -}}
 {{- printf "%s/%s:%s" $registry $name $tag -}}
 {{- else -}}
 {{- printf "%s/%s" $registry $name -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validate a required existing Kubernetes Secret name. */}}
+{{- define "substrate.validateExistingSecretName" -}}
+{{- $path := index . 0 -}}
+{{- $value := index . 1 | default "" -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required for profile external-control-plane-only" $path) -}}
+{{- end -}}
+{{- if or (gt (len $value) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $value)) -}}
+{{- fail (printf "%s must be a valid Kubernetes Secret name" $path) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validate a required key in a referenced Kubernetes Secret. */}}
+{{- define "substrate.validateExistingSecretKey" -}}
+{{- $path := index . 0 -}}
+{{- $value := index . 1 | default "" -}}
+{{- if or (not $value) (gt (len $value) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $value)) -}}
+{{- fail (printf "%s must be a valid Kubernetes Secret data key" $path) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate cross-field topology contracts which JSON schema cannot express
+without changing the existing chart's permissive values surface.
+*/}}
+{{- define "substrate.validateValues" -}}
+{{- $profile := .Values.profile | default "standard" -}}
+{{- if not (has $profile (list "standard" "external-control-plane-only")) -}}
+{{- fail (printf "profile must be one of standard or external-control-plane-only, got %q" $profile) -}}
+{{- end -}}
+{{- $brokerPort := int .Values.externalProviderBroker.containerPort -}}
+{{- if or (lt $brokerPort 1) (gt $brokerPort 65535) -}}
+{{- fail "externalProviderBroker.containerPort must be between 1 and 65535" -}}
+{{- end -}}
+{{- if eq $brokerPort 443 -}}
+{{- fail "externalProviderBroker.containerPort must differ from the Control API port 443" -}}
+{{- end -}}
+{{- if not .Values.externalProviderBroker.sessionTokenTTL -}}
+{{- fail "externalProviderBroker.sessionTokenTTL must not be empty" -}}
+{{- end -}}
+{{- $brokerEnabled := or .Values.externalProviderBroker.enabled (eq $profile "external-control-plane-only") -}}
+{{- $brokerGateway := .Values.externalProviderBroker.gateway -}}
+{{- if $brokerGateway.enabled -}}
+{{- if not $brokerEnabled -}}
+{{- fail "externalProviderBroker.gateway.enabled requires externalProviderBroker.enabled=true or profile external-control-plane-only" -}}
+{{- end -}}
+{{- if or (gt (len $brokerGateway.gatewayClassName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $brokerGateway.gatewayClassName)) -}}
+{{- fail "externalProviderBroker.gateway.gatewayClassName must be a valid GatewayClass name" -}}
+{{- end -}}
+{{- $gatewayPort := int $brokerGateway.listenerPort -}}
+{{- if or (lt $gatewayPort 1) (gt $gatewayPort 65535) -}}
+{{- fail "externalProviderBroker.gateway.listenerPort must be between 1 and 65535" -}}
+{{- end -}}
+{{- if or (not $brokerGateway.hostname) (gt (len $brokerGateway.hostname) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $brokerGateway.hostname)) -}}
+{{- fail "externalProviderBroker.gateway.hostname must be an exact valid DNS name" -}}
+{{- end -}}
+{{- end -}}
+{{- $parametersRef := $brokerGateway.infrastructure.parametersRef -}}
+{{- if $parametersRef -}}
+{{- $parametersGroup := $parametersRef.group | default "" -}}
+{{- $parametersKind := $parametersRef.kind | default "" -}}
+{{- $parametersName := $parametersRef.name | default "" -}}
+{{- if or (gt (len $parametersGroup) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $parametersGroup)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.group must be a valid API group" -}}
+{{- end -}}
+{{- if or (gt (len $parametersKind) 63) (not (regexMatch "^[A-Za-z][A-Za-z0-9]*$" $parametersKind)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.kind must be a valid Kubernetes kind" -}}
+{{- end -}}
+{{- if or (gt (len $parametersName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $parametersName)) -}}
+{{- fail "externalProviderBroker.gateway.infrastructure.parametersRef.name must be a valid Kubernetes object name" -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $profile "external-control-plane-only" -}}
+{{- if .Values.postgres.connectionString -}}
+{{- fail "postgres.connectionString is forbidden for profile external-control-plane-only; reference externalControlPlane.postgres.existingSecret instead" -}}
+{{- end -}}
+{{- $postgresSecret := .Values.externalControlPlane.postgres.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.postgres.existingSecret.name" $postgresSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.postgres.existingSecret.key" $postgresSecret.key) -}}
+{{- $apiTLSSecret := .Values.externalControlPlane.tls.apiServer.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.apiServer.existingSecret.name" $apiTLSSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey" $apiTLSSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.apiServer.existingSecret.clientCAKey" $apiTLSSecret.clientCAKey) -}}
+{{- if eq $apiTLSSecret.credentialBundleKey $apiTLSSecret.clientCAKey -}}
+{{- fail "externalControlPlane.tls.apiServer existing Secret credentialBundleKey and clientCAKey must differ" -}}
+{{- end -}}
+{{- $controllerTLSSecret := .Values.externalControlPlane.tls.controller.existingSecret -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.controller.existingSecret.name" $controllerTLSSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.controller.existingSecret.credentialBundleKey" $controllerTLSSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.controller.existingSecret.serverCAKey" $controllerTLSSecret.serverCAKey) -}}
+{{- if eq $controllerTLSSecret.credentialBundleKey $controllerTLSSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.controller existing Secret credentialBundleKey and serverCAKey must differ" -}}
+{{- end -}}
+{{- $sharedTLSSecret := eq $apiTLSSecret.name $controllerTLSSecret.name -}}
+{{- $privateKeyOverlap := or (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.credentialBundleKey) (eq $apiTLSSecret.credentialBundleKey $controllerTLSSecret.serverCAKey) (eq $apiTLSSecret.clientCAKey $controllerTLSSecret.credentialBundleKey) -}}
+{{- if and $sharedTLSSecret $privateKeyOverlap -}}
+{{- fail "externalControlPlane.tls credential keys must not project a private-key bundle into both Pods when one Secret is shared" -}}
+{{- end -}}
+{{- $egressGatewayTLS := .Values.externalControlPlane.tls.egressGateway -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.egressGateway.existingSecret.name" $egressGatewayTLS.existingSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressGateway.existingSecret.credentialBundleKey" $egressGatewayTLS.existingSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressGateway.existingSecret.serverCAKey" $egressGatewayTLS.existingSecret.serverCAKey) -}}
+{{- if eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressGatewayTLS.existingSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.egressGateway existing Secret credentialBundleKey and serverCAKey must differ" -}}
+{{- end -}}
+{{- if or (not $egressGatewayTLS.serverName) (gt (len $egressGatewayTLS.serverName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $egressGatewayTLS.serverName)) -}}
+{{- fail "externalControlPlane.tls.egressGateway.serverName must be a valid DNS name" -}}
+{{- end -}}
+{{- $egressAuthorizerTLS := .Values.externalControlPlane.tls.egressAuthorizer -}}
+{{- include "substrate.validateExistingSecretName" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.name" $egressAuthorizerTLS.existingSecret.name) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.credentialBundleKey" $egressAuthorizerTLS.existingSecret.credentialBundleKey) -}}
+{{- include "substrate.validateExistingSecretKey" (list "externalControlPlane.tls.egressAuthorizer.existingSecret.serverCAKey" $egressAuthorizerTLS.existingSecret.serverCAKey) -}}
+{{- if eq $egressAuthorizerTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.serverCAKey -}}
+{{- fail "externalControlPlane.tls.egressAuthorizer existing Secret credentialBundleKey and serverCAKey must differ" -}}
+{{- end -}}
+{{- if not (regexMatch "^spiffe://[A-Za-z0-9.-]+/[^?#[:space:]]+$" ($egressAuthorizerTLS.principal | default "")) -}}
+{{- fail "externalControlPlane.tls.egressAuthorizer.principal must be an exact SPIFFE URI" -}}
+{{- end -}}
+{{- if and (eq $egressGatewayTLS.existingSecret.name $egressAuthorizerTLS.existingSecret.name) (or (eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.credentialBundleKey) (eq $egressGatewayTLS.existingSecret.credentialBundleKey $egressAuthorizerTLS.existingSecret.serverCAKey) (eq $egressGatewayTLS.existingSecret.serverCAKey $egressAuthorizerTLS.existingSecret.credentialBundleKey)) -}}
+{{- fail "externalControlPlane.tls egress credential keys must not project a private-key bundle into both gateway roles when one Secret is shared" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

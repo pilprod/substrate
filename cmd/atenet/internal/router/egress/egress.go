@@ -106,7 +106,7 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 			"egress unavailable: no actor-identity CA configured")
 	}
 
-	identity, err := h.authenticateActorCertificate(md)
+	verified, err := h.authenticateActorCertificate(md)
 	if err != nil {
 		// The body stays generic on purpose: an actor that fails authentication
 		// has not proven it is anyone, so it gets no detail about why. The
@@ -117,11 +117,18 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 			"egress denied: invalid actor certificate")
 	}
 
+	identity := verified.identity
 	if err := validateIdentity(identity); err != nil {
 		return extproc.Result{}, err
 	}
-	if err := h.validateActor(ctx, identity); err != nil {
-		return extproc.Result{}, err
+	if verified.externalBinding != nil {
+		if err := h.validateExternalActor(ctx, verified); err != nil {
+			return extproc.Result{}, err
+		}
+	} else {
+		if err := h.validateActor(ctx, identity); err != nil {
+			return extproc.Result{}, err
+		}
 	}
 
 	slog.InfoContext(ctx, "egress identity authenticated",
@@ -195,7 +202,13 @@ func (h *Handler) validateActor(ctx context.Context, identity *substratex509.Act
 // authenticateActorCertificate turns the mTLS peer certificate Envoy recorded
 // on the request into a verified ActorIdentity, or an error describing why it
 // cannot be trusted.
-func (h *Handler) authenticateActorCertificate(md *extproc.RequestMetadata) (*substratex509.ActorIdentity, error) {
+type verifiedActorCertificate struct {
+	identity        *substratex509.ActorIdentity
+	externalBinding *substratex509.ExternalRouteBinding
+	chain           []*x509.Certificate
+}
+
+func (h *Handler) authenticateActorCertificate(md *extproc.RequestMetadata) (*verifiedActorCertificate, error) {
 	if certificate := md.Attribute(agentgatewayClientCertificateAttribute); certificate != "" {
 		chain, err := parseCertificateChainPEM([]byte(certificate))
 		if err != nil {
@@ -226,7 +239,7 @@ func (h *Handler) authenticateActorCertificate(md *extproc.RequestMetadata) (*su
 // is ever loosened, and costs one signature check per CONNECT rather than per
 // request. The IsCA, ClientAuth-EKU, and purpose checks below have no Envoy-side
 // equivalent at all.
-func (h *Handler) verifyActorCertificate(chain []*x509.Certificate) (*substratex509.ActorIdentity, error) {
+func (h *Handler) verifyActorCertificate(chain []*x509.Certificate) (*verifiedActorCertificate, error) {
 	leaf := chain[0]
 	intermediates := x509.NewCertPool()
 	for _, cert := range chain[1:] {
@@ -280,7 +293,32 @@ func (h *Handler) verifyActorCertificate(chain []*x509.Certificate) (*substratex
 		return nil, fmt.Errorf("actor certificate purpose %q is not %q",
 			identity.Purpose, substratex509.ActorIdentityPurposeAtunnel)
 	}
-	return identity, nil
+	binding, err := substratex509.ExternalRouteBindingFromCertificate(leaf)
+	if err != nil {
+		return nil, fmt.Errorf("actor certificate carries an invalid external route binding: %w", err)
+	}
+	return &verifiedActorCertificate{identity: identity, externalBinding: binding, chain: chain}, nil
+}
+
+func (h *Handler) validateExternalActor(ctx context.Context, verified *verifiedActorCertificate) error {
+	if verified == nil || verified.identity == nil || verified.externalBinding == nil || len(verified.chain) == 0 {
+		return extproc.NewReqError(envoy_type.StatusCode_Forbidden, "egress denied: invalid external actor certificate")
+	}
+	chain := make([][]byte, len(verified.chain))
+	for index, certificate := range verified.chain {
+		chain[index] = slices.Clone(certificate.Raw)
+	}
+	_, err := h.apiClient.AuthorizeExternalActorEgress(ctx, &ateapipb.AuthorizeExternalActorEgressRequest{
+		ActorCertificateChainDer: chain,
+	})
+	if err == nil {
+		return nil
+	}
+	slog.WarnContext(ctx, "egress denied: external actor route rejected", slog.Any("err", err))
+	if status.Code(err) == codes.Unavailable {
+		return extproc.NewReqError(envoy_type.StatusCode_ServiceUnavailable, "egress unavailable: external route authorization failed")
+	}
+	return extproc.NewReqError(envoy_type.StatusCode_Forbidden, "egress denied: external actor route is not authorized")
 }
 
 // parseXFCCChain extracts the presented certificate chain, leaf first, from an

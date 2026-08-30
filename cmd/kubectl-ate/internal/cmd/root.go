@@ -28,6 +28,8 @@ var (
 	k8sContext   string
 	endpoint     string
 	tokenFile    string
+	serverCAFile string
+	serverName   string
 	outputFmt    string
 	traceEnabled bool
 )
@@ -41,6 +43,9 @@ var rootCmd = &cobra.Command{
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if outputFmt != "table" && outputFmt != "json" && outputFmt != "yaml" {
 			return fmt.Errorf("invalid output format %q. Must be one of: table, json, yaml", outputFmt)
+		}
+		if (serverCAFile == "") != (serverName == "") {
+			return fmt.Errorf("--server-ca-file and --server-name must be configured together")
 		}
 		return nil
 	},
@@ -58,6 +63,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&k8sContext, "context", "", "The name of the kubeconfig context to use")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "Manual override for the gRPC target (e.g., localhost:8080). If omitted, automatically port-forwards.")
 	rootCmd.PersistentFlags().StringVar(&tokenFile, "token-file", "", "Path to a bearer token for ate-api authentication, or - to read it from stdin. Defaults to a Kubernetes ServiceAccount token.")
+	rootCmd.PersistentFlags().StringVar(&serverCAFile, "server-ca-file", "", "PEM CA bundle used to verify an external-profile ate-api server.")
+	rootCmd.PersistentFlags().StringVar(&serverName, "server-name", "", "TLS server name expected on the external-profile ate-api certificate.")
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format. One of: table|json|yaml")
 	rootCmd.PersistentFlags().BoolVar(&traceEnabled, "trace", false, "Enable tracing for the request")
 }

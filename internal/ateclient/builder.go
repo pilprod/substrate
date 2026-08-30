@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/portforward"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -54,10 +55,12 @@ const (
 	liveBundleSelector   = "podcert.ate.dev/canarying=live"
 )
 
-// Client wraps the gRPC ControlClient and DebugClient and ensures the port-forward connection is closed when done.
+// Client wraps ate-api clients and ensures the port-forward connection is
+// closed when done.
 type Client struct {
 	ateapipb.ControlClient
 	ateapipb.DebugClient
+	externalproviderpb.ExternalProviderAdminClient
 	conn           *grpc.ClientConn
 	cancel         func()
 	tracerProvider *sdktrace.TracerProvider
@@ -79,7 +82,7 @@ func (c *Client) Close() {
 
 // NewClient creates a new Ate API client. If endpoint is empty, it automatically port-forwards
 // to the ate-api-server pod in the ate-system namespace.
-func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool) (*Client, error) {
+func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool, serverCAFile, serverName string) (*Client, error) {
 	tp, err := initTracing(ctx, traceEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize tracing: %w", err)
@@ -87,9 +90,9 @@ func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenF
 
 	var cli *Client
 	if endpoint != "" {
-		cli, err = dialDirect(ctx, kubeconfigPath, k8sContext, endpoint, tokenFile, traceEnabled)
+		cli, err = dialDirect(ctx, kubeconfigPath, k8sContext, endpoint, tokenFile, traceEnabled, serverCAFile, serverName)
 	} else {
-		cli, err = dialPortForward(ctx, kubeconfigPath, k8sContext, tokenFile, traceEnabled)
+		cli, err = dialPortForward(ctx, kubeconfigPath, k8sContext, tokenFile, traceEnabled, serverCAFile, serverName)
 	}
 
 	if err != nil {
@@ -103,7 +106,7 @@ func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenF
 	return cli, nil
 }
 
-func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool) (*Client, error) {
+func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool, serverCAFile, serverName string) (*Client, error) {
 	clientset, err := NewK8sClientset(kubeconfigPath, k8sContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create k8s client: %w", err)
@@ -111,7 +114,7 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 
 	// Verify the server before attaching the bearer token below: the token
 	// must never be sent over an unauthenticated channel.
-	tlsCfg, err := serverTLSConfig(ctx, clientset)
+	tlsCfg, err := resolveServerTLSConfig(ctx, clientset, serverCAFile, serverName)
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +137,11 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		return nil, fmt.Errorf("failed to dial manual endpoint: %w", err)
 	}
 	return &Client{
-		ControlClient: ateapipb.NewControlClient(conn),
-		DebugClient:   ateapipb.NewDebugClient(conn),
-		conn:          conn,
-		cancel:        func() {},
+		ControlClient:               ateapipb.NewControlClient(conn),
+		DebugClient:                 ateapipb.NewDebugClient(conn),
+		ExternalProviderAdminClient: externalproviderpb.NewExternalProviderAdminClient(conn),
+		conn:                        conn,
+		cancel:                      func() {},
 	}, nil
 }
 
@@ -149,7 +153,7 @@ func LoadConfig(kubeconfigPath, k8sContext string) (*rest.Config, error) {
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides).ClientConfig()
 }
 
-func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile string, traceEnabled bool) (*Client, error) {
+func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile string, traceEnabled bool, serverCAFile, serverName string) (*Client, error) {
 	config, err := LoadConfig(kubeconfigPath, k8sContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
@@ -168,7 +172,7 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 	}
 	localEndpoint := fmt.Sprintf("127.0.0.1:%d", localPort)
 
-	tlsCfg, err := serverTLSConfig(ctx, clientset)
+	tlsCfg, err := resolveServerTLSConfig(ctx, clientset, serverCAFile, serverName)
 	if err != nil {
 		stopForward()
 		return nil, err
@@ -195,10 +199,37 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 	}
 
 	return &Client{
-		ControlClient: ateapipb.NewControlClient(conn),
-		DebugClient:   ateapipb.NewDebugClient(conn),
-		conn:          conn,
-		cancel:        stopForward,
+		ControlClient:               ateapipb.NewControlClient(conn),
+		DebugClient:                 ateapipb.NewDebugClient(conn),
+		ExternalProviderAdminClient: externalproviderpb.NewExternalProviderAdminClient(conn),
+		conn:                        conn,
+		cancel:                      stopForward,
+	}, nil
+}
+
+func resolveServerTLSConfig(ctx context.Context, clientset kubernetes.Interface, serverCAFile, serverName string) (*tls.Config, error) {
+	if serverCAFile == "" && serverName == "" {
+		return serverTLSConfig(ctx, clientset)
+	}
+	if serverCAFile == "" || serverName == "" {
+		return nil, fmt.Errorf("server CA file and server name must be configured together")
+	}
+	return serverTLSConfigFromFile(serverCAFile, serverName)
+}
+
+func serverTLSConfigFromFile(serverCAFile, serverName string) (*tls.Config, error) {
+	caPEM, err := os.ReadFile(serverCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read server CA file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("server CA file contains no valid certificates")
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    pool,
+		ServerName: serverName,
 	}, nil
 }
 

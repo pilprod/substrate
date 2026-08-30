@@ -25,9 +25,10 @@ const (
 
 // PrincipalInfo contains information about an authenticated principal.
 type PrincipalInfo struct {
-	ID     string
-	Kind   string
-	Issuer string
+	ID       string
+	Kind     string
+	Provider string
+	Issuer   string
 }
 
 type contextKey struct{}

@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 // ServerElapsedTrailer carries the server's handler duration in microseconds,
@@ -120,12 +121,16 @@ func sanitizeForLog(v any) any {
 	}
 
 	clone := proto.Clone(msg)
-	clearEnvFields(clone.ProtoReflect())
+	clearSensitiveFields(clone.ProtoReflect())
 	return clone
 }
 
-func clearEnvFields(msg protoreflect.Message) {
+func clearSensitiveFields(msg protoreflect.Message) {
 	msg.Range(func(fd protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if options, ok := fd.Options().(*descriptorpb.FieldOptions); ok && options.GetDebugRedact() {
+			msg.Clear(fd)
+			return true
+		}
 		if fd.Name() == "env" {
 			msg.Clear(fd)
 			return true
@@ -137,13 +142,13 @@ func clearEnvFields(msg protoreflect.Message) {
 			list := value.List()
 			for i := 0; i < list.Len(); i++ {
 				if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
-					clearEnvFields(list.Get(i).Message())
+					clearSensitiveFields(list.Get(i).Message())
 				}
 			}
 			return true
 		}
 		if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
-			clearEnvFields(value.Message())
+			clearSensitiveFields(value.Message())
 		}
 		return true
 	})

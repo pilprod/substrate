@@ -21,10 +21,10 @@ import (
 	"log/slog"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -128,6 +128,9 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 			}
 			return fmt.Errorf("while checking worker assignment: %w", err)
 		}
+		if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+			return fmt.Errorf("refusing to terminate an unpinned or stale Worker assignment: %w", err)
+		}
 		wass := worker.GetStatus().GetAssignment()
 		if wass == nil || wass.GetActorUid() != actor.GetMetadata().GetUid() {
 			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",
@@ -139,8 +142,12 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 
 	workerPodNs := assignment.GetWorkerNamespace()
 	workerPodName := assignment.GetWorkerPod()
+	targetUID, err := workerExecutionTargetUID(assignment)
+	if err != nil {
+		return err
+	}
 
-	conn, err := w.dialer.DialForWorker(workerPodNs, workerPodName)
+	conn, err := w.dialer.DialForWorker(assignment)
 	if err != nil {
 		if errors.Is(err, ErrWorkerPodNotFound) {
 			slog.InfoContext(ctx, "worker pod not found, treating as terminated", slog.String("workerNamespace", workerPodNs), slog.String("workerPod", workerPodName))
@@ -185,7 +192,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 	}
 
 	req := &ateletpb.TerminateRequest{
-		TargetAteomUid:         assignment.GetWorkerPodUid(),
+		TargetAteomUid:         targetUID,
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
 		ActorUid:               actor.GetMetadata().GetUid(),

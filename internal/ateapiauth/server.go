@@ -182,9 +182,10 @@ func (a jwtServerAuthenticator) authenticate(ctx context.Context) (context.Conte
 			return nil, status.Error(codes.Unauthenticated, "invalid bearer token")
 		}
 		return principal.InjectContext(ctx, principal.PrincipalInfo{
-			ID:     id,
-			Kind:   principal.KindJWT,
-			Issuer: provider.Issuer,
+			ID:       id,
+			Kind:     principal.KindJWT,
+			Provider: provider.Name,
+			Issuer:   provider.Issuer,
 		}), nil
 	}
 	slog.DebugContext(ctx, "No JWT provider matched token issuer", slog.String("issuer", issuer))

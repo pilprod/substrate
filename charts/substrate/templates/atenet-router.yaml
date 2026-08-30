@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,6 +22,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: atenet-router
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -48,6 +50,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "substrate.fullname" (list "atenet-router" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -340,3 +343,4 @@ spec:
     port: 4040
     targetPort: status
     protocol: TCP
+{{- end }}

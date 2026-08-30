@@ -1102,6 +1102,112 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 	})
 
+	t.Run("CreateWorker_ExternalSlotRoundTrip", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		worker := newTestWorker(testWorkerName, "")
+		worker.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+		worker.WorkerPodUid = ""
+		worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
+		}
+
+		created, err := s.CreateWorker(ctx, worker)
+		if err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+		got, err := s.GetWorker(ctx, testWorkerName)
+		if err != nil {
+			t.Fatalf("GetWorker failed: %v", err)
+		}
+		if diff := cmp.Diff(created, got, protocmp.Transform()); diff != "" {
+			t.Errorf("external Worker round-trip mismatch (-created +got):\n%s", diff)
+		}
+		if got.GetProvider() != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+			t.Errorf("provider = %v, want ExternalSlot", got.GetProvider())
+		}
+		if diff := cmp.Diff(worker.GetExternalSlot(), got.GetExternalSlot(), protocmp.Transform()); diff != "" {
+			t.Errorf("external_slot mismatch (-want +got):\n%s", diff)
+		}
+
+		_, err = s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.ExternalSlot.ExecutionIdentity = "other-host.slot-1"
+			return nil
+		})
+		if !errors.Is(err, store.ErrImmutableField) || !strings.Contains(err.Error(), "external_slot") {
+			t.Fatalf("changing external_slot returned %v, want ErrImmutableField naming external_slot", err)
+		}
+		unchanged, err := s.GetWorker(ctx, testWorkerName)
+		if err != nil {
+			t.Fatalf("GetWorker after rejected identity change failed: %v", err)
+		}
+		if unchanged.GetMetadata().GetVersion() != created.GetMetadata().GetVersion() {
+			t.Errorf("rejected identity change bumped version to %d, want %d", unchanged.GetMetadata().GetVersion(), created.GetMetadata().GetVersion())
+		}
+		if unchanged.GetExternalSlot().GetExecutionIdentity() != "host-1.slot-2" {
+			t.Errorf("rejected identity change was stored: %q", unchanged.GetExternalSlot().GetExecutionIdentity())
+		}
+	})
+
+	t.Run("UpdateWorker_ExternalAvailabilityPreservesAssignment", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		worker := newTestWorker(testWorkerName, "")
+		worker.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT
+		worker.WorkerPodUid = ""
+		worker.ExternalSlot = &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
+		}
+		assignment := &ateapipb.ActorAssignment{
+			ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "default", Name: "test-template"},
+			Actor:         &ateapipb.ObjectRef{Atespace: "team-a", Name: "actor-1"},
+			ActorUid:      "actor-uid-1",
+		}
+		worker.Status = &ateapipb.WorkerStatus{
+			State:      ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Assignment: assignment,
+		}
+		created, err := s.CreateWorker(ctx, worker)
+		if err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+		watch, err := s.WatchWorkers(ctx)
+		if err != nil {
+			t.Fatalf("WatchWorkers failed: %v", err)
+		}
+		defer watch.Close()
+
+		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.Status.State = ateapipb.WorkerState_WORKER_STATE_OFFLINE
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("UpdateWorker failed: %v", err)
+		}
+		if updated.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_OFFLINE {
+			t.Errorf("state = %v, want OFFLINE", updated.GetStatus().GetState())
+		}
+		if diff := cmp.Diff(assignment, updated.GetStatus().GetAssignment(), protocmp.Transform()); diff != "" {
+			t.Errorf("state update changed assignment (-want +got):\n%s", diff)
+		}
+		if updated.GetMetadata().GetVersion() != created.GetMetadata().GetVersion()+1 {
+			t.Errorf("version = %d, want %d", updated.GetMetadata().GetVersion(), created.GetMetadata().GetVersion()+1)
+		}
+		event := receiveEvent(t, watch.Events)
+		if event.Type != store.WorkerEventUpdated {
+			t.Errorf("event type = %v, want WorkerEventUpdated", event.Type)
+		}
+		if diff := cmp.Diff(updated, event.Worker, protocmp.Transform()); diff != "" {
+			t.Errorf("availability event mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("CreateWorker_AlreadyExists", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()
@@ -1216,9 +1322,9 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 	})
 
-	// A worker name is a pod UID, so a name is only reused when the same pod is
-	// re-registered. The store still hands out a fresh uid, and a guard naming
-	// the old one must not reach the new incarnation.
+	// A worker name is an opaque row key and can be reused after deletion. The
+	// store still hands out a fresh uid, and a guard naming the old one must not
+	// reach the new incarnation.
 	t.Run("UpdateWorker_UIDConflict", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()
@@ -1345,6 +1451,10 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			{"worker_pod_uid", "worker_pod_uid", func(w *ateapipb.Worker) { w.WorkerPodUid = otherTestWorkerName }},
 			{"node_name", "node_name", func(w *ateapipb.Worker) { w.NodeName = "other-node" }},
 			{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
+			{"provider", "provider", func(w *ateapipb.Worker) { w.Provider = ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT }},
+			{"external_slot", "external_slot", func(w *ateapipb.Worker) {
+				w.ExternalSlot = &ateapipb.ExternalSlotIdentity{ExecutionIdentity: "host-1", LocalityIdentity: "device-1", OwnerAtespace: "team-a"}
+			}},
 			{"capacity_changed", "capacity", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }},
 			// An update replaces the worker, so a caller that leaves capacity
 			// out is asking to clear it. That is a change like any other.
@@ -1367,6 +1477,46 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 				}
 				if got.GetMetadata().GetVersion() != 1 {
 					t.Errorf("rejected mutation bumped the version to %d, want 1", got.GetMetadata().GetVersion())
+				}
+			})
+		}
+	})
+
+	// The zero value is the wire-compatible spelling of KubernetesPod. Old
+	// clients do not know the additive provider field and may send that spelling
+	// back when replacing a Worker, so both representations must be equivalent.
+	t.Run("UpdateWorker_KubernetesProviderAlias", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			from ateapipb.WorkerProvider
+			to   ateapipb.WorkerProvider
+		}{
+			{name: "legacy to explicit", from: ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED, to: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD},
+			{name: "explicit to legacy", from: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, to: ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := setup(t)
+				ctx := context.Background()
+				worker := newTestWorker(testWorkerName, "pod-1")
+				worker.Provider = tc.from
+				created, err := s.CreateWorker(ctx, worker)
+				if err != nil {
+					t.Fatalf("CreateWorker failed: %v", err)
+				}
+
+				updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+					toUpdate.Provider = tc.to
+					toUpdate.Labels = map[string]string{"updated": "true"}
+					return nil
+				})
+				if err != nil {
+					t.Fatalf("UpdateWorker failed: %v", err)
+				}
+				if updated.GetProvider() != tc.to {
+					t.Errorf("provider = %v, want %v", updated.GetProvider(), tc.to)
+				}
+				if updated.GetLabels()["updated"] != "true" {
+					t.Errorf("mutable labels were not updated: %v", updated.GetLabels())
 				}
 			})
 		}

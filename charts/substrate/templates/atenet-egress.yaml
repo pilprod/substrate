@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{- $external := eq (.Values.profile | default "standard") "external-control-plane-only" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -37,8 +38,13 @@ data:
         port: 8443
         protocol: HTTPS
         tls:
+{{- if $external }}
+          cert: /run/secrets/substrate/tls/egress-gateway/server-credential-bundle.pem
+          key: /run/secrets/substrate/tls/egress-gateway/server-credential-bundle.pem
+{{- else }}
           cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
           key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+{{- end }}
           root: /run/actor-id-ca-certs/ca.crt
 
     routes:
@@ -80,10 +86,21 @@ spec:
         app: atenet-egress
     spec:
       serviceAccountName: {{ include "substrate.fullname" (list "atenet-egress" .) }}
+{{- if $external }}
+      securityContext:
+        # The pinned agentgateway image runs as the distroless non-root user.
+        # Projected Secret files need a shared fsGroup so both containers can
+        # read the serving credential without making it world-readable.
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+{{- else }}
       securityContext:
         sysctls:
         - name: net.ipv4.ip_unprivileged_port_start
           value: "0"
+{{- end }}
       terminationGracePeriodSeconds: 60
       containers:
       - name: agentgateway
@@ -113,12 +130,24 @@ spec:
         - name: config
           mountPath: /etc/agentgateway
           readOnly: true
+{{- if $external }}
+        - name: egress-gateway-tls
+          mountPath: /run/secrets/substrate/tls/egress-gateway
+          readOnly: true
+{{- else }}
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
+{{- end }}
         - name: actor-id-ca-certs
           mountPath: /run/actor-id-ca-certs
           readOnly: true
+{{- if $external }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+{{- end }}
       - name: ext-proc
         image: {{ include "substrate.componentImage" (list "atenet" .) }}
         args:
@@ -128,8 +157,14 @@ spec:
         - --port-extproc=50051
         - --extproc-address=127.0.0.1
         - --ateapi-address={{ include "substrate.ateApi.endpoint" . }}
+{{- if $external }}
+        - --ateapi-ca-file=/run/secrets/substrate/tls/egress-authorizer/server-ca.pem
+        - --ateapi-server-name={{ include "substrate.fullname" (list "api" .) }}.{{ .Release.Namespace }}.svc
+        - --ateapi-client-cert=/run/secrets/substrate/tls/egress-authorizer/client-credential-bundle.pem
+{{- else }}
         - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
         - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+{{- end }}
         - --actor-identity-ca-file=/run/actor-id-ca-certs/ca.crt
         - --otlp-collector-address=
         - --envoy-admin-address=localhost:15000
@@ -151,23 +186,55 @@ spec:
             port: extproc
           periodSeconds: 10
         volumeMounts:
+{{- if $external }}
+        - name: egress-authorizer-tls
+          mountPath: /run/secrets/substrate/tls/egress-authorizer
+          readOnly: true
+{{- else }}
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
         - name: podidentity
           mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
+{{- end }}
         - name: actor-id-ca-certs
           mountPath: /run/actor-id-ca-certs
           readOnly: true
         - name: drain-signal
           mountPath: /var/run/atenet
+{{- if $external }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          runAsUser: 65532
+          runAsGroup: 65532
+{{- end }}
       volumes:
       - name: config
         configMap:
           name: {{ include "substrate.fullname" (list "atenet-egress-agentgateway-config" .) }}
       - name: drain-signal
         emptyDir: {}
+{{- if $external }}
+      - name: egress-gateway-tls
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.credentialBundleKey }}
+            path: server-credential-bundle.pem
+      - name: egress-authorizer-tls
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.egressAuthorizer.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.tls.egressAuthorizer.existingSecret.credentialBundleKey }}
+            path: client-credential-bundle.pem
+          - key: {{ .Values.externalControlPlane.tls.egressAuthorizer.existingSecret.serverCAKey }}
+            path: server-ca.pem
+{{- else }}
       - name: servicedns
         projected:
           sources:
@@ -194,9 +261,13 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+{{- end }}
       - name: actor-id-ca-certs
         secret:
           secretName: actor-id-ca-certs
+{{- if $external }}
+          defaultMode: 0440
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

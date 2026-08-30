@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
@@ -59,6 +60,262 @@ func TestSchedulerRecordable(t *testing.T) {
 				t.Errorf("schedulerRecordable(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSchedulingConstraintsWorkerProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider atev1alpha1.WorkerProvider
+		want     ateapipb.WorkerProvider
+		wantErr  bool
+	}{
+		{name: "absent defaults to KubernetesPod", want: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD},
+		{name: "explicit KubernetesPod", provider: atev1alpha1.WorkerProviderKubernetesPod, want: ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD},
+		{name: "explicit ExternalSlot", provider: atev1alpha1.WorkerProviderExternalSlot, want: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT},
+		{name: "unknown fails closed", provider: atev1alpha1.WorkerProvider("NativeProcess"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			constraints, err := schedulingConstraints(
+				&ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a"}},
+				&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{WorkerProvider: tt.provider}},
+			)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("schedulingConstraints(workerProvider=%q) error = %v, wantErr %v", tt.provider, err, tt.wantErr)
+			}
+			if constraints.Provider != tt.want {
+				t.Errorf("schedulingConstraints(workerProvider=%q).Provider = %v, want %v", tt.provider, constraints.Provider, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkerAssignmentFromCopiesExternalSlotIdentity(t *testing.T) {
+	const workerUID = "11111111-1111-4111-8111-111111111111"
+	worker := &ateapipb.Worker{
+		Metadata:        &ateapipb.ResourceMetadata{Name: "worker-1", Uid: workerUID},
+		WorkerNamespace: "ate-system",
+		WorkerPool:      "pool-1",
+		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
+		},
+	}
+
+	got, err := workerAssignmentFrom(worker)
+	if err != nil {
+		t.Fatalf("workerAssignmentFrom() error = %v", err)
+	}
+	want := &ateapipb.WorkerAssignment{
+		Worker:            &ateapipb.ObjectRef{Name: "worker-1"},
+		WorkerResourceUid: workerUID,
+		WorkerNamespace:   "ate-system",
+		WorkerPool:        "pool-1",
+		Provider:          ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "host-1.slot-2",
+			LocalityIdentity:  "device-1.workspace-2",
+			OwnerAtespace:     "team-a",
+		},
+	}
+	if !proto.Equal(got, want) {
+		t.Fatalf("workerAssignmentFrom() = %v, want %v", got, want)
+	}
+	if got.GetExternalSlot() == worker.GetExternalSlot() {
+		t.Fatal("workerAssignmentFrom() retained the Worker's external_slot pointer")
+	}
+
+	worker.ExternalSlot.ExecutionIdentity = "mutated-after-assignment"
+	if got.GetExternalSlot().GetExecutionIdentity() != "host-1.slot-2" {
+		t.Fatalf("assignment external identity changed with Worker: %q", got.GetExternalSlot().GetExecutionIdentity())
+	}
+}
+
+func TestWorkerAssignmentFromRejectsMissingServerResourceUID(t *testing.T) {
+	worker := &ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: "worker-1"}}
+	if assignment, err := workerAssignmentFrom(worker); err == nil || assignment != nil {
+		t.Fatalf("workerAssignmentFrom() = (%v, %v), want (nil, error)", assignment, err)
+	}
+}
+
+type validatingRouteAssignmentGuard struct {
+	allow            bool
+	err              error
+	guardCalls       int
+	validationCalls  int
+	mutationFinished bool
+}
+
+func (g *validatingRouteAssignmentGuard) AllowsCandidate(*ateapipb.Worker) bool {
+	return g.allow
+}
+
+func (g *validatingRouteAssignmentGuard) GuardAssignment(
+	_ context.Context,
+	expectedActorAtespace string,
+	candidate *ateapipb.Worker,
+	mutation func(func(*ateapipb.Worker) error) error,
+) error {
+	g.guardCalls++
+	if expectedActorAtespace == "" {
+		return externalprovider.ErrInvalidExternalAssignmentMutation
+	}
+	if g.err != nil {
+		return g.err
+	}
+	err := mutation(func(current *ateapipb.Worker) error {
+		g.validationCalls++
+		if current.GetMetadata().GetName() != candidate.GetMetadata().GetName() ||
+			current.GetMetadata().GetUid() != candidate.GetMetadata().GetUid() ||
+			current.GetExternalSlot().GetExecutionIdentity() != candidate.GetExternalSlot().GetExecutionIdentity() ||
+			current.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
+			return externalprovider.ErrExternalRouteAssignmentUnavailable
+		}
+		return nil
+	})
+	g.mutationFinished = err == nil
+	return err
+}
+
+type mutateWorkerBeforeClaimStore struct {
+	store.Interface
+	mutate func(*ateapipb.Worker)
+}
+
+func (s *mutateWorkerBeforeClaimStore) UpdateWorker(
+	ctx context.Context,
+	name string,
+	precondition store.Precondition,
+	mutation func(*ateapipb.Worker) error,
+) (*ateapipb.Worker, error) {
+	return s.Interface.UpdateWorker(ctx, name, precondition, func(worker *ateapipb.Worker) error {
+		if s.mutate != nil {
+			s.mutate(worker)
+		}
+		return mutation(worker)
+	})
+}
+
+func seedExternalAssignmentFixture(
+	t *testing.T,
+	ctx context.Context,
+	persistence store.Interface,
+) (*ateapipb.Actor, *workercache.Cache, *ateapipb.Worker) {
+	t.Helper()
+	worker, err := persistence.CreateWorker(ctx, &ateapipb.Worker{
+		Metadata:        &ateapipb.ResourceMetadata{Name: testWorkerUID("external-slot-1")},
+		WorkerNamespace: "external",
+		WorkerPool:      "managed",
+		SandboxClass:    "gvisor",
+		Provider:        ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: &ateapipb.ExternalSlotIdentity{
+			ExecutionIdentity: "registration-a.slot-a",
+			LocalityIdentity:  "device-a",
+			OwnerAtespace:     "team-a",
+		},
+		Status: &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker(external) error = %v", err)
+	}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "id1"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+	})
+	cacheCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	wc := workercache.New(persistence, time.Minute)
+	if err := wc.Start(cacheCtx); err != nil {
+		t.Fatalf("workercache.Start() error = %v", err)
+	}
+	return actor, wc, worker
+}
+
+func TestAssignWorkerAttemptGuardsExternalStoreMutation(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actor, wc, worker := seedExternalAssignmentFixture(t, ctx, persistence)
+	guard := &validatingRouteAssignmentGuard{allow: true}
+	w := &ActorWorkflow{
+		store: persistence, workerCache: wc, externalRouteGuard: guard,
+		scheduler: scheduling.New(wc, scheduling.WithEligibility(func(candidate *ateapipb.Worker) bool {
+			return effectiveWorkerProvider(candidate.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT || guard.AllowsCandidate(candidate)
+		})),
+	}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
+
+	_, assigned, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
+	if err != nil {
+		t.Fatalf("assignWorkerAttempt() error = %v", err)
+	}
+	if assigned.GetMetadata().GetUid() != worker.GetMetadata().GetUid() {
+		t.Fatalf("assigned Worker UID = %q, want %q", assigned.GetMetadata().GetUid(), worker.GetMetadata().GetUid())
+	}
+	if guard.guardCalls != 1 || guard.validationCalls != 1 || !guard.mutationFinished {
+		t.Fatalf("guard calls = %d validation calls = %d mutation finished = %v", guard.guardCalls, guard.validationCalls, guard.mutationFinished)
+	}
+}
+
+func TestAssignWorkerAttemptRejectsExternalRouteClosedBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actor, wc, worker := seedExternalAssignmentFixture(t, ctx, persistence)
+	guard := &validatingRouteAssignmentGuard{allow: true, err: externalprovider.ErrExternalRouteAssignmentUnavailable}
+	w := &ActorWorkflow{
+		store: persistence, workerCache: wc, externalRouteGuard: guard,
+		scheduler: scheduling.New(wc, scheduling.WithEligibility(guard.AllowsCandidate)),
+	}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
+
+	_, _, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
+	if !errors.Is(err, store.ErrVersionConflict) || !errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
+		t.Fatalf("assignWorkerAttempt() error = %v, want route unavailable retry conflict", err)
+	}
+	stored, getErr := persistence.GetWorker(ctx, worker.GetMetadata().GetName())
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if stored.GetStatus().GetAssignment() != nil || guard.validationCalls != 0 {
+		t.Fatalf("closed route wrote assignment %v or validated %d times", stored.GetStatus().GetAssignment(), guard.validationCalls)
+	}
+}
+
+func TestAssignWorkerAttemptRechecksExternalActiveStateInsideStoreMutation(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actor, wc, worker := seedExternalAssignmentFixture(t, ctx, persistence)
+	guard := &validatingRouteAssignmentGuard{allow: true}
+	wrapped := &mutateWorkerBeforeClaimStore{Interface: persistence, mutate: func(current *ateapipb.Worker) {
+		current.Status.State = ateapipb.WorkerState_WORKER_STATE_OFFLINE
+	}}
+	w := &ActorWorkflow{
+		store: wrapped, workerCache: wc, externalRouteGuard: guard,
+		scheduler: scheduling.New(wc, scheduling.WithEligibility(guard.AllowsCandidate)),
+	}
+	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}
+
+	_, _, err := w.assignWorkerAttempt(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, actor, tmpl)
+	if !errors.Is(err, externalprovider.ErrExternalRouteAssignmentUnavailable) {
+		t.Fatalf("assignWorkerAttempt() error = %v, want route unavailable", err)
+	}
+	stored, getErr := persistence.GetWorker(ctx, worker.GetMetadata().GetName())
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if stored.GetStatus().GetAssignment() != nil || guard.validationCalls != 1 {
+		t.Fatalf("authoritative OFFLINE check wrote assignment %v or validated %d times", stored.GetStatus().GetAssignment(), guard.validationCalls)
 	}
 }
 
@@ -702,6 +959,64 @@ func TestResumeActor_CrashesOnMissingWorkerAssignment(t *testing.T) {
 	}
 	if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
 		t.Errorf("stored state = %v, want %v", got.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_CRASHED)
+	}
+}
+
+func TestValidateAssignedWorkerRejectsUnpinnedExternalAssignmentWithoutClearingReferences(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "external-actor"}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		Status: &ateapipb.ActorStatus{
+			State: ateapipb.ActorState_ACTOR_STATE_RESUMING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{
+				Worker:   &ateapipb.ObjectRef{Name: testWorkerUID("external-resume")},
+				Provider: ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+				ExternalSlot: &ateapipb.ExternalSlotIdentity{
+					ExecutionIdentity: "registration-a.slot-a",
+					LocalityIdentity:  "device-a",
+				},
+			},
+		},
+	})
+	worker, err := persistence.CreateWorker(ctx, &ateapipb.Worker{
+		Metadata:     &ateapipb.ResourceMetadata{Name: testWorkerUID("external-resume")},
+		Provider:     ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT,
+		ExternalSlot: proto.Clone(actor.GetStatus().GetWorkerAssignment().GetExternalSlot()).(*ateapipb.ExternalSlotIdentity),
+		SandboxClass: "gvisor",
+		Status: &ateapipb.WorkerStatus{
+			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Assignment: &ateapipb.ActorAssignment{
+				Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+				ActorUid: actor.GetMetadata().GetUid(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker() error = %v", err)
+	}
+
+	w := &ActorWorkflow{store: persistence, scheduler: scheduling.New(nil)}
+	if _, err := w.validateAssignedWorker(ctx, actorRef, actor, &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		WorkerProvider: atev1alpha1.WorkerProviderExternalSlot,
+		SandboxClass:   atev1alpha1.SandboxClassGvisor,
+	}}); err == nil {
+		t.Fatal("validateAssignedWorker() error = nil, want fail-closed error")
+	}
+	storedActor, err := persistence.GetActor(ctx, actorRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedActor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RESUMING || storedActor.GetStatus().GetWorkerAssignment() == nil {
+		t.Fatalf("actor was destructively cleared: %v", storedActor.GetStatus())
+	}
+	storedWorker, err := persistence.GetWorker(ctx, worker.GetMetadata().GetName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedWorker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+		t.Fatalf("Worker assignment changed: %v", storedWorker.GetStatus().GetAssignment())
 	}
 }
 

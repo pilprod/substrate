@@ -96,6 +96,89 @@ func TestActorTemplateValidation(t *testing.T) {
 		name:    "base template",
 		mutate:  func(at *ActorTemplate) {},
 		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.WorkerProvider != WorkerProviderKubernetesPod {
+				t.Errorf("workerProvider = %q, want %q", at.Spec.WorkerProvider, WorkerProviderKubernetesPod)
+			}
+		},
+	}, {
+		name: "external worker provider is explicit and valid without cluster lifecycle fields",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
+		},
+		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.WorkerProvider != WorkerProviderExternalSlot {
+				t.Errorf("workerProvider = %q, want %q", at.Spec.WorkerProvider, WorkerProviderExternalSlot)
+			}
+			if at.Spec.SnapshotsConfig.Location != "" {
+				t.Errorf("snapshotsConfig.location = %q, want omitted", at.Spec.SnapshotsConfig.Location)
+			}
+			if at.Spec.WorkerSelector != nil {
+				t.Errorf("workerSelector = %#v, want nil", at.Spec.WorkerSelector)
+			}
+		},
+	}, {
+		name: "external worker provider accepts hardened host process sandbox",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SandboxClass = SandboxClassHostProcessHardened
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
+		},
+		wantErr: false,
+		verify: func(t *testing.T, at *ActorTemplate) {
+			if at.Spec.SandboxClass != SandboxClassHostProcessHardened {
+				t.Errorf("sandboxClass = %q, want %q", at.Spec.SandboxClass, SandboxClassHostProcessHardened)
+			}
+		},
+	}, {
+		name: "kubernetes worker provider rejects hardened host process sandbox",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassHostProcessHardened
+		},
+		wantErr: true,
+		errMsg:  "sandboxClass 'host-process-hardened' requires workerProvider 'ExternalSlot'",
+	}, {
+		name: "external worker provider rejects snapshot location",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.WorkerSelector = nil
+		},
+		wantErr: true,
+		errMsg:  "snapshotsConfig.location is required for KubernetesPod and forbidden for ExternalSlot",
+	}, {
+		name: "external worker provider rejects worker selector",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+		},
+		wantErr: true,
+		errMsg:  "workerSelector is not supported for ExternalSlot",
+	}, {
+		name: "external worker provider rejects volumes",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			at.Spec.SnapshotsConfig.Location = ""
+			at.Spec.WorkerSelector = nil
+			at.Spec.Volumes = []Volume{
+				{Name: "vol1", VolumeSource: VolumeSource{DurableDir: &DurableDirVolumeSource{}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "vol1", MountPath: "/home"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "volumes are not supported for ExternalSlot",
+	}, {
+		name: "unknown worker provider is rejected",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.WorkerProvider = WorkerProvider("NativeProcess")
+		},
+		wantErr: true,
+		errMsg:  "spec.workerProvider: Unsupported value: \"NativeProcess\": supported values: \"KubernetesPod\", \"ExternalSlot\"",
 	}, {
 		name: "container resources on a micro-VM template",
 		mutate: func(at *ActorTemplate) {
@@ -687,7 +770,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
 		},
 		wantErr: true,
-		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+		errMsg:  "onResume.fromData: Golden is supported only when sandboxClass is 'microvm'",
 	}, {
 		name: "SnapshotsConfig: onResume.fromData=Golden, SandboxClass unset (defaults to gvisor, invalid)",
 		mutate: func(at *ActorTemplate) {
@@ -695,7 +778,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
 		},
 		wantErr: true,
-		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+		errMsg:  "onResume.fromData: Golden is supported only when sandboxClass is 'microvm'",
 	}, {
 		name: "Volumes: 1 DurableDir mount is valid",
 		mutate: func(at *ActorTemplate) {
@@ -1835,6 +1918,12 @@ func TestActorTemplateSpecImmutability(t *testing.T) {
 		name   string
 		mutate func(*ActorTemplate)
 	}{
+		{
+			name: "update-worker-provider",
+			mutate: func(at *ActorTemplate) {
+				at.Spec.WorkerProvider = WorkerProviderExternalSlot
+			},
+		},
 		{
 			name: "update-container-image",
 			mutate: func(at *ActorTemplate) {

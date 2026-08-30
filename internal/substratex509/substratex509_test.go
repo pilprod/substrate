@@ -76,12 +76,78 @@ func mintCertWithActorExtension(t *testing.T, value []byte) *x509.Certificate {
 	})
 }
 
-// testPodIdentityOID and testActorIdentityOID spell out the intended extension
-// OIDs to prevent accidental modification to the values.
+// These OIDs spell out the intended extension identifiers to prevent
+// accidental modification to the values.
 var (
-	testPodIdentityOID   = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 12, 1}
-	testActorIdentityOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 12, 2}
+	testPodIdentityOID          = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 12, 1}
+	testActorIdentityOID        = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 12, 2}
+	testExternalRouteBindingOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 12, 3}
 )
+
+func TestExternalRouteBindingCertificateExtension(t *testing.T) {
+	full := ExternalRouteBinding{
+		Version:           ExternalRouteBindingVersion,
+		RegistrationUID:   "registration-a",
+		SlotID:            "slot-a",
+		WorkerUID:         "00000000-0000-4000-8000-000000000001",
+		SessionGeneration: 7,
+		ExecutionIdentity: "registration-a.slot-a.execution",
+	}
+	template := &x509.Certificate{}
+	if err := AddExternalRouteBindingToCertificate(&full, template); err != nil {
+		t.Fatalf("AddExternalRouteBindingToCertificate() error = %v", err)
+	}
+	certificate := mintCert(t, template)
+	got, err := ExternalRouteBindingFromCertificate(certificate)
+	if err != nil || !reflect.DeepEqual(got, &full) {
+		t.Fatalf("ExternalRouteBindingFromCertificate() = (%+v, %v), want %+v", got, err, full)
+	}
+	if absent, err := ExternalRouteBindingFromCertificate(mintCert(t, &x509.Certificate{})); err != nil || absent != nil {
+		t.Fatalf("absent ExternalRouteBinding = (%+v, %v), want nil/nil", absent, err)
+	}
+	wire, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	extension := pkix.Extension{Id: testExternalRouteBindingOID, Value: wire}
+	if _, err := ExternalRouteBindingFromCertificate(&x509.Certificate{Extensions: []pkix.Extension{extension, extension}}); err == nil || !strings.Contains(err.Error(), "multiple ExternalRouteBinding") {
+		t.Fatalf("duplicate extension error = %v", err)
+	}
+	if _, err := ExternalRouteBindingFromCertificate(&x509.Certificate{Extensions: []pkix.Extension{{Id: testExternalRouteBindingOID, Value: []byte("not-json")}}}); err == nil {
+		t.Fatal("malformed ExternalRouteBinding was accepted")
+	}
+}
+
+func TestAddExternalRouteBindingRejectsUnfencedClaims(t *testing.T) {
+	base := ExternalRouteBinding{
+		Version:           ExternalRouteBindingVersion,
+		RegistrationUID:   "registration-a",
+		SlotID:            "slot-a",
+		WorkerUID:         "00000000-0000-4000-8000-000000000001",
+		SessionGeneration: 7,
+		ExecutionIdentity: "registration-a.slot-a.execution",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ExternalRouteBinding)
+	}{
+		{name: "version", mutate: func(binding *ExternalRouteBinding) { binding.Version = 0 }},
+		{name: "registration", mutate: func(binding *ExternalRouteBinding) { binding.RegistrationUID = "../registration" }},
+		{name: "slot", mutate: func(binding *ExternalRouteBinding) { binding.SlotID = "slot/a" }},
+		{name: "Worker UID", mutate: func(binding *ExternalRouteBinding) { binding.WorkerUID = "not-a-uuid" }},
+		{name: "generation", mutate: func(binding *ExternalRouteBinding) { binding.SessionGeneration = 0 }},
+		{name: "execution", mutate: func(binding *ExternalRouteBinding) { binding.ExecutionIdentity = "execution identity" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binding := base
+			test.mutate(&binding)
+			if err := AddExternalRouteBindingToCertificate(&binding, &x509.Certificate{}); err == nil {
+				t.Fatalf("AddExternalRouteBindingToCertificate(%+v) succeeded", binding)
+			}
+		})
+	}
+}
 
 func TestPodIdentityFromCertificate(t *testing.T) {
 	// fullPodIdentity has every field populated, as required by

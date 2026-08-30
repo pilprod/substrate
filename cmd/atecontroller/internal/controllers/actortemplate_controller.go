@@ -34,6 +34,10 @@ import (
 
 const (
 	GoldenSnapshotCreationReason = "GoldenSnapshotCreation"
+	ExternalSlotReadyReason      = "ExternalSlotReady"
+	externalSlotReadyMessage     = "ExternalSlot actor template is ready without a golden snapshot"
+	externalSlotCleanupReason    = "ExternalSlotGoldenCleanupPending"
+	externalSlotCleanupMessage   = "Inherited golden lifecycle state must be retired before this external actor template is ready"
 
 	// goldenSnapshotWarmup is the default wall-clock delay between resuming
 	// the golden actor and taking its snapshot, used as a coarse "give the
@@ -46,7 +50,8 @@ const (
 
 type ActorTemplateReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme       *runtime.Scheme
+	ExternalOnly bool
 
 	AteClient ateapipb.ControlClient
 }
@@ -76,6 +81,13 @@ func (r *ActorTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Handle deletion
 	if !at.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
+	}
+	if r.ExternalOnly && at.Spec.WorkerProvider != atev1alpha1.WorkerProviderExternalSlot {
+		return ctrl.Result{}, nil
+	}
+
+	if at.Spec.WorkerProvider == atev1alpha1.WorkerProviderExternalSlot {
+		return r.reconcileExternalSlotTemplate(ctx, at)
 	}
 
 	switch at.Status.Phase {
@@ -186,6 +198,100 @@ func (r *ActorTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	default:
 		return ctrl.Result{}, fmt.Errorf("unrecognized phase %q", at.Status.Phase)
 	}
+}
+
+// reconcileExternalSlotTemplate marks an externally hosted template ready
+// without booting a golden actor. ExternalSlot workloads are controlled by the
+// connected provider and do not support Substrate snapshots, so driving the
+// KubernetesPod golden lifecycle here would both consume a client-owned slot
+// and leave the template permanently waiting for an unsupported checkpoint.
+func (r *ActorTemplateReconciler) reconcileExternalSlotTemplate(
+	ctx context.Context,
+	at *atev1alpha1.ActorTemplate,
+) (ctrl.Result, error) {
+	if at == nil {
+		return ctrl.Result{}, fmt.Errorf("external ActorTemplate is required")
+	}
+	switch at.Status.Phase {
+	case atev1alpha1.PhaseInitial:
+		if at.Status.GoldenActorID != "" || at.Status.GoldenSnapshot != "" || !at.Status.TakeGoldenSnapshotAt.IsZero() {
+			return r.retireExternalSlotGoldenActor(ctx, at)
+		}
+		at.Status.Phase = atev1alpha1.PhaseReady
+		setExternalSlotReadyCondition(at)
+		if err := r.Status().Update(ctx, at); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	case atev1alpha1.PhaseResumeGoldenActor, atev1alpha1.PhaseWaitGoldenActor:
+		return r.retireExternalSlotGoldenActor(ctx, at)
+	case atev1alpha1.PhaseReady:
+		if at.Status.GoldenActorID != "" || at.Status.GoldenSnapshot != "" || !at.Status.TakeGoldenSnapshotAt.IsZero() {
+			return r.retireExternalSlotGoldenActor(ctx, at)
+		}
+		condition := meta.FindStatusCondition(at.Status.Conditions, "Ready")
+		if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != ExternalSlotReadyReason || condition.Message != externalSlotReadyMessage {
+			setExternalSlotReadyCondition(at)
+			if err := r.Status().Update(ctx, at); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	default:
+		return ctrl.Result{}, fmt.Errorf("external ActorTemplate cannot continue golden lifecycle phase %q", at.Status.Phase)
+	}
+}
+
+// retireExternalSlotGoldenActor migrates templates observed by an older
+// controller after it created (and possibly started) a golden actor. Deletion
+// uses any_state so a running workload is terminated before its Worker is
+// released. The template is not marked Ready until cleanup succeeds.
+func (r *ActorTemplateReconciler) retireExternalSlotGoldenActor(
+	ctx context.Context,
+	at *atev1alpha1.ActorTemplate,
+) (ctrl.Result, error) {
+	condition := meta.FindStatusCondition(at.Status.Conditions, "Ready")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != externalSlotCleanupReason || condition.Message != externalSlotCleanupMessage {
+		meta.SetStatusCondition(&at.Status.Conditions, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  externalSlotCleanupReason,
+			Message: externalSlotCleanupMessage,
+		})
+		if err := r.Status().Update(ctx, at); err != nil {
+			return ctrl.Result{}, fmt.Errorf("while marking external ActorTemplate golden cleanup pending: %w", err)
+		}
+	}
+	if at.Status.GoldenActorID != "" {
+		if at.Status.GoldenActorID != string(at.UID) {
+			return ctrl.Result{}, fmt.Errorf("external ActorTemplate golden actor identity does not match template UID")
+		}
+		_, err := r.AteClient.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+			Actor:    &ateapipb.ObjectRef{Atespace: resources.GoldenActorAtespace, Name: at.Status.GoldenActorID},
+			AnyState: true,
+		})
+		if err != nil && status.Code(err) != codes.NotFound {
+			return ctrl.Result{}, fmt.Errorf("while retiring external ActorTemplate golden actor: %w", err)
+		}
+	}
+	at.Status.GoldenActorID = ""
+	at.Status.GoldenSnapshot = ""
+	at.Status.TakeGoldenSnapshotAt = metav1.Time{}
+	at.Status.Phase = atev1alpha1.PhaseReady
+	setExternalSlotReadyCondition(at)
+	if err := r.Status().Update(ctx, at); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func setExternalSlotReadyCondition(at *atev1alpha1.ActorTemplate) {
+	meta.SetStatusCondition(&at.Status.Conditions, metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionTrue,
+		Reason:  ExternalSlotReadyReason,
+		Message: externalSlotReadyMessage,
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

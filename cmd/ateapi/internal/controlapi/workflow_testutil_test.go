@@ -44,11 +44,30 @@ func testWorkerUID(podName string) string {
 // reach (worker cache, atelet dialer, k8s clients) are nil, so a step that
 // unexpectedly executes against them fails the test loudly.
 func newTestActorWorkflow(t *testing.T, st store.Interface, tmplNamespace, tmplName string) *ActorWorkflow {
+	return newTestActorWorkflowForProvider(t, st, tmplNamespace, tmplName, "")
+}
+
+func newTestActorWorkflowForProvider(
+	t *testing.T,
+	st store.Interface,
+	tmplNamespace string,
+	tmplName string,
+	provider atev1alpha1.WorkerProvider,
+) *ActorWorkflow {
+	t.Helper()
+	return newTestActorWorkflowForTemplate(t, st, &atev1alpha1.ActorTemplate{
+		ObjectMeta: metav1.ObjectMeta{Namespace: tmplNamespace, Name: tmplName},
+		Spec:       atev1alpha1.ActorTemplateSpec{WorkerProvider: provider},
+	})
+}
+
+func newTestActorWorkflowForTemplate(t *testing.T, st store.Interface, template *atev1alpha1.ActorTemplate) *ActorWorkflow {
 	t.Helper()
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	if err := indexer.Add(&atev1alpha1.ActorTemplate{
-		ObjectMeta: metav1.ObjectMeta{Namespace: tmplNamespace, Name: tmplName},
-	}); err != nil {
+	if template == nil {
+		t.Fatal("test ActorTemplate is required")
+	}
+	if err := indexer.Add(template.DeepCopy()); err != nil {
 		t.Fatalf("add template to indexer: %v", err)
 	}
 	return NewActorWorkflow(st, nil, nil, listersv1alpha1.NewActorTemplateLister(indexer), nil, nil, nil, nil, "", nil, time.Minute)

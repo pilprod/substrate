@@ -142,5 +142,75 @@ func ValidateCustom_UpdateActorRequest_Actor(ctx context.Context, op operation.O
 
 // This is needed because DV doesn't have a standard format for IP addresses yet.
 func ValidateCustom_WorkerAssignment_WorkerPodIp(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if value == nil || *value == "" {
+		return nil
+	}
 	return validation.IsValidIP(fldPath, *value)
+}
+
+// ValidateCustom_WorkerAssignment applies the provider-specific identity
+// contract that cannot be expressed as independent field validations.
+func ValidateCustom_WorkerAssignment(_ context.Context, _ operation.Operation, fldPath *field.Path, assignment, _ *ateapipb.WorkerAssignment) field.ErrorList {
+	if assignment == nil {
+		return nil
+	}
+	var errs field.ErrorList
+	switch effectiveWorkerProvider(assignment.GetProvider()) {
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD:
+		if assignment.GetExternalSlot() != nil {
+			errs = append(errs, field.Forbidden(fldPath.Child("external_slot"), "must be empty for a KubernetesPod worker"))
+		}
+		for _, f := range []struct {
+			name  string
+			value string
+		}{
+			{name: "worker_pod", value: assignment.GetWorkerPod()},
+			{name: "worker_pod_uid", value: assignment.GetWorkerPodUid()},
+			{name: "worker_pod_ip", value: assignment.GetWorkerPodIp()},
+		} {
+			if f.value == "" {
+				errs = append(errs, field.Required(fldPath.Child(f.name), ""))
+			}
+		}
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+		if assignment.GetWorkerResourceUid() == "" {
+			errs = append(errs, field.Required(fldPath.Child("worker_resource_uid"), "required for an ExternalSlot assignment"))
+		}
+		if assignment.GetExternalSlot() == nil {
+			errs = append(errs, field.Required(fldPath.Child("external_slot"), ""))
+		}
+		for _, f := range []struct {
+			name  string
+			value string
+		}{
+			{name: "worker_pod", value: assignment.GetWorkerPod()},
+			{name: "worker_pod_uid", value: assignment.GetWorkerPodUid()},
+			{name: "worker_pod_ip", value: assignment.GetWorkerPodIp()},
+		} {
+			if f.value != "" {
+				errs = append(errs, field.Forbidden(fldPath.Child(f.name), "must be empty for an ExternalSlot worker"))
+			}
+		}
+	default:
+		errs = append(errs, field.NotSupported(fldPath.Child("provider"), assignment.GetProvider().String(), []string{
+			ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED.String(),
+			ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD.String(),
+			ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT.String(),
+		}))
+	}
+	return errs
+}
+
+func ValidateCustom_ExternalSlotIdentity_ExecutionIdentity(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if value == nil {
+		return nil
+	}
+	return validateExternalSlotIdentityCharacters(*value, fldPath)
+}
+
+func ValidateCustom_ExternalSlotIdentity_LocalityIdentity(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if value == nil {
+		return nil
+	}
+	return validateExternalSlotIdentityCharacters(*value, fldPath)
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
@@ -30,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
 	grpcCodes "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
@@ -72,7 +74,7 @@ type ActorWorkflow struct {
 	store                actorWorkflowStore
 	workerCache          *workercache.Cache
 	scheduler            scheduling.Scheduler
-	dialer               *AteletDialer
+	dialer               workerExecutionDialer
 	actorTemplateLister  listersv1alpha1.ActorTemplateLister
 	workerPoolLister     listersv1alpha1.WorkerPoolLister
 	sandboxConfigLister  listersv1alpha1.SandboxConfigLister
@@ -80,8 +82,28 @@ type ActorWorkflow struct {
 	instruments          *Instruments
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
+	externalRouteGuard   externalprovider.RouteAssignmentGuard
 	// workflowDeadline is the maximum duration of a single actor workflow.
 	workflowDeadline time.Duration
+}
+
+// ActorWorkflowOption configures optional workflow authorities.
+type ActorWorkflowOption func(*ActorWorkflow)
+
+// WithExternalRouteAssignmentGuard enables ExternalSlot scheduling and
+// linearizes its final assignment write with provider route lifecycle.
+func WithExternalRouteAssignmentGuard(guard externalprovider.RouteAssignmentGuard) ActorWorkflowOption {
+	return func(workflow *ActorWorkflow) {
+		workflow.externalRouteGuard = guard
+	}
+}
+
+// workerExecutionDialer resolves execution endpoints from the Substrate state
+// carried by a workflow. The target remains opaque to the workflow; the dialer
+// validates and interprets the provider-specific identity fields it requires.
+type workerExecutionDialer interface {
+	DialForWorker(assignment *ateapipb.WorkerAssignment) (*grpc.ClientConn, error)
+	DialForLocalSnapshot(local *ateapipb.LocalSnapshotInfo) (*grpc.ClientConn, error)
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. workflowDeadline bounds how
@@ -89,7 +111,7 @@ type ActorWorkflow struct {
 func NewActorWorkflow(
 	store actorWorkflowStore,
 	workerCache *workercache.Cache,
-	dialer *AteletDialer,
+	dialer workerExecutionDialer,
 	actorTemplateLister listersv1alpha1.ActorTemplateLister,
 	workerPoolLister listersv1alpha1.WorkerPoolLister,
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
@@ -98,11 +120,11 @@ func NewActorWorkflow(
 	egressGatewayAddress string,
 	pluginRegistry VolumePluginRegistry,
 	workflowDeadline time.Duration,
+	opts ...ActorWorkflowOption,
 ) *ActorWorkflow {
-	return &ActorWorkflow{
+	workflow := &ActorWorkflow{
 		store:                store,
 		workerCache:          workerCache,
-		scheduler:            scheduling.New(workerCache, scheduling.WithMeter(otel.Meter("ateapi"))),
 		dialer:               dialer,
 		actorTemplateLister:  actorTemplateLister,
 		workerPoolLister:     workerPoolLister,
@@ -113,6 +135,24 @@ func NewActorWorkflow(
 		pluginRegistry:       pluginRegistry,
 		workflowDeadline:     workflowDeadline,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(workflow)
+		}
+	}
+	workflow.scheduler = scheduling.New(
+		workerCache,
+		scheduling.WithMeter(otel.Meter("ateapi")),
+		scheduling.WithEligibility(workflow.workerRouteEligible),
+	)
+	return workflow
+}
+
+func (w *ActorWorkflow) workerRouteEligible(worker *ateapipb.Worker) bool {
+	if effectiveWorkerProvider(worker.GetProvider()) != ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		return true
+	}
+	return w.externalRouteGuard != nil && w.externalRouteGuard.AllowsCandidate(worker)
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by

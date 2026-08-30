@@ -19,16 +19,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/actoridentity"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/debugapi"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/externalprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/oidcjwt"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
@@ -43,6 +46,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
 	"github.com/agent-substrate/substrate/pkg/client/informers/externalversions"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -60,15 +64,34 @@ import (
 const maxRPCDeadline = 10 * time.Minute
 
 var (
-	listenAddr           = pflag.String("grpc-listen-addr", ":443", "Address and port the gRPC server should listen on.")
-	metricsListenAddr    = pflag.String("metrics-listen-addr", ":9090", "Address and port the prometheus metrics server should listen on.")
-	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
+	listenAddr                       = pflag.String("grpc-listen-addr", ":443", "Address and port the gRPC server should listen on.")
+	metricsListenAddr                = pflag.String("metrics-listen-addr", ":9090", "Address and port the prometheus metrics server should listen on.")
+	grpcServerCredBundle             = pflag.String("grpc-server-cred-bundle", "", "File with the server TLS credential bundle.")
+	externalProviderBrokerListenAddr = pflag.String(
+		"external-provider-broker-listen-addr",
+		"",
+		"Dedicated TLS listener for the external provider Broker. Empty disables the Broker network surface.",
+	)
+	externalProviderBrokerServerCredBundle = pflag.String(
+		"external-provider-broker-server-cred-bundle",
+		"",
+		"File with the server TLS credential bundle for the dedicated external provider Broker listener.",
+	)
+	externalProviderSessionTokenTTL = pflag.Duration(
+		"external-provider-session-token-ttl",
+		5*time.Minute,
+		"Lifetime of a one-time external provider Connect session token.",
+	)
 
-	authenticationConfigFile = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
-	postgresConnectionString = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
+	authenticationConfigFile     = pflag.String("authentication-config", "", "YAML file configuring trusted JWT providers.")
+	postgresConnectionString     = pflag.String("postgres-connection-string", "", "PostgreSQL connection string (libpq DSN or URI).")
+	postgresConnectionStringFile = pflag.String("postgres-connection-string-file", "", "File containing the PostgreSQL connection string. Mutually exclusive with --postgres-connection-string.")
 
-	actorIDJWTPoolFile   = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
-	egressGatewayAddress = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
+	actorIDJWTPoolFile           = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
+	egressGatewayAddress         = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
+	egressGatewayServerName      = pflag.String("egress-gateway-server-name", "", "Exact TLS server name for the egress gateway. Required for external-provider Actor egress.")
+	egressGatewayTrustBundle     = pflag.String("egress-gateway-trust-bundle", "", "PEM CA bundle used by external-provider runtimes to verify the egress gateway.")
+	egressGatewayAteapiPrincipal = pflag.String("egress-gateway-ateapi-principal", "", "Exact mTLS SPIFFE principal allowed to authorize external Actor egress CONNECTs.")
 
 	actorIDCAPoolFile      = pflag.String("actor-id-ca-pool", "", "The file that contains the CA pool for signing actor JWTs")
 	podIdentityCACerts     = pflag.String("pod-identity-ca-certs", "", "The file that contains the pod-identity CA bundle, used both for verifying client certificates presented to the gRPC server and for verifying atelet serving certificates when dialing atelet. If empty, client-cert verification is disabled and atelet dials will fail.")
@@ -202,10 +225,75 @@ func main() {
 		dialerOpts = append(dialerOpts, controlapi.WithInsecureCredentials())
 	}
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts, dialerOpts...)
-	controlSrv := controlapi.NewRPCService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, *actorWorkflowDeadline, volPlugins)
+	providerExecutionDialer, err := controlapi.NewProviderExecutionDialer(ateletDialer)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to create provider execution dialer", err)
+	}
+	defer func() {
+		if err := providerExecutionDialer.Close(); err != nil {
+			slog.ErrorContext(ctx, "Failed to close provider execution dialer", slog.Any("err", err))
+		}
+	}()
+	brokerConfig := externalProviderBrokerConfig{
+		ListenAddress:          *externalProviderBrokerListenAddr,
+		ServerCredentialBundle: *externalProviderBrokerServerCredBundle,
+		SessionTokenTTL:        *externalProviderSessionTokenTTL,
+	}
+	var sessionAuthority *externalprovider.SessionAuthority
+	var workflowOptions []controlapi.ActorWorkflowOption
+	if brokerConfig.enabled() {
+		sessionAuthority, err = externalprovider.NewSessionAuthority(externalprovider.DefaultSessionRuntimeConfig())
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to create external provider session authority", err)
+		}
+		workflowOptions = append(workflowOptions, controlapi.WithExternalRouteAssignmentGuard(sessionAuthority.AssignmentGuard()))
+	}
+	controlSrv := controlapi.NewRPCService(
+		persistence,
+		workerCache,
+		actorTemplateLister,
+		workerPoolLister,
+		sandboxConfigLister,
+		csiDriverConfigLister,
+		storageClassLister,
+		providerExecutionDialer,
+		instruments,
+		*egressGatewayAddress,
+		*actorWorkflowDeadline,
+		volPlugins,
+		workflowOptions...,
+	)
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
+	if brokerConfig.enabled() {
+		externalActorCA, err := actoridentity.NewExternalCertificateAuthority(*actorIDCAPoolFile)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to configure external Actor certificate authority", err)
+		}
+		gatewayTrustPEM, err := os.ReadFile(*egressGatewayTrustBundle)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to read external Actor egress gateway trust bundle", err)
+		}
+		if err := controlSrv.ConfigureExternalActorEgress(controlapi.ExternalActorEgressConfiguration{
+			CertificateAuthority:     externalActorCA,
+			RouteAuthorizer:          sessionAuthority.ActorEgressAuthorizer(),
+			GatewayServerName:        *egressGatewayServerName,
+			GatewayTrustBundlePEM:    gatewayTrustPEM,
+			ExpectedGatewayPrincipal: *egressGatewayAteapiPrincipal,
+		}); err != nil {
+			serverboot.Fatal(ctx, "Failed to configure external Actor egress", err)
+		}
+	}
 	debugSrv := debugapi.NewService(persistence)
+	externalProviderStore, _ := persistence.(externalprovider.ExternalProviderStore)
+	externalProviderAdminSrv, err := externalprovider.NewEnrollmentAdminServer(
+		externalProviderStore,
+		sessionAuthority,
+		externalProviderEnrollmentAdminPrincipals(authenticationConfig),
+	)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to configure external provider enrollment admin", err)
+	}
 
 	lisCfg := &net.ListenConfig{}
 	lis, err := lisCfg.Listen(ctx, "tcp", *listenAddr)
@@ -240,6 +328,42 @@ func main() {
 	ateapipb.RegisterControlServer(mux, controlSrv)
 	ateapipb.RegisterActorIdentityServer(mux, actorIdentitySrv)
 	ateapipb.RegisterDebugServer(mux, debugSrv)
+	externalproviderpb.RegisterExternalProviderAdminServer(mux, externalProviderAdminSrv)
+
+	var brokerRuntime *externalProviderBrokerRuntime
+	if brokerConfig.enabled() {
+		brokerStore := externalProviderStore
+		if brokerStore == nil {
+			serverboot.Fatal(ctx, "Persistence backend does not support the external provider Broker", fmt.Errorf("backend %T does not implement ExternalProviderStore", persistence))
+		}
+		recovery, sessionRuntime, err := recoverAndBindExternalProviderDataPlanes(
+			ctx,
+			controlSrv,
+			sessionAuthority,
+			controlSrv,
+			func(dialer *externalprovider.ExternalExecutionDialer) error {
+				return providerExecutionDialer.BindExternal(dialer)
+			},
+			func(dialer *externalprovider.ExternalActorIngressDialer) error {
+				return controlSrv.BindActorIngress(dialer)
+			},
+		)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to recover and bind external provider data planes", err)
+		}
+		slog.InfoContext(ctx, "External provider Worker recovery completed",
+			slog.Uint64("scanned", recovery.Scanned),
+			slog.Uint64("external", recovery.External),
+			slog.Uint64("offlined", recovery.Offlined),
+			slog.Uint64("already_offline", recovery.AlreadyOffline),
+			slog.Uint64("already_draining", recovery.AlreadyDraining),
+		)
+		brokerRuntime, err = startExternalProviderBroker(ctx, brokerStore, sessionRuntime, brokerConfig, slog.Default())
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to start external provider Broker", err)
+		}
+		slog.InfoContext(ctx, "External provider Broker listener configured", slog.String("address", brokerRuntime.listener.Addr().String()))
+	}
 
 	readiness := &serverboot.Readiness{}
 	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{
@@ -248,7 +372,20 @@ func main() {
 		EnableHealthz: true,
 	})
 
-	drainDone := drainOnShutdown(shutdownCtx, mux, readiness)
+	serversToDrain := []*grpc.Server{mux}
+	if brokerRuntime != nil {
+		serversToDrain = append(serversToDrain, brokerRuntime.server)
+		go func() {
+			err := brokerRuntime.Serve()
+			if shutdownCtx.Err() == nil {
+				if err == nil {
+					err = fmt.Errorf("external provider Broker stopped unexpectedly")
+				}
+				serverboot.Fatal(ctx, "Failed to serve external provider Broker", err)
+			}
+		}()
+	}
+	drainDone := drainOnShutdown(shutdownCtx, readiness, serversToDrain...)
 
 	if err := mux.Serve(lis); err != nil {
 		serverboot.Fatal(ctx, "Failed to serve", err)
@@ -257,7 +394,7 @@ func main() {
 	slog.InfoContext(ctx, "Shutdown complete")
 }
 
-func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboot.Readiness) <-chan struct{} {
+func drainOnShutdown(ctx context.Context, readiness *serverboot.Readiness, servers ...*grpc.Server) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -266,18 +403,27 @@ func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboo
 		readiness.MarkNotReady()
 		time.Sleep(*drainDelay)
 		slog.InfoContext(ctx, "Starting gRPC drain")
-		drainComplete := make(chan struct{})
-		go func() {
-			srv.GracefulStop()
-			close(drainComplete)
-		}()
-		select {
-		case <-drainComplete:
-			slog.InfoContext(ctx, "Drain completed within deadline")
-		case <-time.After(*drainTimeout):
-			slog.WarnContext(ctx, "Drain deadline exceeded; forcing stop")
-			srv.Stop()
+		drainComplete := make(chan struct{}, len(servers))
+		for _, server := range servers {
+			go func(server *grpc.Server) {
+				server.GracefulStop()
+				drainComplete <- struct{}{}
+			}(server)
 		}
+		timer := time.NewTimer(*drainTimeout)
+		defer timer.Stop()
+		for range servers {
+			select {
+			case <-drainComplete:
+			case <-timer.C:
+				slog.WarnContext(ctx, "Drain deadline exceeded; forcing stop")
+				for _, server := range servers {
+					server.Stop()
+				}
+				return
+			}
+		}
+		slog.InfoContext(ctx, "Drain completed within deadline")
 	}()
 	return done
 }
@@ -304,10 +450,20 @@ func logFlagValues(ctx context.Context) {
 	slog.InfoContext(ctx, "Final flag values",
 		slog.String("grpc-listen-addr", *listenAddr),
 		slog.String("grpc-server-cred-bundle", *grpcServerCredBundle),
+		slog.String("external-provider-broker-listen-addr", *externalProviderBrokerListenAddr),
+		slog.String("external-provider-broker-server-cred-bundle", *externalProviderBrokerServerCredBundle),
+		slog.Duration("external-provider-session-token-ttl", *externalProviderSessionTokenTTL),
 		slog.String("authentication-config", *authenticationConfigFile),
-		slog.String("postgres-connection-string", *postgresConnectionString),
+		// The connection string commonly embeds a database password. Log only
+		// whether startup received it, never its contents.
+		slog.Bool("postgres-connection-string-configured", *postgresConnectionString != "" || *postgresConnectionStringFile != ""),
+		slog.Bool("postgres-connection-string-file-configured", *postgresConnectionStringFile != ""),
 		slog.String("actor-id-jwt-pool", *actorIDJWTPoolFile),
 		slog.String("actor-id-ca-pool", *actorIDCAPoolFile),
+		slog.String("egress-gateway-address", *egressGatewayAddress),
+		slog.String("egress-gateway-server-name", *egressGatewayServerName),
+		slog.String("egress-gateway-trust-bundle", *egressGatewayTrustBundle),
+		slog.String("egress-gateway-ateapi-principal", *egressGatewayAteapiPrincipal),
 		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
 		slog.String("atelet-client-cred-bundle", *ateletClientCredBundle),
 		slog.Bool("atelet-insecure", *ateletInsecure),
@@ -320,17 +476,55 @@ func logFlagValues(ctx context.Context) {
 // connectStore builds the PostgreSQL-backed store.Interface. Startup fails if
 // its configuration is missing or the database can't be reached.
 func connectStore(ctx context.Context) (store.Interface, error) {
-	if *postgresConnectionString == "" {
-		return nil, fmt.Errorf("--postgres-connection-string is required")
+	connectionString, err := resolvePostgresConnectionString()
+	if err != nil {
+		return nil, err
 	}
-	if _, err := pgxpool.ParseConfig(*postgresConnectionString); err != nil {
+	if _, err := pgxpool.ParseConfig(connectionString); err != nil {
 		return nil, fmt.Errorf("parsing PostgreSQL connection string: %w", err)
 	}
-	persistence, err := connectPostgresWithRetries(ctx)
+	persistence, err := connectPostgresWithRetries(ctx, connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("setting up PostgreSQL: %w", err)
 	}
 	return persistence, nil
+}
+
+const maxPostgresConnectionStringBytes = 64 * 1024
+
+func resolvePostgresConnectionString() (string, error) {
+	if *postgresConnectionString != "" && *postgresConnectionStringFile != "" {
+		return "", fmt.Errorf("--postgres-connection-string and --postgres-connection-string-file are mutually exclusive")
+	}
+	if *postgresConnectionStringFile == "" {
+		if *postgresConnectionString == "" {
+			return "", fmt.Errorf("--postgres-connection-string or --postgres-connection-string-file is required")
+		}
+		return *postgresConnectionString, nil
+	}
+
+	file, err := os.Open(*postgresConnectionStringFile)
+	if err != nil {
+		return "", fmt.Errorf("open PostgreSQL connection string file: %w", err)
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, maxPostgresConnectionStringBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read PostgreSQL connection string file: %w", err)
+	}
+	if len(contents) > maxPostgresConnectionStringBytes {
+		return "", fmt.Errorf("PostgreSQL connection string file exceeds %d bytes", maxPostgresConnectionStringBytes)
+	}
+
+	connectionString := strings.TrimSuffix(string(contents), "\n")
+	connectionString = strings.TrimSuffix(connectionString, "\r")
+	if connectionString == "" {
+		return "", fmt.Errorf("PostgreSQL connection string file is empty")
+	}
+	if strings.ContainsRune(connectionString, '\x00') {
+		return "", fmt.Errorf("PostgreSQL connection string file contains a NUL byte")
+	}
+	return connectionString, nil
 }
 
 var (
@@ -338,10 +532,10 @@ var (
 	postgresConnectPeriod = 2 * time.Second
 )
 
-func connectPostgresWithRetries(ctx context.Context) (*atepg.Persistence, error) {
+func connectPostgresWithRetries(ctx context.Context, connectionString string) (*atepg.Persistence, error) {
 	var connectErr error
 	for attempt := 1; attempt <= postgresConnectTries; attempt++ {
-		persistence, err := atepg.Connect(ctx, *postgresConnectionString)
+		persistence, err := atepg.Connect(ctx, connectionString)
 		if err == nil {
 			return persistence, nil
 		}
@@ -408,11 +602,15 @@ func buildJWTProviders(ctx context.Context, cfg *ateapiauth.AuthenticationConfig
 	var serverCfg ateapiauth.ServerConfig
 	var actorIdentityIssuer string
 	for _, providerCfg := range cfg.JWTProviders {
-		httpClient, err := oidcjwt.NewHTTPClient(providerCfg.Issuer, providerCfg.CertificateAuthorityFile, providerCfg.DiscoveryTokenFile)
+		overrides := oidcjwt.EndpointOverrides{
+			DiscoveryURL: providerCfg.DiscoveryURL,
+			JWKSURL:      providerCfg.JWKSURL,
+		}
+		httpClient, err := oidcjwt.NewHTTPClient(providerCfg.Issuer, overrides, providerCfg.CertificateAuthorityFile, providerCfg.DiscoveryTokenFile)
 		if err != nil {
 			return ateapiauth.ServerConfig{}, "", fmt.Errorf("initialize JWT provider %q: %w", providerCfg.Name, err)
 		}
-		verifier := oidcjwt.NewVerifier(providerCfg.Issuer, providerCfg.Audiences, httpClient)
+		verifier := oidcjwt.NewVerifier(providerCfg.Issuer, providerCfg.Audiences, overrides, httpClient)
 		serverCfg.JWTProviders = append(serverCfg.JWTProviders, ateapiauth.JWTProvider{
 			Name:   providerCfg.Name,
 			Issuer: providerCfg.Issuer,
@@ -430,4 +628,22 @@ func buildJWTProviders(ctx context.Context, cfg *ateapiauth.AuthenticationConfig
 		slog.InfoContext(ctx, "Configured JWT provider", slog.String("name", providerCfg.Name), slog.String("issuer", providerCfg.Issuer))
 	}
 	return serverCfg, actorIdentityIssuer, nil
+}
+
+func externalProviderEnrollmentAdminPrincipals(cfg *ateapiauth.AuthenticationConfig) []externalprovider.EnrollmentAdminPrincipal {
+	issuers := make(map[string]string, len(cfg.JWTProviders))
+	for _, provider := range cfg.JWTProviders {
+		issuers[provider.Name] = provider.Issuer
+	}
+	var result []externalprovider.EnrollmentAdminPrincipal
+	for _, admin := range cfg.ExternalProviderEnrollmentAdmins {
+		for _, subject := range admin.Subjects {
+			result = append(result, externalprovider.EnrollmentAdminPrincipal{
+				Provider: admin.Provider,
+				Issuer:   issuers[admin.Provider],
+				Subject:  subject,
+			})
+		}
+	}
+	return result
 }

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{ if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -34,11 +35,13 @@ rules:
 # ActorTemplates (e.g. via a namespace-scoped Role + RoleBinding using
 # resourceNames).
 ---
+{{ end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ include "substrate.fullname" (list "ate-api-server" .) }}
   namespace: {{ .Release.Namespace }}
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -52,6 +55,7 @@ roleRef:
   kind: ClusterRole
   name: {{ include "substrate.fullname" (list "ate-api-server-role" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,11 +63,17 @@ metadata:
   name: {{ include "substrate.fullname" (list "ate-api-server" .) }}
   namespace: {{ .Release.Namespace }}
 spec:
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+  replicas: 1
+  strategy:
+    type: Recreate
+{{- else }}
   replicas: 2
   strategy:
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
+{{- end }}
   selector:
     matchLabels:
       app: ate-api-server
@@ -77,19 +87,60 @@ spec:
     spec:
       serviceAccountName: {{ include "substrate.fullname" (list "ate-api-server" .) }}
       terminationGracePeriodSeconds: 40
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+{{- end }}
       containers:
       - name: ate-api-server
         image: {{ include "substrate.componentImage" (list "ateapi" .) }}
         args:
         - "--grpc-listen-addr=0.0.0.0:443"
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--grpc-server-cred-bundle=/run/secrets/substrate/tls/ate-api/server-credential-bundle.pem"
+{{- else }}
         - "--grpc-server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+{{- end }}
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+        - {{ printf "--external-provider-broker-listen-addr=0.0.0.0:%v" .Values.externalProviderBroker.containerPort | quote }}
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--external-provider-broker-server-cred-bundle=/run/secrets/substrate/tls/ate-api/server-credential-bundle.pem"
+{{- else }}
+        - "--external-provider-broker-server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+{{- end }}
+        - {{ printf "--external-provider-session-token-ttl=%v" .Values.externalProviderBroker.sessionTokenTTL | quote }}
+{{- end }}
         - "--authentication-config=/etc/ateapi/authentication/authentication.yaml"
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--postgres-connection-string-file=/run/secrets/substrate/postgres/connection-string"
+{{- else }}
         - "--postgres-connection-string=@env"
+{{- end }}
         - "--actor-id-jwt-pool=/run/actor-id-jwt-pool/pool.json"
         - "--actor-id-ca-pool=/run/actor-id-ca-pool/pool.json"
         - "--egress-gateway-address={{ include "substrate.fullname" (list "atenet-egress" .) }}.{{ .Release.Namespace }}.svc:443"
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--egress-gateway-server-name={{ .Values.externalControlPlane.tls.egressGateway.serverName }}"
+        - "--egress-gateway-trust-bundle=/run/secrets/substrate/tls/egress-gateway/server-ca.pem"
+        - "--egress-gateway-ateapi-principal={{ .Values.externalControlPlane.tls.egressAuthorizer.principal }}"
+{{- else }}
+        - "--egress-gateway-server-name={{ include "substrate.fullname" (list "atenet-egress" .) }}.{{ .Release.Namespace }}.svc"
+        - "--egress-gateway-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem"
+        - "--egress-gateway-ateapi-principal=spiffe://cluster.local/ns/{{ .Release.Namespace }}/sa/{{ include "substrate.fullname" (list "atenet-egress" .) }}"
+{{- end }}
+{{- end }}
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
         - "--atelet-client-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+{{- end }}
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - "--pod-identity-ca-certs=/run/secrets/substrate/tls/ate-api/client-ca.pem"
+{{- else }}
         - "--pod-identity-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem"
+{{- end }}
         - "--drain-delay=13s"
         - "--drain-timeout=15s"
         env:
@@ -111,18 +162,42 @@ spec:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.otel.endpoint | quote }}
 {{- end }}
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
         envFrom:
         - configMapRef:
             name: {{ .Values.ateApiServerEnvVarsConfigMap }}
             optional: true
+{{- end }}
         volumeMounts:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - { name: ate-api-tls,         mountPath: /run/secrets/substrate/tls/ate-api, readOnly: true }
+        - { name: egress-gateway-trust, mountPath: /run/secrets/substrate/tls/egress-gateway, readOnly: true }
+{{- else }}
         - { name: servicedns,          mountPath: /run/servicedns.podcert.ate.dev }
+{{- end }}
         - { name: actor-id-jwt-pool,   mountPath: /run/actor-id-jwt-pool }
         - { name: actor-id-ca-pool,    mountPath: /run/actor-id-ca-pool, readOnly: true }
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
         - { name: podidentity,         mountPath: /run/podidentity.podcert.ate.dev, readOnly: true }
+{{- end }}
         - { name: authentication-config, mountPath: /etc/ateapi/authentication, readOnly: true }
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+        - { name: postgres-connection-string, mountPath: /run/secrets/substrate/postgres, readOnly: true }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsUser: 65532
+          runAsGroup: 65532
+{{- end }}
         ports:
         - containerPort: 443
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+        - name: provider-grpc
+          containerPort: {{ .Values.externalProviderBroker.containerPort }}
+          protocol: TCP
+{{- end }}
         - name: prometheus
           containerPort: 9090
         readinessProbe:
@@ -139,6 +214,24 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 10
       volumes:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+      - name: ate-api-tls
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.credentialBundleKey }}
+            path: server-credential-bundle.pem
+          - key: {{ .Values.externalControlPlane.tls.apiServer.existingSecret.clientCAKey }}
+            path: client-ca.pem
+      - name: egress-gateway-trust
+        secret:
+          secretName: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.tls.egressGateway.existingSecret.serverCAKey }}
+            path: server-ca.pem
+{{- else }}
       - name: servicedns
         projected:
           sources:
@@ -152,8 +245,12 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+{{- end }}
       - name: actor-id-jwt-pool
         projected:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+          defaultMode: 0440
+{{- end }}
           sources:
           - secret:
               name: actor-id-jwt-pool
@@ -161,6 +258,9 @@ spec:
               - { key: pool, path: pool.json }
       - name: actor-id-ca-pool
         projected:
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+          defaultMode: 0440
+{{- end }}
           sources:
           - secret:
               name: actor-id-ca-pool
@@ -169,6 +269,16 @@ spec:
       - name: authentication-config
         configMap:
           name: ate-api-authentication
+{{- if eq (.Values.profile | default "standard") "external-control-plane-only" }}
+      - name: postgres-connection-string
+        secret:
+          secretName: {{ .Values.externalControlPlane.postgres.existingSecret.name }}
+          defaultMode: 0440
+          items:
+          - key: {{ .Values.externalControlPlane.postgres.existingSecret.key }}
+            path: connection-string
+{{- end }}
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
       - name: podidentity
         projected:
           sources:
@@ -182,6 +292,7 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+{{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -208,3 +319,9 @@ spec:
     protocol: TCP
     port: 443
     targetPort: 443
+{{- if or .Values.externalProviderBroker.enabled (eq (.Values.profile | default "standard") "external-control-plane-only") }}
+  - name: provider-grpc
+    protocol: TCP
+    port: {{ .Values.externalProviderBroker.containerPort }}
+    targetPort: provider-grpc
+{{- end }}

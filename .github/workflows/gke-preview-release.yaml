@@ -1,0 +1,300 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: GKE preview release
+
+on:
+  workflow_dispatch:
+    inputs:
+      acknowledge_non_production:
+        description: Publish a non-production preview from the selected commit
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: substrate-gke-preview-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: inputs.acknowledge_non_production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve immutable preview coordinates
+        id: coordinates
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -o errexit -o nounset -o pipefail
+
+          source_sha="$(git rev-parse HEAD)"
+          if [[ ! "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]] || [[ "${source_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "::error::The dispatch revision must resolve to the exact 40-character commit SHA"
+            exit 1
+          fi
+
+          registry_repository="${GITHUB_REPOSITORY,,}"
+          image_registry="ghcr.io/${registry_repository}"
+          image_tag="sha-${source_sha}"
+          chart_version="0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+
+          {
+            printf 'SOURCE_SHA=%s\n' "${source_sha}"
+            printf 'REGISTRY_REPOSITORY=%s\n' "${registry_repository}"
+            printf 'IMAGE_REGISTRY=%s\n' "${image_registry}"
+            printf 'IMAGE_TAG=%s\n' "${image_tag}"
+            printf 'CHART_VERSION=%s\n' "${chart_version}"
+          } >> "${GITHUB_ENV}"
+          printf 'registry_repository=%s\n' "${registry_repository}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.21.4
+
+      - name: Verify preview inputs
+        run: |
+          set -o errexit -o nounset -o pipefail
+          go test ./cmd/ateapi/... ./cmd/atecontroller/... ./cmd/ateom-gvisor/... ./cmd/atenet/... ./cmd/substrate-release-verify/...
+          make verify-external-control-plane-chart verify-crd-chart
+          ./hack/verify/gke-preview-release.sh
+
+      - name: Verify pinned agentgateway dependency
+        run: |
+          set -o errexit -o nounset -o pipefail
+
+          agentgateway_refs="$(
+            helm template substrate charts/substrate \
+              --namespace ate-system \
+              --values charts/substrate/examples/external-control-plane-only-cloud-sql.values.yaml \
+              --show-only templates/atenet-egress.yaml \
+              | awk '
+                  $1 == "-" && $2 == "name:" && $3 == "agentgateway" { in_container = 1; next }
+                  in_container && $1 == "image:" { print $2; in_container = 0 }
+                '
+          )"
+          agentgateway_count="$(printf '%s\n' "${agentgateway_refs}" | awk 'NF { count++ } END { print count + 0 }')"
+          agentgateway_ref="$(printf '%s\n' "${agentgateway_refs}" | awk 'NF { print; exit }')"
+          if [[ "${agentgateway_count}" -ne 1 ]] \
+            || [[ ! "${agentgateway_ref}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The external profile must render exactly one digest-qualified agentgateway image"
+            exit 1
+          fi
+          docker buildx imagetools inspect "${agentgateway_ref}" >/dev/null
+          printf 'AGENTGATEWAY_IMAGE_REF=%s\n' "${agentgateway_ref}" >> "${GITHUB_ENV}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite preview coordinates
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o errexit -o nounset -o pipefail
+          printf '%s' "${GHCR_TOKEN}" \
+            | helm registry login ghcr.io \
+                --username "${GITHUB_ACTOR}" \
+                --password-stdin
+          ./hack/refuse-gke-preview-overwrite.sh
+
+      - name: Build and publish preview images
+        id: images
+        run: |
+          set -o errexit -o nounset -o pipefail
+
+          mkdir -p dist/sbom
+          for component in ateapi atecontroller ateom-gvisor atenet substrate-release-verify; do
+            mkdir -p "dist/sbom/${component}"
+            tagged_ref="${IMAGE_REGISTRY}/${component}:${IMAGE_TAG}"
+            published_ref="$(CGO_ENABLED=0 \
+              KO_DOCKER_REPO="${IMAGE_REGISTRY}/${component}" \
+              ./hack/run-tool.sh ko build \
+                --bare \
+                --tags "${IMAGE_TAG}" \
+                --platform linux/amd64,linux/arm64 \
+                --ldflags="-X=github.com/agent-substrate/substrate/internal/version.Version=${IMAGE_TAG}" \
+                --image-label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+                --image-label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+                --sbom=spdx \
+                --sbom-dir="dist/sbom/${component}" \
+                "./cmd/${component}")"
+            printf '%s\n' "${published_ref}"
+
+            ref_prefix="${tagged_ref}@"
+            if [[ "${published_ref}" == *$'\n'* ]] || [[ "${published_ref}" != "${ref_prefix}"sha256:* ]]; then
+              echo "::error::ko returned an unexpected immutable reference for ${tagged_ref}: ${published_ref}"
+              exit 1
+            fi
+            digest="${published_ref#"${ref_prefix}"}"
+            if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::ko did not return an immutable digest for ${tagged_ref}"
+              exit 1
+            fi
+
+            env_name="$(printf '%s' "${component}" | tr '[:lower:]-' '[:upper:]_')_IMAGE_REF"
+            printf '%s=%s@%s\n' "${env_name}" "${IMAGE_REGISTRY}/${component}" "${digest}" >> "${GITHUB_ENV}"
+            output_name="$(printf '%s' "${component}" | tr '-' '_')_digest"
+            printf '%s=%s\n' "${output_name}" "${digest}" >> "${GITHUB_OUTPUT}"
+          done
+
+      - name: Attest ateapi preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/ateapi
+          subject-digest: ${{ steps.images.outputs.ateapi_digest }}
+          push-to-registry: true
+
+      - name: Attest atecontroller preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/atecontroller
+          subject-digest: ${{ steps.images.outputs.atecontroller_digest }}
+          push-to-registry: true
+
+      - name: Attest ateom-gvisor preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/ateom-gvisor
+          subject-digest: ${{ steps.images.outputs.ateom_gvisor_digest }}
+          push-to-registry: true
+
+      - name: Attest atenet preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/atenet
+          subject-digest: ${{ steps.images.outputs.atenet_digest }}
+          push-to-registry: true
+
+      - name: Attest substrate release verifier preview image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/substrate-release-verify
+          subject-digest: ${{ steps.images.outputs.substrate_release_verify_digest }}
+          push-to-registry: true
+
+      - name: Package and publish preview charts
+        id: charts
+        env:
+          HELM_EXPERIMENTAL_OCI: "1"
+        run: |
+          set -o errexit -o nounset -o pipefail
+
+          chart_repository="oci://${IMAGE_REGISTRY}/helm"
+          package_dir="dist/charts"
+          mkdir -p "${package_dir}"
+
+          helm package charts/substrate-crds \
+            --destination "${package_dir}" \
+            --version "${CHART_VERSION}" \
+            --app-version "${IMAGE_TAG}"
+          helm package charts/substrate \
+            --destination "${package_dir}" \
+            --version "${CHART_VERSION}" \
+            --app-version "${IMAGE_TAG}"
+
+          publish_chart() {
+            local chart_name="$1"
+            local env_name="$2"
+            local output_name="$3"
+            local output digest
+
+            output="$(helm push "${package_dir}/${chart_name}-${CHART_VERSION}.tgz" "${chart_repository}")"
+            printf '%s\n' "${output}"
+            digest="$(printf '%s\n' "${output}" | sed -nE 's/^Digest: (sha256:[0-9a-f]{64})$/\1/p' | tail -n 1)"
+            if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not resolve an immutable digest for chart ${chart_name}"
+              exit 1
+            fi
+            printf '%s=%s/%s@%s\n' "${env_name}" "${chart_repository}" "${chart_name}" "${digest}" >> "${GITHUB_ENV}"
+            printf '%s=%s\n' "${output_name}" "${digest}" >> "${GITHUB_OUTPUT}"
+          }
+
+          publish_chart substrate-crds CRDS_CHART_REF crds_digest
+          publish_chart substrate APPLICATION_CHART_REF application_digest
+
+      - name: Attest substrate CRD chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/helm/substrate-crds
+          subject-digest: ${{ steps.charts.outputs.crds_digest }}
+          push-to-registry: true
+
+      - name: Attest substrate application chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ steps.coordinates.outputs.registry_repository }}/helm/substrate
+          subject-digest: ${{ steps.charts.outputs.application_digest }}
+          push-to-registry: true
+
+      - name: Generate app-gcp handoff manifest
+        run: |
+          set -o errexit -o nounset -o pipefail
+          output="dist/substrate-gke-preview.json"
+          PREVIEW_OUTPUT="${output}" \
+          PREVIEW_SOURCE_REPOSITORY="${GITHUB_REPOSITORY}" \
+          PREVIEW_REGISTRY_REPOSITORY="${REGISTRY_REPOSITORY}" \
+          PREVIEW_SOURCE_SHA="${SOURCE_SHA}" \
+          PREVIEW_IMAGE_TAG="${IMAGE_TAG}" \
+          PREVIEW_CHART_VERSION="${CHART_VERSION}" \
+          PREVIEW_ATEAPI_REF="${ATEAPI_IMAGE_REF}" \
+          PREVIEW_ATECONTROLLER_REF="${ATECONTROLLER_IMAGE_REF}" \
+          PREVIEW_ATEOM_GVISOR_REF="${ATEOM_GVISOR_IMAGE_REF}" \
+          PREVIEW_ATENET_REF="${ATENET_IMAGE_REF}" \
+          PREVIEW_AGENTGATEWAY_REF="${AGENTGATEWAY_IMAGE_REF}" \
+          PREVIEW_RELEASE_VERIFIER_REF="${SUBSTRATE_RELEASE_VERIFY_IMAGE_REF}" \
+          PREVIEW_CRDS_CHART_REF="${CRDS_CHART_REF}" \
+          PREVIEW_APPLICATION_CHART_REF="${APPLICATION_CHART_REF}" \
+            ./hack/generate-gke-preview-manifest.sh
+          (cd "$(dirname "${output}")" && sha256sum "$(basename "${output}")") > "${output}.sha256"
+          {
+            printf '```json\n'
+            jq . "${output}"
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload preview handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: substrate-gke-preview-${{ github.sha }}
+          path: |
+            dist/substrate-gke-preview.json
+            dist/substrate-gke-preview.json.sha256
+            dist/charts/*.tgz
+            dist/sbom/**
+          if-no-files-found: error
+          retention-days: 14

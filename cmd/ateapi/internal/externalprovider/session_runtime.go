@@ -1,0 +1,286 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package externalprovider
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+)
+
+const (
+	defaultSessionRegistrations uint32 = 4096
+	defaultSessionRoutes        uint32 = 4096
+	defaultSessionBindings      uint32 = 1 << 20
+	defaultSessionOpenChannels  uint32 = 256
+	defaultSessionDataBytes     uint32 = 64 << 10
+)
+
+var (
+	errInvalidSessionRuntime    = errors.New("invalid external provider session runtime")
+	errSessionAuthorityNotBound = errors.New("external provider session authority is not bound")
+)
+
+const registrationRevocationCleanupTimeout = 10 * time.Second
+
+// RegistrationRevocationStore is the durable boundary required by live
+// registration revocation. SessionAuthority keeps this operation under the
+// same per-registration gate as Connect claim/install.
+type RegistrationRevocationStore interface {
+	RevokeExternalProviderRegistration(context.Context, string) error
+}
+
+// RegistrationSessionRevoker is the admin service boundary for durable and
+// live revocation. Implementations must not return success until the current
+// route, forwarding channels, and Worker availability have been fenced.
+type RegistrationSessionRevoker interface {
+	RevokeExternalProviderRegistration(context.Context, RegistrationRevocationStore, string) error
+}
+
+// SessionRuntimeConfig explicitly bounds every in-memory authority used by
+// live external provider sessions.
+type SessionRuntimeConfig struct {
+	MaxTrackedRegistrations uint32
+	ClaimInstallGateLimits  ClaimInstallGateLimits
+	RouteLimits             SessionRouteDirectoryLimits
+	ChannelLimits           ChannelSessionLimits
+	ExecutionLimits         ExecutionForwardingLimits
+}
+
+// DefaultSessionRuntimeConfig returns conservative process-wide bounds. The
+// route binding bound permits at most 256 slots for each default route.
+func DefaultSessionRuntimeConfig() SessionRuntimeConfig {
+	return SessionRuntimeConfig{
+		MaxTrackedRegistrations: defaultSessionRegistrations,
+		ClaimInstallGateLimits: ClaimInstallGateLimits{
+			MaxInFlight:     defaultMaxClaimInstallInFlight,
+			MaxDistinctKeys: defaultMaxClaimInstallKeys,
+		},
+		RouteLimits: SessionRouteDirectoryLimits{
+			MaxRoutes:   defaultSessionRoutes,
+			MaxBindings: defaultSessionBindings,
+		},
+		ChannelLimits: ChannelSessionLimits{
+			MaxOpenChannels: defaultSessionOpenChannels,
+			MaxDataBytes:    defaultSessionDataBytes,
+		},
+		ExecutionLimits: DefaultExecutionForwardingLimits(),
+	}
+}
+
+// SessionAuthority owns the route and generation authorities which must be
+// shared by scheduling and Connect. It is created before the control service,
+// then bound exactly once to that service's Worker persistence boundaries.
+type SessionAuthority struct {
+	registry         *sessionRegistry
+	routes           *SessionRouteDirectory
+	claimInstallGate *claimInstallGate
+	channelLimits    ChannelSessionLimits
+	executionLimits  ExecutionForwardingLimits
+
+	mu    sync.Mutex
+	bound bool
+	// coordinator is published under mu at the same instant as bound. Admin
+	// revocation reads it only after Bind has completed successfully.
+	coordinator *sessionCoordinator
+}
+
+// SessionRuntime is the Connect-side view of one bound SessionAuthority. Every
+// Broker using this runtime shares its claim-install gate and route authority.
+type SessionRuntime struct {
+	coordinator      *sessionCoordinator
+	claimInstallGate *claimInstallGate
+}
+
+// NewSessionAuthority constructs an empty bounded authority. It publishes no
+// routes and therefore cannot make a Worker eligible before Bind succeeds.
+func NewSessionAuthority(config SessionRuntimeConfig) (*SessionAuthority, error) {
+	registry, err := newSessionRegistry(config.MaxTrackedRegistrations)
+	if err != nil {
+		return nil, fmt.Errorf("%w: registry: %w", errInvalidSessionRuntime, err)
+	}
+	claimInstallGate, err := newClaimInstallGate(
+		config.ClaimInstallGateLimits.MaxInFlight,
+		config.ClaimInstallGateLimits.MaxDistinctKeys,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: claim-install gate: %w", errInvalidSessionRuntime, err)
+	}
+	routes, err := newSessionRouteDirectory(registry, config.RouteLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: routes: %w", errInvalidSessionRuntime, err)
+	}
+	channelLimits, err := normalizeChannelSessionLimits(config.ChannelLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: channels: %w", errInvalidSessionRuntime, err)
+	}
+	executionLimits, err := normalizeExecutionForwardingLimits(config.ExecutionLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: execution: %w", errInvalidSessionRuntime, err)
+	}
+	return &SessionAuthority{
+		registry:         registry,
+		routes:           routes,
+		claimInstallGate: claimInstallGate,
+		channelLimits:    channelLimits,
+		executionLimits:  executionLimits,
+	}, nil
+}
+
+// AssignmentGuard returns the scheduling guard sharing this authority's exact
+// registry and route directory.
+func (a *SessionAuthority) AssignmentGuard() RouteAssignmentGuard {
+	if a == nil || a.routes == nil {
+		return nil
+	}
+	return a.routes.AssignmentGuard()
+}
+
+// Bind attaches the durable Worker operations and returns a passive Connect
+// runtime. It deliberately leaves every reconciled Worker OFFLINE. Multiple
+// broker runtimes must never share one route authority, so a second call fails
+// closed.
+func (a *SessionAuthority) Bind(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+) (*SessionRuntime, error) {
+	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
+		return nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.bound {
+		return nil, fmt.Errorf("%w: authority is already bound", errInvalidSessionRuntime)
+	}
+	lifecycle, err := newWorkerSessionLifecycle(a.registry, availability, a.routes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
+	}
+	// This runtime intentionally has no execution-channel forwarder yet. Keep
+	// every reconciled Worker OFFLINE until a later constructor can bind both
+	// the coordinator and that forwarding authority atomically.
+	coordinator, err := newPassiveSessionCoordinator(a.registry, reconciler, a.routes, lifecycle, a.channelLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
+	}
+	a.coordinator = coordinator
+	a.bound = true
+	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate}, nil
+}
+
+// BindExecutionForwarding atomically binds Worker lifecycle and the server-
+// owned EXECUTION_GRPC data plane. Its coordinator can make reconciled Workers
+// ACTIVE only after the exact Connect route and forwarding transport are both
+// installed. The returned dialer resolves no other Worker provider.
+func (a *SessionAuthority) BindExecutionForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+) (*SessionRuntime, *ExternalExecutionDialer, error) {
+	runtime, execution, _, err := a.bindForwarding(reconciler, availability, nil)
+	return runtime, execution, err
+}
+
+// BindProviderForwarding atomically binds Worker lifecycle and all provider
+// data planes. EXECUTION_GRPC, ACTOR_INGRESS, and client-opened ACTOR_EGRESS
+// share one route/session fence. The egress gateway receives only the exact
+// immutable binding and generation derived by that authority.
+func (a *SessionAuthority) BindProviderForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+	actorEgress ActorEgressGateway,
+) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
+	if actorEgress == nil {
+		return nil, nil, nil, fmt.Errorf("%w: Actor egress gateway is required", errInvalidSessionRuntime)
+	}
+	return a.bindForwarding(reconciler, availability, actorEgress)
+}
+
+func (a *SessionAuthority) bindForwarding(
+	reconciler WorkerPlanReconciler,
+	availability ExternalWorkerAvailabilityController,
+	actorEgress ActorEgressGateway,
+) (*SessionRuntime, *ExternalExecutionDialer, *ExternalActorIngressDialer, error) {
+	if a == nil || a.registry == nil || a.routes == nil || a.claimInstallGate == nil || reconciler == nil || availability == nil {
+		return nil, nil, nil, fmt.Errorf("%w: authority and Worker boundaries are required", errInvalidSessionRuntime)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.bound {
+		return nil, nil, nil, fmt.Errorf("%w: authority is already bound", errInvalidSessionRuntime)
+	}
+	lifecycle, err := newWorkerSessionLifecycle(a.registry, availability, a.routes)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: lifecycle: %w", errInvalidSessionRuntime, err)
+	}
+	var egressOptions []ActorEgressGateway
+	if actorEgress != nil {
+		egressOptions = append(egressOptions, actorEgress)
+	}
+	forwarder, err := newExecutionForwarder(a.routes, a.executionLimits, egressOptions...)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: forwarding: %w", errInvalidSessionRuntime, err)
+	}
+	coordinator, err := newSessionCoordinatorWithForwarder(a.registry, reconciler, a.routes, lifecycle, a.channelLimits, forwarder)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: coordinator: %w", errInvalidSessionRuntime, err)
+	}
+	a.coordinator = coordinator
+	a.bound = true
+	return &SessionRuntime{coordinator: coordinator, claimInstallGate: a.claimInstallGate},
+		&ExternalExecutionDialer{forwarder: forwarder},
+		&ExternalActorIngressDialer{forwarder: forwarder},
+		nil
+}
+
+// RevokeExternalProviderRegistration serializes durable revocation with the
+// exact Connect claim/install gate, persists authority loss first, and then
+// synchronously fences the current in-memory generation. Once persistence has
+// committed, cleanup uses an internal bounded context so client cancellation
+// cannot leave a revoked provider routable.
+func (a *SessionAuthority) RevokeExternalProviderRegistration(
+	ctx context.Context,
+	store RegistrationRevocationStore,
+	registrationUID string,
+) error {
+	if a == nil || ctx == nil || store == nil || !IsValidIdentity(registrationUID) {
+		return errInvalidSessionRuntime
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	coordinator := a.coordinator
+	bound := a.bound
+	a.mu.Unlock()
+	if !bound || coordinator == nil || coordinator.lifecycle == nil || a.claimInstallGate == nil {
+		return errSessionAuthorityNotBound
+	}
+
+	gate, err := a.claimInstallGate.acquire(ctx, registrationUID)
+	if err != nil {
+		return err
+	}
+	defer gate.release()
+
+	if err := store.RevokeExternalProviderRegistration(ctx, registrationUID); err != nil {
+		return err
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registrationRevocationCleanupTimeout)
+	defer cancel()
+	return coordinator.lifecycle.revokeCurrent(cleanupCtx, registrationUID)
+}

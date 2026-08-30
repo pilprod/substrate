@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag (e.g. v1.2.3-rc1). Leave blank to auto-generate from branch+SHA.'
+        description: 'Immutable image tag. A GitHub release requires vMAJOR.MINOR.PATCH; leave blank only for a non-release build.'
         required: false
       create_release:
         description: 'Create a GitHub release'
@@ -29,13 +29,17 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Validate and resolve tag
         id: tag
@@ -43,55 +47,87 @@ jobs:
           TAG="${{ inputs.tag }}"
           if [[ -z "${TAG}" ]]; then
             BRANCH="${GITHUB_REF_NAME//\//-}"
-            SHA="$(git rev-parse --short HEAD)"
+            SHA="$(git rev-parse HEAD)"
             TAG="${BRANCH}-${SHA}"
           fi
+          if [[ ! "${TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::Tag '${TAG}' is not a valid immutable OCI tag"
+            exit 1
+          fi
+          if [[ "${TAG}" =~ ^[Ll][Aa][Tt][Ee][Ss][Tt]$ ]]; then
+            echo "::error::The moving 'latest' tag is forbidden"
+            exit 1
+          fi
+          if [[ "${{ inputs.create_release }}" == "false" && "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::SemVer release coordinates are reserved for create_release=true"
+            exit 1
+          fi
           if [[ "${{ inputs.create_release }}" == "true" ]]; then
-            if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$ ]]; then
-              echo "::error::Tag '${TAG}' must match vMAJOR.MINOR.PATCH[-prerelease] when creating a release (e.g. v1.2.3 or v1.2.3-rc1)"
+            if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Tag '${TAG}' must match vMAJOR.MINOR.PATCH when creating a release (e.g. v1.2.3)"
+              exit 1
+            fi
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::A GitHub release must run from the merged main branch"
               exit 1
             fi
           fi
+          repository="${GITHUB_REPOSITORY,,}"
           echo "value=${TAG}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ inputs.create_release }}" == "true" ]]; then
-            echo "tags=${TAG},latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "tags=${TAG}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "registry_repository=${repository}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: 'go.mod'
 
       - name: Install ko
-        uses: ko-build/setup-ko@v0.7
+        uses: ko-build/setup-ko@3aebd0597dc1e9d1a26bcfdb7cbeb19c131d3037 # v0.7
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.21.4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to GHCR for Helm
+        if: inputs.create_release
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Refuse existing release coordinates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+          RELEASE_TAG: ${{ steps.tag.outputs.value }}
+          GITHUB_REPOSITORY: ${{ steps.tag.outputs.registry_repository }}
+          IMAGE_REGISTRY: ghcr.io/${{ steps.tag.outputs.registry_repository }}
+          CHART_REPOSITORY: oci://ghcr.io/${{ steps.tag.outputs.registry_repository }}/helm
+        run: ./hack/refuse-release-overwrite.sh
+
       - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Build and push images
         env:
-          # ghcr.io/<owner>/<repo> — resolves correctly in forks
-          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
-          IMAGE_TAGS: ${{ steps.tag.outputs.tags }}
+          IMAGE_REPOSITORY: ghcr.io/${{ steps.tag.outputs.registry_repository }}
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -o errexit -o nounset -o pipefail
 
-          for component in ateapi atecontroller atelet ateom-gvisor ateom-microvm podcertcontroller atenet; do
+          for component in ateapi atecontroller atelet ateom-gvisor ateom-microvm podcertcontroller atenet substrate-release-verify; do
             KO_DOCKER_REPO="${IMAGE_REPOSITORY}/${component}" \
             ./hack/run-tool.sh ko build \
-              --tags "${IMAGE_TAGS}" \
+              --tags "${IMAGE_TAG}" \
               --platform linux/amd64,linux/arm64 \
               --bare \
               "./cmd/${component}"
@@ -101,31 +137,83 @@ jobs:
         if: inputs.create_release
         env:
           HELM_EXPERIMENTAL_OCI: "1"
-          CHART_REPOSITORY: oci://ghcr.io/kagent-dev/substrate/helm
+          CHART_REPOSITORY: oci://ghcr.io/${{ steps.tag.outputs.registry_repository }}/helm
+          IMAGE_REPOSITORY: ghcr.io/${{ steps.tag.outputs.registry_repository }}
         run: |
           set -o errexit -o nounset -o pipefail
 
           tag="${{ steps.tag.outputs.value }}"
           chart_version="${tag#v}"
           package_dir="${RUNNER_TEMP}/helm-packages"
-          mkdir -p "${package_dir}"
+          release_chart_root="${RUNNER_TEMP}/release-charts"
+          release_chart="${release_chart_root}/substrate"
+          release_crd_chart="${release_chart_root}/substrate-crds"
+          source_registry="ghcr.io/kagent-dev/substrate"
+          release_registry="${IMAGE_REPOSITORY}"
+          agentgateway_image="ghcr.io/kagent-dev/substrate/agentgateway@sha256:068028a256bd63c91fd6e85a471269c014747297b0ffa785feaef6967eb0c429"
+          mkdir -p "${package_dir}" "${release_chart_root}"
+          cp -R charts/substrate "${release_chart}"
+          cp -R charts/substrate-crds "${release_crd_chart}"
 
-          echo "${{ secrets.GITHUB_TOKEN }}" \
-            | helm registry login ghcr.io \
-              --username "${{ github.actor }}" \
-              --password-stdin
+          values_file="${release_chart}/values.yaml"
+          if [[ "$(grep -Fxc "  registry: ${source_registry}" "${values_file}")" -ne 1 ]]; then
+            echo "::error::Source chart image registry contract changed"
+            exit 1
+          fi
+          sed -i "s|^  registry: ${source_registry}$|  registry: ${release_registry}|" "${values_file}"
+          if [[ "$(grep -Fxc "  registry: ${release_registry}" "${values_file}")" -ne 1 ]] || \
+             grep -Fqx "  registry: ${source_registry}" "${values_file}"; then
+            echo "::error::Release chart image registry was not rewritten exactly once"
+            exit 1
+          fi
+          if [[ "$(grep -Fxc "  agentgateway: ${agentgateway_image}" "${values_file}")" -ne 1 ]]; then
+            echo "::error::Pinned external agentgateway image changed during release staging"
+            exit 1
+          fi
 
-          helm package charts/substrate-crds \
+          helm package "${release_crd_chart}" \
             --destination "${package_dir}" \
             --version "${chart_version}" \
             --app-version "${tag}"
-          helm package charts/substrate \
+          helm package "${release_chart}" \
             --destination "${package_dir}" \
             --version "${chart_version}" \
             --app-version "${tag}"
+
+          substrate_package="${package_dir}/substrate-${chart_version}.tgz"
+          packaged_values="${package_dir}/packaged-values.yaml"
+          rendered_chart="${package_dir}/rendered.yaml"
+          tar -xOf "${substrate_package}" substrate/values.yaml > "${packaged_values}"
+          if [[ "$(grep -Fxc "  registry: ${release_registry}" "${packaged_values}")" -ne 1 ]] || \
+             grep -Fqx "  registry: ${source_registry}" "${packaged_values}"; then
+            echo "::error::Packaged chart does not default to this fork's image registry"
+            exit 1
+          fi
+          if [[ "$(grep -Fxc "  agentgateway: ${agentgateway_image}" "${packaged_values}")" -ne 1 ]]; then
+            echo "::error::Packaged chart changed the pinned external agentgateway image"
+            exit 1
+          fi
+
+          helm template substrate-release "${substrate_package}" \
+            --namespace ate-system > "${rendered_chart}"
+          for component in ateapi atecontroller atelet atenet podcertcontroller; do
+            expected_image="${release_registry}/${component}:${tag}"
+            if ! grep -Fq "image: ${expected_image}" "${rendered_chart}"; then
+              echo "::error::Packaged chart did not render owned image ${expected_image}"
+              exit 1
+            fi
+            if grep -Fq "image: ${source_registry}/${component}:" "${rendered_chart}"; then
+              echo "::error::Packaged chart rendered upstream-owned image for ${component}"
+              exit 1
+            fi
+          done
+          if ! grep -Fq "image: ${agentgateway_image}" "${rendered_chart}"; then
+            echo "::error::Packaged chart did not preserve the pinned external agentgateway image"
+            exit 1
+          fi
 
           helm push "${package_dir}/substrate-crds-${chart_version}.tgz" "${CHART_REPOSITORY}"
-          helm push "${package_dir}/substrate-${chart_version}.tgz" "${CHART_REPOSITORY}"
+          helm push "${substrate_package}" "${CHART_REPOSITORY}"
 
       - name: Build kubectl-ate release binaries
         if: inputs.create_release
@@ -147,7 +235,7 @@ jobs:
 
       - name: Create GitHub Release
         if: inputs.create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.tag.outputs.value }}
           generate_release_notes: true

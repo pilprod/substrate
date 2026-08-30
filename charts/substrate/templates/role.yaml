@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if and (ne (.Values.profile | default "standard") "external-control-plane-only") .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -127,3 +128,4 @@ rules:
   - get
   - list
   - watch
+{{- end }}

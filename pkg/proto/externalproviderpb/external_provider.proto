@@ -1,0 +1,377 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package externalprovider;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "ateapi.proto";
+
+option go_package = "github.com/agent-substrate/substrate/pkg/proto/externalproviderpb";
+
+// ExternalProviderBroker enrolls an external provider registration and accepts
+// its authenticated, outbound-only live session. These credentials are scoped
+// to this service; they are not credentials for the general ateapi Control API.
+//
+// Every RPC carries exactly one lowercase gRPC `authorization` metadata value
+// in the form `Bearer <token>`. Enroll uses an out-of-band enrollment token,
+// MintSessionToken uses the refresh credential returned by Enroll, and Connect
+// uses the session token returned by MintSessionToken. Credential bytes are
+// unpadded base64url token bytes (`A-Z`, `a-z`, `0-9`, `_`, `-`) and exclude
+// the `Bearer ` prefix. Credentials never appear in request messages or
+// ConnectHello. Every production RPC MUST use server-authenticated TLS;
+// plaintext transport is permitted only in an explicitly isolated test mode.
+service ExternalProviderBroker {
+  // Enroll exchanges a scoped, single-use enrollment token for a durable
+  // registration UID and refresh credential. It is not safe to retry
+  // automatically after an ambiguous response loss; recovery requires a new
+  // enrollment token or an operator-assisted lookup of the registration.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse) {}
+
+  // MintSessionToken exchanges a registration-scoped refresh credential for a
+  // short-lived token accepted only by Connect.
+  rpc MintSessionToken(MintSessionTokenRequest) returns (MintSessionTokenResponse) {}
+
+  // Connect establishes one authenticated live session. The client initiates
+  // the network connection and both sides multiplex bounded byte streams over
+  // it; no client listener or persisted live endpoint is part of this API.
+  rpc Connect(stream ClientFrame) returns (stream ServerFrame) {}
+}
+
+// ExternalProviderAdmin is available only on the authenticated ate-api control
+// listener. It is deliberately not registered on the public Broker listener.
+// Implementations MUST additionally authorize an exact operator identity
+// before validating the request or issuing credential material.
+service ExternalProviderAdmin {
+  // CreateExternalProviderEnrollment creates one scoped, single-use enrollment
+  // credential. The credential is returned exactly once and cannot be looked
+  // up again; only its digest is retained by the server.
+  rpc CreateExternalProviderEnrollment(CreateExternalProviderEnrollmentRequest) returns (CreateExternalProviderEnrollmentResponse) {}
+
+  // RevokeExternalProviderRegistration durably invalidates one registration
+  // and synchronously fences its live session, route, and Workers before the
+  // call succeeds.
+  rpc RevokeExternalProviderRegistration(RevokeExternalProviderRegistrationRequest) returns (RevokeExternalProviderRegistrationResponse) {}
+}
+
+message ExternalProviderEnrollmentScope {
+  string owner_atespace = 1;
+  string worker_namespace = 2;
+  string worker_pool = 3;
+  uint32 max_slots = 4;
+
+  // slot_policy is the exact immutable policy to bind to the enrollment. A
+  // request MUST leave digest empty; the server canonicalizes profiles and
+  // returns the authoritative digest in the response.
+  SlotCapabilityPolicy slot_policy = 5;
+}
+
+message CreateExternalProviderEnrollmentRequest {
+  ExternalProviderEnrollmentScope scope = 1;
+  google.protobuf.Duration ttl = 2;
+}
+
+message CreateExternalProviderEnrollmentResponse {
+  string enrollment_uid = 1;
+
+  // enrollment_credential is an opaque, single-use bearer credential. The
+  // server persists only its digest and never returns these bytes again.
+  bytes enrollment_credential = 2 [ debug_redact = true ];
+
+  google.protobuf.Timestamp expires_at = 3;
+  ExternalProviderEnrollmentScope scope = 4;
+}
+
+message RevokeExternalProviderRegistrationRequest {
+  string registration_uid = 1;
+}
+
+message RevokeExternalProviderRegistrationResponse {}
+
+// EnrollRequest is intentionally empty. The enrollment credential is carried
+// only in gRPC authorization metadata.
+message EnrollRequest {}
+
+message EnrollResponse {
+  // registration_uid is a stable, opaque, non-secret server-assigned identity
+  // with the same character and 253-byte bounds required by ConnectHello.
+  string registration_uid = 1;
+
+  // refresh_credential is scoped to MintSessionToken. The client stores these
+  // 1..4096 unpadded base64url bytes as a secret and sends them as the Bearer
+  // token.
+  bytes refresh_credential = 2 [ debug_redact = true ];
+
+  // slot_policy is the immutable, server-owned capability policy bound to the
+  // new registration. Clients may reference its profile IDs but cannot extend
+  // the sandbox classes, scheduling labels, slot counts, or exact capacities
+  // granted by it.
+  SlotCapabilityPolicy slot_policy = 3;
+}
+
+message MintSessionTokenRequest {
+  // registration_uid must match the registration bound to the refresh
+  // credential in authorization metadata.
+  string registration_uid = 1;
+}
+
+message MintSessionTokenResponse {
+  // session_token is scoped to Connect. The client sends these 1..4096
+  // unpadded base64url bytes as the Bearer token and never copies them into
+  // ClientFrame.
+  bytes session_token = 1 [ debug_redact = true ];
+
+  // expires_at MUST be present, valid, and later than the server's issuance
+  // time. A new Connect rejects session_token at or after this time. Expiry is
+  // checked only during the Connect handshake and does not terminate an
+  // already accepted stream.
+  google.protobuf.Timestamp expires_at = 2;
+
+  // slot_policy repeats the immutable registration policy so a client can
+  // recover its non-secret profile configuration without re-enrollment.
+  SlotCapabilityPolicy slot_policy = 3;
+}
+
+// ClientFrame is one frame sent by the external provider.
+//
+// The first frame MUST contain hello, MUST set session_generation to zero, and
+// MUST be no larger than 1 MiB serialized. hello is forbidden after the first
+// frame. No other client frame may be sent until the server replies with a
+// ready frame. Every subsequent client frame MUST echo the nonzero generation
+// from that ready frame; a missing or stale generation is a protocol error. The
+// broker validates the generation against the registration and generation
+// bound to this gRPC stream; it never trusts the client-echoed integer as
+// authority. Exactly one frame member MUST be set. Every client frame MUST be
+// no larger than 1 MiB serialized.
+message ClientFrame {
+  uint64 session_generation = 1;
+
+  oneof frame {
+    ConnectHello hello = 2;
+    OpenChannel open = 3;
+    OpenChannelAck open_ack = 4;
+    ChannelData data = 5;
+    HalfCloseChannel half_close = 6;
+    ResetChannel reset = 7;
+    Heartbeat heartbeat = 8;
+  }
+}
+
+// ServerFrame is one frame sent by the broker.
+//
+// The first frame MUST contain ready and a nonzero session_generation. The
+// broker allocates generations monotonically per registration. Establishing a
+// newer generation atomically stops routing to lower generations and closes
+// their Connect RPCs with ABORTED. Every later server frame on the stream MUST
+// carry the same generation, and the client MUST reject a missing or mismatched
+// generation. Exactly one frame member MUST be set. Every server frame MUST be
+// no larger than 1 MiB serialized.
+message ServerFrame {
+  uint64 session_generation = 1;
+
+  oneof frame {
+    ConnectReady ready = 2;
+    OpenChannel open = 3;
+    OpenChannelAck open_ack = 4;
+    ChannelData data = 5;
+    HalfCloseChannel half_close = 6;
+    ResetChannel reset = 7;
+    Heartbeat heartbeat = 8;
+  }
+}
+
+// ConnectHello declares the complete set of execution slots available through
+// this live session. It contains no credential, token, endpoint, route, or
+// provider-generated execution/locality identity.
+//
+// registration_uid must match the session credential. slots MUST contain
+// between 1 and 256 entries, sorted lexicographically by slot_id with no
+// duplicates. The broker rejects the whole hello on any invalid slot; it does
+// not partially accept a declaration. Omitting a previously declared slot
+// makes it unavailable for this session but does not request deletion of its
+// durable identity. Exactly one declared slot maps to exactly one Worker.
+message ConnectHello {
+  // registration_uid is nonempty, at most 253 ASCII characters, and contains
+  // only letters, digits, '.', '_', '~', or '-' with an alphanumeric first and
+  // last character.
+  string registration_uid = 1;
+  repeated ExternalSlot slots = 2;
+
+  // protocol_version MUST equal 2 or 3. Version 3 adds the actor-egress
+  // credential bootstrap. Version 2 remains accepted for execution and
+  // ingress compatibility, but every client-opened ACTOR_EGRESS channel is
+  // rejected because it cannot carry generation-bound actor credentials.
+  uint32 protocol_version = 3;
+
+  // slot_policy_digest MUST equal the lowercase SHA-256 digest issued for the
+  // authenticated registration. It prevents a client from silently using a
+  // stale profile interpretation.
+  string slot_policy_digest = 4;
+}
+
+// ExternalSlot is provider-neutral scheduling information for one stable slot.
+// The broker derives Worker execution_identity and locality_identity from the
+// authenticated registration and slot_id; clients never send those identities.
+message ExternalSlot {
+  // slot_id is stable within registration_uid. It is 1..253 ASCII characters,
+  // starts and ends with an ASCII letter or digit, and otherwise contains only
+  // letters, digits, '.', '_', '~', or '-'.
+  string slot_id = 1;
+
+  // sandbox_class is reserved for the pre-policy wire shape and MUST be empty.
+  // The broker derives the trusted sandbox class from profile_id.
+  string sandbox_class = 2;
+
+  // labels is reserved for the pre-policy wire shape and MUST be empty. The
+  // broker derives trusted scheduling labels from profile_id and the pinned
+  // WorkerPool.
+  map<string, string> labels = 3;
+
+  // capacity is reserved for the pre-policy wire shape and MUST be absent. The
+  // broker derives exact trusted capacity from profile_id.
+  ateapi.WorkerCapacity capacity = 4;
+
+  // profile_id selects one profile from the registration's immutable
+  // server-owned slot policy.
+  string profile_id = 5;
+}
+
+// SlotCapabilityPolicy is immutable authority issued by the server at
+// enrollment. Profiles are sorted by profile_id and digest is the lowercase
+// SHA-256 of the server's versioned canonical encoding.
+message SlotCapabilityPolicy {
+  uint32 version = 1;
+  string digest = 2;
+  repeated SlotProfile profiles = 3;
+}
+
+// SlotProfile grants a bounded, provider-neutral scheduling capability. A
+// launcher or product name is not a sandbox class.
+message SlotProfile {
+  string profile_id = 1;
+  string sandbox_class = 2;
+  map<string, string> labels = 3;
+  uint32 max_slots = 4;
+  ateapi.WorkerCapacity capacity = 5;
+}
+
+// ConnectReady accepts a valid hello and publishes limits for this generation.
+message ConnectReady {
+  // max_open_channels is the maximum number of simultaneously nonterminal
+  // channel IDs, including OpenChannel frames awaiting OpenChannelAck. It MUST
+  // be in the range 1..65535.
+  uint32 max_open_channels = 1;
+
+  // max_data_bytes is the maximum ChannelData.data length. It MUST be in the
+  // range 1..65536; either peer resets a channel that exceeds it.
+  uint32 max_data_bytes = 2;
+}
+
+// ChannelKind identifies the in-cluster service surface carried by a channel,
+// independently of the local runtime or model product.
+enum ChannelKind {
+  CHANNEL_KIND_UNSPECIFIED = 0;
+  CHANNEL_KIND_EXECUTION_GRPC = 1;
+  CHANNEL_KIND_ACTOR_INGRESS = 2;
+  CHANNEL_KIND_ACTOR_EGRESS = 3;
+}
+
+// OpenChannel starts one logical ordered byte stream.
+//
+// channel_id zero is invalid. Client-opened IDs MUST be odd and server-opened
+// IDs MUST be even, and an ID cannot be reused within a session generation.
+// slot_id MUST name a slot from ConnectHello. Only the server may open
+// EXECUTION_GRPC and ACTOR_INGRESS; only the client may open ACTOR_EGRESS.
+// The receiver MUST answer exactly once with OpenChannelAck before either side
+// sends ChannelData, HalfCloseChannel, or ResetChannel for the channel.
+message OpenChannel {
+  uint64 channel_id = 1;
+  ChannelKind kind = 2;
+  string slot_id = 3;
+
+  // actor_egress is required only for a protocol-v3, client-opened
+  // ACTOR_EGRESS channel and forbidden for every other kind/version. The CSR
+  // contributes only its public key; all certificate identity is
+  // server-derived. It is bounded to 16 KiB by the receiver.
+  ActorEgressOpen actor_egress = 4;
+}
+
+message ActorEgressOpen {
+  bytes certificate_signing_request_der = 1 [ debug_redact = true ];
+}
+
+// OpenChannelAck accepts or rejects a peer's OpenChannel.
+message OpenChannelAck {
+  uint64 channel_id = 1;
+
+  // accepted true opens the channel and requires error_message to be empty.
+  // accepted false terminates it and requires a nonempty error_message.
+  bool accepted = 2;
+
+  // error_message is bounded to 1024 UTF-8 bytes, must not contain secrets, and
+  // is untrusted peer text that receivers must not log without sanitizing.
+  string error_message = 3 [ debug_redact = true ];
+
+  // actor_egress is required only when accepting a protocol-v3 ACTOR_EGRESS
+  // channel and forbidden on rejection and for every other channel kind. The
+  // leaf is first. No private key, gateway address, or destination is present.
+  ActorEgressOpenAck actor_egress = 4;
+}
+
+message ActorEgressOpenAck {
+  repeated bytes certificate_chain_der = 1 [ debug_redact = true ];
+  string gateway_server_name = 2;
+  bytes gateway_trust_bundle_pem = 3 [ debug_redact = true ];
+}
+
+// ChannelData carries the next ordered bytes for an accepted channel. Either
+// peer may send it. data MUST be nonempty and no larger than
+// ConnectReady.max_data_bytes. Sending data before a successful OpenChannelAck,
+// after this sender's HalfCloseChannel, or after either side's ResetChannel is
+// a protocol error.
+message ChannelData {
+  uint64 channel_id = 1;
+  bytes data = 2 [ debug_redact = true ];
+}
+
+// HalfCloseChannel ends the sender's data direction while leaving the peer's
+// direction open. Each peer may send it at most once for an accepted channel.
+message HalfCloseChannel {
+  uint64 channel_id = 1;
+}
+
+// ResetChannel immediately terminates both directions of an accepted channel.
+// Either peer may send it only after a successful OpenChannelAck. Later frames
+// for that channel are invalid. Receivers MUST NOT log reason as trusted text.
+message ResetChannel {
+  uint64 channel_id = 1;
+
+  // grpc_code is a numeric canonical gRPC status code in the range 1..16. OK
+  // (zero) and values outside the canonical range are invalid.
+  uint32 grpc_code = 2;
+
+  // reason is bounded to 1024 UTF-8 bytes and must not contain secrets.
+  string reason = 3 [ debug_redact = true ];
+}
+
+// Heartbeat detects a dead session without creating a logical channel. Either
+// peer may send a probe after ConnectReady; the receiver answers with the same
+// nonce and acknowledgement=true. An acknowledgement is never acknowledged.
+message Heartbeat {
+  // nonce must be nonzero.
+  uint64 nonce = 1;
+  bool acknowledgement = 2;
+}

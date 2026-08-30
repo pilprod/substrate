@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/workerassignment"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,6 +30,66 @@ import (
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+const maxExternalSlotIdentityLength = 253
+
+var externalSlotIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._~-]*[A-Za-z0-9])?$`)
+
+func effectiveWorkerProvider(provider ateapipb.WorkerProvider) ateapipb.WorkerProvider {
+	if provider == ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED {
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+	}
+	return provider
+}
+
+func isKubernetesWorker(worker *ateapipb.Worker) bool {
+	return effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD
+}
+
+// validateAssignmentWorkerIncarnation preserves the legacy unpinned
+// KubernetesPod read path, while every ExternalSlot resolution requires an
+// exact server Worker UID. New assignments of either provider are pinned.
+func validateAssignmentWorkerIncarnation(assignment *ateapipb.WorkerAssignment, worker *ateapipb.Worker) error {
+	if effectiveWorkerProvider(assignment.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT ||
+		assignment.GetWorkerResourceUid() != "" {
+		return workerassignment.ValidateIncarnation(assignment, worker)
+	}
+	return nil
+}
+
+func validateExternalSlotIdentityCharacters(value string, fldPath *field.Path) field.ErrorList {
+	if value == "" || externalSlotIdentityPattern.MatchString(value) {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(fldPath, value, "must contain only ASCII letters, digits, '.', '_', '~', or '-', and start and end with a letter or digit")}
+}
+
+func validateExternalSlotIdentityValue(value string, fldPath *field.Path) field.ErrorList {
+	if value == "" {
+		return field.ErrorList{field.Required(fldPath, "")}
+	}
+	var errs field.ErrorList
+	if len(value) > maxExternalSlotIdentityLength {
+		errs = append(errs, field.TooLong(fldPath, value, maxExternalSlotIdentityLength))
+	}
+	errs = append(errs, validateExternalSlotIdentityCharacters(value, fldPath)...)
+	return errs
+}
+
+func validateExternalSlotIdentity(identity *ateapipb.ExternalSlotIdentity, fldPath *field.Path) field.ErrorList {
+	if identity == nil {
+		return field.ErrorList{field.Required(fldPath, "")}
+	}
+	errs := validateExternalSlotIdentityValue(identity.GetExecutionIdentity(), fldPath.Child("execution_identity"))
+	errs = append(errs, validateExternalSlotIdentityValue(identity.GetLocalityIdentity(), fldPath.Child("locality_identity"))...)
+	ownerPath := fldPath.Child("owner_atespace")
+	if identity.GetOwnerAtespace() == "" {
+		errs = append(errs, field.Required(ownerPath, ""))
+	} else if !resources.IsValidResourceName(identity.GetOwnerAtespace()) {
+		errs = append(errs, field.Invalid(ownerPath, identity.GetOwnerAtespace(), "must be a valid Atespace resource name"))
+	}
+	return errs
+}
 
 func (s *RPCService) ListWorkers(ctx context.Context, req *ateapipb.ListWorkersRequest) (*ateapipb.ListWorkersResponse, error) {
 	if errs := validateListWorkersRequest(req); len(errs) > 0 {
@@ -95,7 +157,11 @@ func (s *RPCService) CreateWorker(ctx context.Context, req *ateapipb.CreateWorke
 	// status is output-only, so whatever the request carried there is replaced
 	// rather than rejected.
 	worker := proto.Clone(req.GetWorker()).(*ateapipb.Worker)
-	worker.Status = &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
+	initialState := ateapipb.WorkerState_WORKER_STATE_ACTIVE
+	if effectiveWorkerProvider(worker.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		initialState = ateapipb.WorkerState_WORKER_STATE_OFFLINE
+	}
+	worker.Status = &ateapipb.WorkerStatus{State: initialState}
 
 	created, err := s.impl.CreateWorker(ctx, worker)
 	if errors.Is(err, store.ErrAlreadyExists) {
@@ -323,32 +389,56 @@ func validateWorker(worker *ateapipb.Worker, fldPath *field.Path) field.ErrorLis
 		}
 	}
 
-	if val, fldPath := worker.GetWorkerPod(), fldPath.Child("worker_pod"); val == "" {
-		errs = append(errs, field.Required(fldPath, ""))
-	} else {
-		for _, msg := range content.IsDNS1123Subdomain(val) {
-			errs = append(errs, field.Invalid(fldPath, val, msg))
+	switch effectiveWorkerProvider(worker.GetProvider()) {
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD:
+		if worker.GetExternalSlot() != nil {
+			errs = append(errs, field.Forbidden(fldPath.Child("external_slot"), "must be empty for a KubernetesPod worker"))
 		}
-	}
-
-	if val, fldPath := worker.GetIp(), fldPath.Child("ip"); val == "" {
-		errs = append(errs, field.Required(fldPath, ""))
-	} else {
-		errs = append(errs, resources.ValidateIP(val, fldPath)...)
-	}
-
-	if val, fldPath := worker.GetWorkerPodUid(), fldPath.Child("worker_pod_uid"); val == "" {
-		errs = append(errs, field.Required(fldPath, ""))
-	} else {
-		errs = append(errs, resources.ValidateUUID(val, fldPath)...)
-	}
-
-	if val, fldPath := worker.GetNodeName(), fldPath.Child("node_name"); val == "" {
-		errs = append(errs, field.Required(fldPath, ""))
-	} else {
-		for _, msg := range content.IsDNS1123Subdomain(val) {
-			errs = append(errs, field.Invalid(fldPath, val, msg))
+		if val, p := worker.GetWorkerPod(), fldPath.Child("worker_pod"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			for _, msg := range content.IsDNS1123Subdomain(val) {
+				errs = append(errs, field.Invalid(p, val, msg))
+			}
 		}
+		if val, p := worker.GetIp(), fldPath.Child("ip"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			errs = append(errs, resources.ValidateIP(val, p)...)
+		}
+		if val, p := worker.GetWorkerPodUid(), fldPath.Child("worker_pod_uid"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			errs = append(errs, resources.ValidateUUID(val, p)...)
+		}
+		if val, p := worker.GetNodeName(), fldPath.Child("node_name"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			for _, msg := range content.IsDNS1123Subdomain(val) {
+				errs = append(errs, field.Invalid(p, val, msg))
+			}
+		}
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+		errs = append(errs, validateExternalSlotIdentity(worker.GetExternalSlot(), fldPath.Child("external_slot"))...)
+		for _, f := range []struct {
+			name  string
+			value string
+		}{
+			{name: "worker_pod", value: worker.GetWorkerPod()},
+			{name: "worker_pod_uid", value: worker.GetWorkerPodUid()},
+			{name: "node_name", value: worker.GetNodeName()},
+			{name: "ip", value: worker.GetIp()},
+		} {
+			if f.value != "" {
+				errs = append(errs, field.Forbidden(fldPath.Child(f.name), "must be empty for an ExternalSlot worker"))
+			}
+		}
+	default:
+		errs = append(errs, field.NotSupported(fldPath.Child("provider"), worker.GetProvider().String(), []string{
+			ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED.String(),
+			ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD.String(),
+			ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT.String(),
+		}))
 	}
 
 	return errs

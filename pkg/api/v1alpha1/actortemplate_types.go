@@ -22,6 +22,18 @@ import (
 
 type PhaseType string
 
+// WorkerProvider selects how ActorTemplate workloads are hosted.
+type WorkerProvider string
+
+const (
+	// WorkerProviderKubernetesPod uses Kubernetes-managed worker pods. It is
+	// the default for compatibility with ActorTemplates created before the
+	// provider constraint was introduced.
+	WorkerProviderKubernetesPod WorkerProvider = "KubernetesPod"
+	// WorkerProviderExternalSlot uses an explicitly enrolled external slot.
+	WorkerProviderExternalSlot WorkerProvider = "ExternalSlot"
+)
+
 // Define your phases as constants
 const (
 	PhaseInitial           PhaseType = ""
@@ -510,11 +522,13 @@ type OnResumeConfig struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.onPause) ? self.onPause : 'Full') == 'Full' || (has(self.onCommit) ? self.onCommit : 'Full') == (has(self.onPause) ? self.onPause : 'Full')",message="onCommit must be a subset of onPause"
 type SnapshotsConfig struct {
 	// Location is the base object-storage URI snapshots of this template's
-	// actors are stored under.
+	// actors are stored under. It is required for KubernetesPod templates and
+	// must be omitted for ExternalSlot templates, whose first protocol version
+	// supports cold Run and Terminate only.
 	//
-	// +required
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	Location string `json:"location"`
+	Location string `json:"location,omitempty"`
 
 	// OnPause specifies what to include in the snapshot when the actor is paused.
 	// If not provided, the "Full" behavior is used by default.
@@ -551,7 +565,11 @@ type SnapshotsConfig struct {
 // ActorTemplateSpec defined desired spec of an actor.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.volumes) || self.volumes.all(v, has(self.containers) && self.containers.exists(c, has(c.volumeMounts) && c.volumeMounts.exists(vm, vm.name == v.name)))",message="All volumes defined in spec.volumes must be mounted by at least one container"
-// +kubebuilder:validation:XValidation:rule="(has(self.sandboxClass) && self.sandboxClass == 'microvm') || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData) ? self.snapshotsConfig.onResume.fromData : 'ColdBoot') != 'Golden'",message="onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'"
+// +kubebuilder:validation:XValidation:rule="(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') ? !has(self.snapshotsConfig.location) : has(self.snapshotsConfig.location)",message="snapshotsConfig.location is required for KubernetesPod and forbidden for ExternalSlot"
+// +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.workerSelector)",message="workerSelector is not supported for ExternalSlot"
+// +kubebuilder:validation:XValidation:rule="!(has(self.workerProvider) && self.workerProvider == 'ExternalSlot') || !has(self.volumes) || size(self.volumes) == 0",message="volumes are not supported for ExternalSlot"
+// +kubebuilder:validation:XValidation:rule="!has(self.sandboxClass) || self.sandboxClass != 'host-process-hardened' || (has(self.workerProvider) && self.workerProvider == 'ExternalSlot')",message="sandboxClass 'host-process-hardened' requires workerProvider 'ExternalSlot'"
+// +kubebuilder:validation:XValidation:rule="(has(self.sandboxClass) && self.sandboxClass == 'microvm') || !has(self.snapshotsConfig.onResume) || (has(self.snapshotsConfig.onResume.fromData) ? self.snapshotsConfig.onResume.fromData : 'ColdBoot') != 'Golden'",message="onResume.fromData: Golden is supported only when sandboxClass is 'microvm'"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.requests)",message="spec.resources.requests is not supported; actors are sized by spec.resources.limits only"
 // +kubebuilder:validation:XValidation:rule="!has(self.resources) || !has(self.resources.claims)",message="spec.resources.claims is not supported"
 // A micro-VM's guest RAM is the declared memory limit minus a fixed VMM reserve
@@ -566,20 +584,35 @@ type SnapshotsConfig struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(vm, has(self.volumes) && self.volumes.exists(v, v.name == vm.name)))",message="All volume mounts must refer to a volume defined in spec.volumes"
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || !self.containers.exists(c, has(c.resources)) || (has(self.sandboxClass) && self.sandboxClass == 'microvm')",message="container resources are only supported when sandboxClass is 'microvm'"
 type ActorTemplateSpec struct {
+	// WorkerProvider selects the kind of execution capacity actors from this
+	// template may use. ExternalSlot is an explicit opt-in: worker selectors,
+	// sandbox class, and labels cannot select external capacity by themselves.
+	// An absent value is interpreted as KubernetesPod for compatibility with
+	// ActorTemplates persisted before this field was introduced.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=KubernetesPod;ExternalSlot
+	// +kubebuilder:default=KubernetesPod
+	WorkerProvider WorkerProvider `json:"workerProvider,omitempty"`
+
 	// Containers is the workload definition.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxItems=10
 	Containers []Container `json:"containers,omitempty"`
 
-	// Snapshots configuration for the actor.
+	// Snapshots configuration for the actor. ExternalSlot templates retain the
+	// object for API compatibility but must omit location; Pause and Suspend
+	// reject before mutating actor state.
 	//
 	// +required
 	SnapshotsConfig SnapshotsConfig `json:"snapshotsConfig"`
 
-	// SandboxClass selects the sandbox runtime family this template's actors run
-	// on. Only worker pools whose SandboxClass matches are eligible. Snapshots are
-	// not portable across classes, so this is a hard gate, AND'd with WorkerSelector
+	// SandboxClass selects the execution isolation family this template's actors
+	// run on. Only capacity whose SandboxClass matches is eligible. The
+	// host-process-hardened class is restricted to ExternalSlot; WorkerPool and
+	// SandboxConfig remain limited to in-cluster runtimes. Snapshots are not
+	// portable across classes, so this is a hard gate, AND'd with WorkerSelector
 	// and the actor's worker_selector. Defaults to gvisor.
 	//
 	// TODO: This is almost certainly insufficient.  We have to decide a number of things:
@@ -593,7 +626,7 @@ type ActorTemplateSpec struct {
 	//
 	//
 	// +optional
-	// +kubebuilder:validation:Enum=gvisor;microvm
+	// +kubebuilder:validation:Enum=gvisor;microvm;host-process-hardened
 	// +kubebuilder:default=gvisor
 	SandboxClass SandboxClass `json:"sandboxClass,omitempty"`
 

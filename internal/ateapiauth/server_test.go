@@ -104,7 +104,7 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 			name:     "no peer with valid bearer",
 			ctx:      withBearer(context.Background(), testGoodToken),
 			verify:   verifyGoodToken,
-			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer},
+			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Provider: "test", Issuer: issuer},
 			wantCode: codes.OK,
 		},
 		{
@@ -121,7 +121,7 @@ func TestChainedServerAuthenticatorPrincipal(t *testing.T) {
 				}},
 			}), testGoodToken),
 			verify:   verifyGoodToken,
-			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer},
+			want:     principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Provider: "test", Issuer: issuer},
 			wantCode: codes.OK,
 		},
 		{
@@ -211,7 +211,7 @@ func TestJWTServerAuthenticatorInjectsPrincipal(t *testing.T) {
 	if !ok {
 		t.Fatal("no principal in context")
 	}
-	want := principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Issuer: issuer}
+	want := principal.PrincipalInfo{ID: subject, Kind: principal.KindJWT, Provider: "test", Issuer: issuer}
 	if got != want {
 		t.Errorf("principal=%+v want %+v", got, want)
 	}
@@ -232,7 +232,7 @@ func TestJWTServerAuthenticatorTriesProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := principal.FromContext(ctx)
-	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Issuer: "https://second.example"}
+	want := principal.PrincipalInfo{ID: "subject", Kind: principal.KindJWT, Provider: "second", Issuer: "https://second.example"}
 	if got != want {
 		t.Fatalf("principal = %+v, want %+v", got, want)
 	}

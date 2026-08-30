@@ -87,6 +87,9 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 	// snapshot.
 	var sourceSnapshotStatus *ateapipb.ActorSourceSnapshotStatus
 	if tag := inActor.GetSourceSnapshotTag(); tag != nil {
+		if err := rejectUnsupportedSnapshotSource(template, true, "creating an actor from a snapshot"); err != nil {
+			return nil, err
+		}
 		sourceSnapshotStatus, err = s.resolveSnapshotSource(ctx, inActor.GetMetadata().GetAtespace(), tag, template)
 		if err != nil {
 			return nil, err

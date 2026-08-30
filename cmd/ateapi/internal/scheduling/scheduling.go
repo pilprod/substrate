@@ -29,6 +29,16 @@ import (
 
 // Constraints describes what a worker must satisfy to host an actor.
 type Constraints struct {
+	// Provider must exactly match the worker's effective provider. An
+	// unspecified value means KubernetesPod for compatibility; it never means
+	// "any provider". ExternalSlot therefore always requires explicit opt-in.
+	Provider ateapipb.WorkerProvider
+
+	// OwnerAtespace identifies the Actor's Atespace. ExternalSlot workers are
+	// eligible only when their server-issued owner Atespace matches exactly.
+	// KubernetesPod workers are shared and ignore this constraint.
+	OwnerAtespace string
+
 	// SandboxClass must equal the worker's sandbox class. Snapshots are not
 	// portable across sandbox classes, so this is never relaxed.
 	SandboxClass string
@@ -73,6 +83,9 @@ type WorkerSource interface {
 
 type scheduler struct {
 	source WorkerSource
+	// eligibility is an optional control-plane-owned predicate evaluated for
+	// both initial placement and recovery validation.
+	eligibility func(*ateapipb.Worker) bool
 	// intn returns a uniformly distributed random value in [0,n).
 	// Defaults to the global math/rand source
 	intn func(n int) int
@@ -87,6 +100,13 @@ type Option func(*scheduler)
 // workers. n is always >= 1.
 func WithIntn(intn func(n int) int) Option {
 	return func(s *scheduler) { s.intn = intn }
+}
+
+// WithEligibility adds a control-plane-owned Worker eligibility predicate.
+// It is intended for dynamic authorities which are not represented by durable
+// Worker fields, such as an OPEN external-provider session route.
+func WithEligibility(eligibility func(*ateapipb.Worker) bool) Option {
+	return func(s *scheduler) { s.eligibility = eligibility }
 }
 
 // New returns a Scheduler placing onto workers reported by source.
@@ -129,6 +149,22 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 }
 
 func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bool {
+	if worker == nil || (s.eligibility != nil && !s.eligibility(worker)) {
+		return false
+	}
+	requiredProvider, ok := effectiveProvider(constraints.Provider)
+	if !ok {
+		return false
+	}
+	workerProvider, ok := effectiveProvider(worker.GetProvider())
+	if !ok || workerProvider != requiredProvider {
+		return false
+	}
+	if workerProvider == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT {
+		if constraints.OwnerAtespace == "" || worker.GetExternalSlot().GetOwnerAtespace() != constraints.OwnerAtespace {
+			return false
+		}
+	}
 	if worker.GetSandboxClass() != constraints.SandboxClass {
 		return false
 	}
@@ -158,4 +194,16 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 	}
 
 	return len(constraints.RequiredNodes) == 0 || slices.Contains(constraints.RequiredNodes, worker.GetNodeName())
+}
+
+func effectiveProvider(provider ateapipb.WorkerProvider) (ateapipb.WorkerProvider, bool) {
+	switch provider {
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED,
+		ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD, true
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT, true
+	default:
+		return ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED, false
+	}
 }

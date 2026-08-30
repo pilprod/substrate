@@ -52,6 +52,41 @@ func TestNewControllerRuntimeLoggerVerbosity(t *testing.T) {
 	}
 }
 
+func TestControllersForMode(t *testing.T) {
+	tests := []struct {
+		mode controllerMode
+		want controllerSelection
+	}{
+		{
+			mode: controllerModeFull,
+			want: controllerSelection{
+				workerPools:     true,
+				networkPolicies: true,
+				actorTemplates:  true,
+				egressMITMTrust: true,
+			},
+		},
+		{
+			mode: controllerModeExternalTemplatesOnly,
+			want: controllerSelection{actorTemplates: true, externalTemplates: true},
+		},
+	}
+	for _, test := range tests {
+		t.Run(string(test.mode), func(t *testing.T) {
+			parsed, err := parseControllerMode(string(test.mode))
+			if err != nil {
+				t.Fatalf("parseControllerMode() error = %v", err)
+			}
+			if got := controllersForMode(parsed); got != test.want {
+				t.Fatalf("controllersForMode() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+	if _, err := parseControllerMode("unknown"); err == nil {
+		t.Fatal("parseControllerMode() accepted an unknown mode")
+	}
+}
+
 // The e2e read-back asserts atecontroller reaches the collector, which holds only
 // because the bridged registry already has series before any manager starts: the
 // controller_runtime_* vectors are empty until controllers register, so the Go and

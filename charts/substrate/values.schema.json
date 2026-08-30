@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "create"
+      ],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
+    },
+    "externalProviderBroker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "containerPort",
+        "sessionTokenTTL",
+        "gateway"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "containerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "sessionTokenTTL": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "gatewayClassName",
+            "listenerPort",
+            "hostname",
+            "annotations",
+            "addresses",
+            "infrastructure"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "gatewayClassName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "listenerPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "hostname": {
+              "type": "string",
+              "maxLength": 253
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "addresses": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "IPAddress"
+                    ]
+                  },
+                  "value": {
+                    "type": "string",
+                    "oneOf": [
+                      {
+                        "format": "ipv4"
+                      },
+                      {
+                        "format": "ipv6"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "infrastructure": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "parametersRef"
+              ],
+              "properties": {
+                "parametersRef": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "group": {
+                      "type": "string",
+                      "maxLength": 253
+                    },
+                    "kind": {
+                      "type": "string",
+                      "maxLength": 63
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 253
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

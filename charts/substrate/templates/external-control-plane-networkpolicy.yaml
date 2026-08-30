@@ -1,0 +1,240 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if and (eq (.Values.profile | default "standard") "external-control-plane-only") .Values.externalControlPlane.networkPolicy.enabled }}
+{{- $policy := .Values.externalControlPlane.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-api-server-default-deny" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-api-server
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-default-deny" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-controller-default-deny" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-controller
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-api-server-allow-ingress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-api-server
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 443
+{{- if $policy.apiIngress }}
+  - from:
+{{ toYaml $policy.apiIngress | indent 4 }}
+    ports:
+    - protocol: TCP
+      port: 443
+{{- end }}
+{{- if .Values.externalProviderBroker.gateway.enabled }}
+  - from:
+    - podSelector:
+        matchLabels:
+          gateway.networking.k8s.io/gateway-name: {{ include "substrate.fullname" (list "external-provider-broker" .) }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.externalProviderBroker.containerPort }}
+{{- end }}
+{{- if $policy.brokerIngress }}
+  - from:
+{{ toYaml $policy.brokerIngress | indent 4 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.externalProviderBroker.containerPort }}
+{{- end }}
+{{- if $policy.controllerIngress }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-controller-allow-ingress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+{{ toYaml $policy.controllerIngress | indent 4 }}
+    ports:
+    - protocol: TCP
+      port: 8080
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-api-server-allow-egress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-api-server
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 8443
+{{- if $policy.allowDNS }}
+  - to:
+    - namespaceSelector:
+{{ toYaml $policy.dnsNamespaceSelector | indent 8 }}
+      podSelector:
+{{ toYaml $policy.dnsPodSelector | indent 8 }}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end }}
+{{- with $policy.egress }}
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- if or $policy.allowDNS $policy.controllerEgress }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "ate-controller-allow-egress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-controller
+  policyTypes:
+  - Egress
+  egress:
+{{- if $policy.allowDNS }}
+  - to:
+    - namespaceSelector:
+{{ toYaml $policy.dnsNamespaceSelector | indent 8 }}
+      podSelector:
+{{ toYaml $policy.dnsPodSelector | indent 8 }}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end }}
+{{- with $policy.controllerEgress }}
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-allow-ingress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ate-api-server
+    ports:
+    - protocol: TCP
+      port: 8443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "substrate.fullname" (list "atenet-egress-allow-egress" .) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-egress
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ate-api-server
+    ports:
+    - protocol: TCP
+      port: 443
+{{- if $policy.allowDNS }}
+  - to:
+    - namespaceSelector:
+{{ toYaml $policy.dnsNamespaceSelector | indent 8 }}
+      podSelector:
+{{ toYaml $policy.dnsPodSelector | indent 8 }}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end }}
+{{- with $policy.egressGatewayEgress }}
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- end }}

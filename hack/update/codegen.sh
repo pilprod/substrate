@@ -61,7 +61,12 @@ function codegen::protobuf() {
         protoc_gen_go_rpc="$(./hack/run-tool.sh --print-bin-path protoc-gen-go-grpc)"
         (
             cd "${dir}" || exit 1
+            # ateapi.proto was historically generated from its own directory,
+            # so this include path preserves that public descriptor name for
+            # protos which reuse ateapi messages.
             "${ROOT}"/hack/protoc.sh \
+                --proto_path=. \
+                --proto_path="${ROOT}/pkg/proto/ateapipb" \
                 --plugin=protoc-gen-go="${protoc_gen_go}" \
                 --plugin=protoc-gen-go-grpc="${protoc_gen_go_rpc}" \
                 --go_out=paths=source_relative:. \

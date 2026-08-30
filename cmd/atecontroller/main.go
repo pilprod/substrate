@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -48,7 +49,12 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 
-	ateAPIConnSpec = pflag.String("ateapi-conn-spec", "k8s:///api.ate-system.svc:443", "")
+	ateAPIConnSpec     = pflag.String("ateapi-conn-spec", "k8s:///api.ate-system.svc:443", "")
+	controllerModeFlag = pflag.String(
+		"controller-mode",
+		string(controllerModeFull),
+		"Controller set to run: full or external-templates-only.",
+	)
 
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
 
@@ -79,6 +85,43 @@ func init() {
 
 const serviceName = "atecontroller"
 
+type controllerMode string
+
+const (
+	controllerModeFull                  controllerMode = "full"
+	controllerModeExternalTemplatesOnly controllerMode = "external-templates-only"
+)
+
+type controllerSelection struct {
+	workerPools       bool
+	networkPolicies   bool
+	actorTemplates    bool
+	egressMITMTrust   bool
+	externalTemplates bool
+}
+
+func parseControllerMode(value string) (controllerMode, error) {
+	mode := controllerMode(value)
+	switch mode {
+	case controllerModeFull, controllerModeExternalTemplatesOnly:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("controller mode must be %q or %q, got %q", controllerModeFull, controllerModeExternalTemplatesOnly, value)
+	}
+}
+
+func controllersForMode(mode controllerMode) controllerSelection {
+	if mode == controllerModeExternalTemplatesOnly {
+		return controllerSelection{actorTemplates: true, externalTemplates: true}
+	}
+	return controllerSelection{
+		workerPools:     true,
+		networkPolicies: true,
+		actorTemplates:  true,
+		egressMITMTrust: true,
+	}
+}
+
 // logr verbosity V(n) maps to slog level -n, so V(1) stays below Info until
 // --log-level=debug. logr carries no context, so these records have no trace IDs.
 func newControllerRuntimeLogger(h slog.Handler) logr.Logger {
@@ -92,6 +135,11 @@ func main() {
 	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
 		serverboot.Fatal(ctx, "Invalid --log-level", err)
 	}
+	controllerMode, err := parseControllerMode(*controllerModeFlag)
+	if err != nil {
+		serverboot.Fatal(ctx, "Invalid --controller-mode", err)
+	}
+	controllerSet := controllersForMode(controllerMode)
 	ctrl.SetLogger(newControllerRuntimeLogger(slog.Default().Handler()))
 
 	// Both providers must be registered before the ateapi client below:
@@ -143,62 +191,74 @@ func main() {
 
 	ateapiClient := ateapipb.NewControlClient(ateapiConn)
 
-	// EgressMITMTrustReconciler watches the Secret `egress-mitm-ca-pool`.
-	egressMITMCAPool := controllers.EgressMITMCAPoolRef()
-	mgr, err := ctrl.NewManager(k8sConfig, ctrl.Options{
-		Scheme: scheme,
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						egressMITMCAPool.Namespace: {
-							FieldSelector: fields.OneTermEqualSelector("metadata.name", egressMITMCAPool.Name),
-						},
+	cacheOptions := cache.Options{}
+	if controllerSet.egressMITMTrust {
+		// EgressMITMTrustReconciler watches the Secret `egress-mitm-ca-pool`.
+		egressMITMCAPool := controllers.EgressMITMCAPoolRef()
+		cacheOptions.ByObject = map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Namespaces: map[string]cache.Config{
+					egressMITMCAPool.Namespace: {
+						FieldSelector: fields.OneTermEqualSelector("metadata.name", egressMITMCAPool.Name),
 					},
 				},
 			},
-		},
+		}
+	}
+	mgr, err := ctrl.NewManager(k8sConfig, ctrl.Options{
+		Scheme:                 scheme,
+		Cache:                  cacheOptions,
+		HealthProbeBindAddress: ":8081",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	if err = (&controllers.WorkerPoolReconciler{
-		Client:                   mgr.GetClient(),
-		Scheme:                   mgr.GetScheme(),
-		OTelEndpoint:             *otelEndpoint,
-		OTelMetricExportInterval: *otelMetricExportInterval,
-		OTelMetricExportTimeout:  *otelMetricExportTimeout,
-		OTelTracesSampler:        *otelTracesSampler,
-		OTelTracesSamplerArg:     *otelTracesSamplerArg,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "WorkerPool")
-		os.Exit(1)
+	if controllerSet.workerPools {
+		if err = (&controllers.WorkerPoolReconciler{
+			Client:                   mgr.GetClient(),
+			Scheme:                   mgr.GetScheme(),
+			OTelEndpoint:             *otelEndpoint,
+			OTelMetricExportInterval: *otelMetricExportInterval,
+			OTelMetricExportTimeout:  *otelMetricExportTimeout,
+			OTelTracesSampler:        *otelTracesSampler,
+			OTelTracesSamplerArg:     *otelTracesSamplerArg,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "WorkerPool")
+			os.Exit(1)
+		}
 	}
 
-	if err = (&controllers.NetworkPolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "NetPolicy")
-		os.Exit(1)
+	if controllerSet.networkPolicies {
+		if err = (&controllers.NetworkPolicyReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "NetPolicy")
+			os.Exit(1)
+		}
 	}
 
-	if err = (&controllers.ActorTemplateReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		AteClient: ateapiClient,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ActorTemplate")
-		os.Exit(1)
+	if controllerSet.actorTemplates {
+		if err = (&controllers.ActorTemplateReconciler{
+			Client:       mgr.GetClient(),
+			Scheme:       mgr.GetScheme(),
+			AteClient:    ateapiClient,
+			ExternalOnly: controllerSet.externalTemplates,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ActorTemplate")
+			os.Exit(1)
+		}
 	}
 
-	if err = (&controllers.EgressMITMTrustReconciler{
-		Client: mgr.GetClient(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "EgressMITMTrust")
-		os.Exit(1)
+	if controllerSet.egressMITMTrust {
+		if err = (&controllers.EgressMITMTrustReconciler{
+			Client: mgr.GetClient(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "EgressMITMTrust")
+			os.Exit(1)
+		}
 	}
 
 	//+kubebuilder:scaffold:builder

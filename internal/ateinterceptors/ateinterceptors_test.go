@@ -25,7 +25,8 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/pkg/proto/ateletpb"
+	"github.com/agent-substrate/substrate/pkg/proto/externalproviderpb"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -359,5 +360,37 @@ func TestServerUnaryInterceptorRedactsEnvFromProtoRequestLogs(t *testing.T) {
 	}
 	if len(req.GetSpec().GetContainers()[0].GetEnv()) != 1 {
 		t.Fatalf("interceptor mutated original request")
+	}
+}
+
+func TestServerUnaryInterceptorHonorsProtoDebugRedact(t *testing.T) {
+	var log bytes.Buffer
+	origLogger := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(origLogger)
+	})
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, nil)))
+
+	const secret = "single-use-enrollment-secret"
+	response := &externalproviderpb.CreateExternalProviderEnrollmentResponse{
+		EnrollmentUid:        "enrollment-uid",
+		EnrollmentCredential: []byte(secret),
+	}
+	_, err := ServerUnaryInterceptor(context.Background(), &externalproviderpb.CreateExternalProviderEnrollmentRequest{}, &grpc.UnaryServerInfo{FullMethod: externalproviderpb.ExternalProviderAdmin_CreateExternalProviderEnrollment_FullMethodName}, func(context.Context, interface{}) (interface{}, error) {
+		return response, nil
+	})
+	if err != nil {
+		t.Fatalf("ServerUnaryInterceptor failed: %v", err)
+	}
+
+	gotLog := log.String()
+	if strings.Contains(gotLog, secret) || strings.Contains(gotLog, "c2luZ2xlLXVzZS1lbnJvbGxtZW50LXNlY3JldA") {
+		t.Fatalf("log contains debug-redacted credential: %s", gotLog)
+	}
+	if !strings.Contains(gotLog, "enrollment-uid") {
+		t.Fatalf("log omits non-secret enrollment UID: %s", gotLog)
+	}
+	if got := string(response.GetEnrollmentCredential()); got != secret {
+		t.Fatalf("interceptor mutated response credential = %q", got)
 	}
 }

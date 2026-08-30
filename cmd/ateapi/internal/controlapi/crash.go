@@ -134,6 +134,19 @@ func releaseWorker(ctx context.Context, st crashActorStore, actor *ateapipb.Acto
 	}
 
 	sandboxClass := worker.GetSandboxClass()
+	// A Worker incarnation pin is mandatory for ExternalSlot release. Legacy
+	// KubernetesPod assignments remain readable, while a missing external pin
+	// returns an error so crashActor cannot clear the only retryable reference.
+	if err := validateAssignmentWorkerIncarnation(assignment, worker); err != nil {
+		if effectiveWorkerProvider(assignment.GetProvider()) == ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT &&
+			assignment.GetWorkerResourceUid() == "" {
+			return sandboxClass, fmt.Errorf("external Worker assignment has no resource UID: %w", err)
+		}
+		slog.WarnContext(ctx, "Worker resource incarnation changed, skipping release",
+			slog.String("worker", workerName),
+			slog.Any("err", err))
+		return sandboxClass, nil
+	}
 	wass := worker.GetStatus().GetAssignment()
 	if wass == nil {
 		slog.WarnContext(ctx, "Worker's assignment is already nil, skipping release", slog.String("worker", workerName))

@@ -24,8 +24,16 @@ import (
 
 // AuthenticationConfig configures JWT authentication for ateapi.
 type AuthenticationConfig struct {
-	ActorIdentityJWTProvider string              `json:"actorIdentityJWTProvider"`
-	JWTProviders             []JWTProviderConfig `json:"jwtProviders"`
+	ActorIdentityJWTProvider         string               `json:"actorIdentityJWTProvider"`
+	ExternalProviderEnrollmentAdmins []JWTPrincipalConfig `json:"externalProviderEnrollmentAdmins,omitempty"`
+	JWTProviders                     []JWTProviderConfig  `json:"jwtProviders"`
+}
+
+// JWTPrincipalConfig grants one narrowly scoped operation to exact subjects
+// authenticated by a named JWT provider. An empty list grants nobody.
+type JWTPrincipalConfig struct {
+	Provider string   `json:"provider"`
+	Subjects []string `json:"subjects"`
 }
 
 // JWTProviderConfig configures one trusted OIDC issuer.
@@ -33,6 +41,8 @@ type JWTProviderConfig struct {
 	Name                     string   `json:"name"`
 	Issuer                   string   `json:"issuer"`
 	Audiences                []string `json:"audiences"`
+	DiscoveryURL             string   `json:"discoveryURL,omitempty"`
+	JWKSURL                  string   `json:"jwksURL,omitempty"`
 	CertificateAuthorityFile string   `json:"certificateAuthorityFile,omitempty"`
 	DiscoveryTokenFile       string   `json:"discoveryTokenFile,omitempty"`
 }
@@ -73,9 +83,8 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 			return fmt.Errorf("duplicate JWT provider name %q", p.Name)
 		}
 		names[p.Name] = true
-		issuerURL, err := url.Parse(p.Issuer)
-		if err != nil || issuerURL.Scheme != "https" || issuerURL.Host == "" || issuerURL.RawQuery != "" || issuerURL.Fragment != "" {
-			return fmt.Errorf("%s.issuer must be an HTTPS URL without query or fragment", field)
+		if err := validateHTTPSURL(p.Issuer); err != nil {
+			return fmt.Errorf("%s.issuer must be an absolute HTTPS URL without userinfo, query, or fragment", field)
 		}
 		if issuers[p.Issuer] {
 			return fmt.Errorf("duplicate JWT provider issuer %q", p.Issuer)
@@ -89,12 +98,52 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 				return fmt.Errorf("%s.audiences must not contain an empty audience", field)
 			}
 		}
+		if (p.DiscoveryURL == "") != (p.JWKSURL == "") {
+			return fmt.Errorf("%s.discoveryURL and %s.jwksURL must be configured together", field, field)
+		}
+		if p.DiscoveryURL != "" {
+			if err := validateHTTPSURL(p.DiscoveryURL); err != nil {
+				return fmt.Errorf("%s.discoveryURL must be an absolute HTTPS URL without userinfo, query, or fragment", field)
+			}
+			if err := validateHTTPSURL(p.JWKSURL); err != nil {
+				return fmt.Errorf("%s.jwksURL must be an absolute HTTPS URL without userinfo, query, or fragment", field)
+			}
+		}
 	}
 	if cfg.ActorIdentityJWTProvider == "" {
 		return fmt.Errorf("actorIdentityJWTProvider is required")
 	}
 	if !names[cfg.ActorIdentityJWTProvider] {
 		return fmt.Errorf("actorIdentityJWTProvider %q does not name a JWT provider", cfg.ActorIdentityJWTProvider)
+	}
+
+	principals := make(map[string]bool)
+	for i, admin := range cfg.ExternalProviderEnrollmentAdmins {
+		field := fmt.Sprintf("externalProviderEnrollmentAdmins[%d]", i)
+		if !names[admin.Provider] {
+			return fmt.Errorf("%s.provider %q does not name a JWT provider", field, admin.Provider)
+		}
+		if len(admin.Subjects) == 0 {
+			return fmt.Errorf("%s.subjects must contain at least one subject", field)
+		}
+		for j, subject := range admin.Subjects {
+			if subject == "" {
+				return fmt.Errorf("%s.subjects[%d] must not be empty", field, j)
+			}
+			principal := admin.Provider + "\x00" + subject
+			if principals[principal] {
+				return fmt.Errorf("duplicate external provider enrollment admin subject %q for provider %q", subject, admin.Provider)
+			}
+			principals[principal] = true
+		}
+	}
+	return nil
+}
+
+func validateHTTPSURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("invalid HTTPS URL")
 	}
 	return nil
 }

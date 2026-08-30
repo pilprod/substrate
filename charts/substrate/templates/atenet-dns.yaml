@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */}}
 
+{{- if ne (.Values.profile | default "standard") "external-control-plane-only" }}
 # atenet-dns
 apiVersion: v1
 kind: ServiceAccount
@@ -22,6 +23,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: dns
+{{ if .Values.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -73,6 +75,7 @@ roleRef:
   kind: Role
   name: {{ include "substrate.fullname" (list "atenet-dns" .) }}
   apiGroup: rbac.authorization.k8s.io
+{{ end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -185,3 +188,4 @@ spec:
   - name: dns-tcp
     port: 53
     protocol: TCP
+{{- end }}

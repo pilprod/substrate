@@ -606,6 +606,119 @@ func Validate_DeleteAtespaceRequest(
 	return errs
 }
 
+// Validate_ExternalSlotIdentity validates an instance of ExternalSlotIdentity according
+// to declarative validation rules in the API schema.
+func Validate_ExternalSlotIdentity(
+	ctx context.Context, op operation.Operation, fldPath *field.Path,
+	obj, oldObj *ateapipb.ExternalSlotIdentity) (errs field.ErrorList) {
+
+	{ // field ateapipb.ExternalSlotIdentity.ExecutionIdentity
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// custom validation
+			if e := ValidateCustom_ExternalSlotIdentity_ExecutionIdentity(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			if e := validate.MaxLength(ctx, op, fldPath, obj, oldObj, 253); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.ExternalSlotIdentity) *string {
+				return &oldObj.ExecutionIdentity
+			})
+		errs = append(errs, fn(fldPath.Child("execution_identity"), &obj.ExecutionIdentity, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.ExternalSlotIdentity.LocalityIdentity
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// custom validation
+			if e := ValidateCustom_ExternalSlotIdentity_LocalityIdentity(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			if e := validate.MaxLength(ctx, op, fldPath, obj, oldObj, 253); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.ExternalSlotIdentity) *string {
+				return &oldObj.LocalityIdentity
+			})
+		errs = append(errs, fn(fldPath.Child("locality_identity"), &obj.LocalityIdentity, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.ExternalSlotIdentity.OwnerAtespace
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.ShortName(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.ExternalSlotIdentity) *string {
+				return &oldObj.OwnerAtespace
+			})
+		errs = append(errs, fn(fldPath.Child("owner_atespace"), &obj.OwnerAtespace, oldVal, oldObj != nil)...)
+	}
+
+	return errs
+}
+
 // Validate_GetAtespaceRequest validates an instance of GetAtespaceRequest according
 // to declarative validation rules in the API schema.
 func Validate_GetAtespaceRequest(
@@ -1141,11 +1254,68 @@ func Validate_UpdateActorRequest(
 	return errs
 }
 
+// Validate_Worker validates an instance of Worker according
+// to declarative validation rules in the API schema.
+func Validate_Worker(
+	ctx context.Context, op operation.Operation, fldPath *field.Path,
+	obj, oldObj *ateapipb.Worker) (errs field.ErrorList) {
+
+	// field ateapipb.Worker.Metadata has no validation
+	// field ateapipb.Worker.WorkerNamespace has no validation
+	// field ateapipb.Worker.WorkerPool has no validation
+	// field ateapipb.Worker.WorkerPod has no validation
+	// field ateapipb.Worker.WorkerPodUid has no validation
+	// field ateapipb.Worker.NodeName has no validation
+	// field ateapipb.Worker.Ip has no validation
+	// field ateapipb.Worker.SandboxClass has no validation
+	// field ateapipb.Worker.Labels has no validation
+	// field ateapipb.Worker.Capacity has no validation
+	// field ateapipb.Worker.Status has no validation
+	// field ateapipb.Worker.Provider has no validation
+
+	{ // field ateapipb.Worker.ExternalSlot
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.ExternalSlotIdentity,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_ExternalSlotIdentity(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.Worker) *ateapipb.ExternalSlotIdentity {
+				return oldObj.ExternalSlot
+			})
+		errs = append(errs, fn(fldPath.Child("external_slot"), obj.ExternalSlot, oldVal, oldObj != nil)...)
+	}
+
+	return errs
+}
+
 // Validate_WorkerAssignment validates an instance of WorkerAssignment according
 // to declarative validation rules in the API schema.
 func Validate_WorkerAssignment(
 	ctx context.Context, op operation.Operation, fldPath *field.Path,
 	obj, oldObj *ateapipb.WorkerAssignment) (errs field.ErrorList) {
+
+	// custom validation
+	if e := ValidateCustom_WorkerAssignment(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+		errs = append(errs, e...)
+	}
 
 	{ // field ateapipb.WorkerAssignment.Worker
 		fn := func(
@@ -1274,8 +1444,7 @@ func Validate_WorkerAssignment(
 			}
 			// call field-attached validations
 			earlyReturn := false
-			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
-				errs = append(errs, e...)
+			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
 				earlyReturn = true
 			}
 			if earlyReturn {
@@ -1306,8 +1475,7 @@ func Validate_WorkerAssignment(
 			}
 			// call field-attached validations
 			earlyReturn := false
-			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
-				errs = append(errs, e...)
+			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
 				earlyReturn = true
 			}
 			if earlyReturn {
@@ -1338,8 +1506,7 @@ func Validate_WorkerAssignment(
 			}
 			// call field-attached validations
 			earlyReturn := false
-			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
-				errs = append(errs, e...)
+			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
 				earlyReturn = true
 			}
 			if earlyReturn {
@@ -1356,6 +1523,69 @@ func Validate_WorkerAssignment(
 				return &oldObj.WorkerPodIp
 			})
 		errs = append(errs, fn(fldPath.Child("worker_pod_ip"), &obj.WorkerPodIp, oldVal, oldObj != nil)...)
+	}
+
+	// field ateapipb.WorkerAssignment.Provider has no validation
+
+	{ // field ateapipb.WorkerAssignment.ExternalSlot
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.ExternalSlotIdentity,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_ExternalSlotIdentity(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.WorkerAssignment) *ateapipb.ExternalSlotIdentity {
+				return oldObj.ExternalSlot
+			})
+		errs = append(errs, fn(fldPath.Child("external_slot"), obj.ExternalSlot, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.WorkerAssignment.WorkerResourceUid
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.UUID(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.WorkerAssignment) *string {
+				return &oldObj.WorkerResourceUid
+			})
+		errs = append(errs, fn(fldPath.Child("worker_resource_uid"), &obj.WorkerResourceUid, oldVal, oldObj != nil)...)
 	}
 
 	return errs

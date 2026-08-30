@@ -25,8 +25,19 @@ import (
 	"time"
 )
 
+// EndpointOverrides routes discovery and JWKS requests independently of the
+// issuer URL. Both fields are either set together or left empty by validated
+// authentication configuration.
+type EndpointOverrides struct {
+	DiscoveryURL string
+	JWKSURL      string
+}
+
 // NewHTTPClient returns a client for OIDC discovery and JWKS requests.
-func NewHTTPClient(issuer, certificateAuthorityFile, discoveryTokenFile string) (*http.Client, error) {
+func NewHTTPClient(issuer string, overrides EndpointOverrides, certificateAuthorityFile, discoveryTokenFile string) (*http.Client, error) {
+	if err := overrides.validate(); err != nil {
+		return nil, err
+	}
 	if discoveryTokenFile != "" && certificateAuthorityFile == "" {
 		return nil, fmt.Errorf("discovery token file requires a certificate authority file")
 	}
@@ -44,22 +55,56 @@ func NewHTTPClient(issuer, certificateAuthorityFile, discoveryTokenFile string) 
 	}
 	var roundTripper http.RoundTripper = transport
 	if discoveryTokenFile != "" {
-		roundTripper = &issuerDiscoveryTransport{base: transport, tokenFile: discoveryTokenFile, issuer: issuer}
+		roundTripper = &issuerDiscoveryTransport{
+			base:         transport,
+			tokenFile:    discoveryTokenFile,
+			issuer:       issuer,
+			overrideURLs: []string{overrides.DiscoveryURL, overrides.JWKSURL},
+		}
 	}
 	return &http.Client{Timeout: 10 * time.Second, Transport: roundTripper}, nil
 }
 
+func (o EndpointOverrides) validate() error {
+	if (o.DiscoveryURL == "") != (o.JWKSURL == "") {
+		return fmt.Errorf("discovery URL and JWKS URL overrides must be configured together")
+	}
+	if o.DiscoveryURL == "" {
+		return nil
+	}
+	if err := validateOverrideURL("discovery URL", o.DiscoveryURL); err != nil {
+		return err
+	}
+	if err := validateOverrideURL("JWKS URL", o.JWKSURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateOverrideURL(name, rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("%s override must be an absolute HTTPS URL without userinfo, query, or fragment", name)
+	}
+	return nil
+}
+
 // issuerDiscoveryTransport injects a bearer token for requests within the
-// configured issuer and Kubernetes' standard JWKS path. Reads the token file
-// on every request so rotation is handled automatically.
+// configured issuer or at an exact configured override endpoint. It reads the
+// token file on every request so rotation is handled automatically.
 type issuerDiscoveryTransport struct {
-	base      http.RoundTripper
-	tokenFile string
-	issuer    string
+	base         http.RoundTripper
+	tokenFile    string
+	issuer       string
+	overrideURLs []string
 }
 
 func (t *issuerDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if issuerScopedURL(req.URL.String(), t.issuer) || isKubernetesJWKSURL(req.URL.String()) {
+	// A redirect can copy an Authorization header from the prior request. Clone
+	// every request and remove it before applying the endpoint allowlist.
+	req = req.Clone(req.Context())
+	req.Header.Del("Authorization")
+	if issuerScopedURL(req.URL.String(), t.issuer) || exactConfiguredURL(req.URL.String(), t.overrideURLs) {
 		token, err := os.ReadFile(t.tokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("read discovery token file: %w", err)
@@ -68,7 +113,6 @@ func (t *issuerDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response,
 		if trimmed == "" {
 			return nil, fmt.Errorf("discovery token file %q is empty", t.tokenFile)
 		}
-		req = req.Clone(req.Context())
 		req.Header.Set("Authorization", "Bearer "+trimmed)
 	}
 	return t.base.RoundTrip(req)
@@ -97,10 +141,26 @@ func issuerScopedURL(rawURL, issuer string) bool {
 	return requestPath == issuerPath || strings.HasPrefix(requestPath, issuerPath+"/")
 }
 
-func isKubernetesJWKSURL(rawURL string) bool {
+func exactConfiguredURL(rawURL string, configuredURLs []string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Scheme, "https") && u.EscapedPath() == "/openid/v1/jwks"
+	for _, configuredURL := range configuredURLs {
+		if configuredURL == "" {
+			continue
+		}
+		expected, err := url.Parse(configuredURL)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(u.Scheme, expected.Scheme) &&
+			strings.EqualFold(u.Host, expected.Host) &&
+			u.EscapedPath() == expected.EscapedPath() &&
+			u.RawQuery == expected.RawQuery &&
+			u.ForceQuery == expected.ForceQuery {
+			return true
+		}
+	}
+	return false
 }

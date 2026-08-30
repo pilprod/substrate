@@ -50,6 +50,7 @@ func (s *RPCService) CreateActorTemplate(ctx context.Context, req *ateapipb.Crea
 		SandboxConfig:   in.GetSandboxConfig(),
 		Resources:       in.GetResources(),
 		Status:          &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL},
+		WorkerProvider:  effectiveWorkerProvider(in.GetWorkerProvider()),
 	}
 	stored, err := s.impl.CreateActorTemplate(ctx, template)
 	if err != nil {
@@ -98,6 +99,21 @@ func validateCreateActorTemplateRequest(req *ateapipb.CreateActorTemplateRequest
 
 	if sel := template.GetWorkerSelector(); sel != nil {
 		errs = append(errs, validateSelector(sel, templatePath.Child("worker_selector"))...)
+	}
+
+	switch template.GetWorkerProvider() {
+	case ateapipb.WorkerProvider_WORKER_PROVIDER_UNSPECIFIED,
+		ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD,
+		ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT:
+	default:
+		errs = append(errs, field.NotSupported(
+			templatePath.Child("worker_provider"),
+			template.GetWorkerProvider(),
+			[]string{
+				ateapipb.WorkerProvider_WORKER_PROVIDER_KUBERNETES_POD.String(),
+				ateapipb.WorkerProvider_WORKER_PROVIDER_EXTERNAL_SLOT.String(),
+			},
+		))
 	}
 
 	containersPath := templatePath.Child("containers")
